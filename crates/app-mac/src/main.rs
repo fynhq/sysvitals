@@ -643,6 +643,10 @@ mod macos {
             item.setLength(ceil);
         });
         DRAW_SIGNATURE.with(|s| *s.borrow_mut() = sig);
+        // Re-assert the composed highlight after mounting a new image: the
+        // value update path replaces the button image every few seconds, and
+        // AppKit can drop the cell highlight along with the image swap.
+        refresh_status_highlight();
     }
 
     /// Sample metrics, record the history row, and update the indicator.
