@@ -23,15 +23,12 @@ mod macos {
     use chrono::Local;
     use objc2::rc::Retained;
     use objc2::runtime::{AnyObject, Bool};
-    use objc2::{
-        define_class, msg_send, sel, AnyThread, ClassType, MainThreadMarker, MainThreadOnly,
-    };
+    use objc2::{define_class, msg_send, sel, ClassType, MainThreadMarker, MainThreadOnly};
     use objc2_app_kit::{
         NSAppearanceCustomization, NSApplication, NSApplicationActivationPolicy,
-        NSAttributedStringNSStringDrawing, NSBezierPath, NSCellImagePosition, NSColor, NSEventMask,
-        NSEventType, NSFont, NSFontAttributeName, NSFontWeightSemibold, NSImage, NSImageScaling,
-        NSMenu, NSMenuItem, NSScreen, NSStatusBar, NSStatusItem, NSTrackingArea,
-        NSTrackingAreaOptions, NSVariableStatusItemLength, NSView,
+        NSAttributedStringNSStringDrawing, NSCellImagePosition, NSEventMask, NSEventType, NSFont,
+        NSFontAttributeName, NSFontWeightSemibold, NSImage, NSImageScaling, NSMenu, NSMenuItem,
+        NSScreen, NSStatusBar, NSStatusItem, NSVariableStatusItemLength, NSView,
     };
     use objc2_foundation::{
         NSAttributedString, NSDictionary, NSObject, NSObjectProtocol, NSPoint, NSRect, NSRunLoop,
@@ -48,21 +45,11 @@ mod macos {
     /// reduces it further only if the two line boxes still exceed the bar.
     const DUAL_ROW_FONT_FACTOR: f64 = 0.8;
 
-    /// Symmetric horizontal inset around the drawn content, in points. The
-    /// highlight backdrop spans the whole image, so this is what keeps the
-    /// pill from hugging the glyphs on the left and right.
-    const CONTENT_PAD_X: f64 = 6.0;
-
     /// Conservative upper bound for one rate cell. `format_rate` keeps the
     /// numeric field at most four characters per unit tier (including the
     /// 1024 rounding), and "M" is the widest tier letter, so measuring this
     /// string reserves every possible rate value for the current font.
     const RATE_RESERVE: &str = "8888 M/s";
-
-    /// Alpha of the active-status rounded backdrop inside the template image.
-    /// The template tint supplies the light/dark color; only the mask opacity
-    /// is fixed here.
-    const STATUS_HIGHLIGHT_ALPHA: f64 = 0.16;
 
     // ------------------------------------------------------------- diagnostics
 
@@ -206,27 +193,11 @@ mod macos {
         /// menu-bar thickness after the automatic font shrink.
         static DUAL_OVERFLOW_LOGGED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 
-        // --- Status-button highlight state --------------------------------
-        // AppKit's native highlight is otherwise tied to the pointer press:
-        // it clears on mouse-up, which reads as a brief flash instead of the
-        // persistent highlight system menu-bar extras show while their panel
-        // or menu is open. These three flags feed one refresh function.
-        static HOVERING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-        static HISTORY_POPUP_OPEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-        static CONTEXT_MENU_OPEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-        /// Highlight request from `refresh_status_highlight`; drives which of
-        /// the two pre-rendered template images is mounted.
-        static HIGHLIGHT_ON: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-        static STATUS_IMAGES: RefCell<Option<StatusImages>> = const { RefCell::new(None) };
-        /// Variant currently mounted; `None` forces a remount after the images
-        /// are rebuilt. Avoids replacing the image every watcher tick.
-        static APPLIED_HIGHLIGHT: std::cell::Cell<Option<bool>> =
-            const { std::cell::Cell::new(None) };
-        /// Polls the history child while the popup is open, so the highlight
-        /// clears promptly when it closes by blur/Esc rather than waiting for
-        /// the next sample tick (which can be 3s away).
-        static HISTORY_WATCH_TIMER: RefCell<Option<Retained<NSTimer>>> =
-            const { RefCell::new(None) };
+        /// The one template image currently mounted. There is deliberately no
+        /// custom hover/press backdrop: the indicator relies on AppKit's own
+        /// momentary press feedback, while spacing between menu-bar items is
+        /// owned by the status bar, not baked into the image.
+        static STATUS_IMAGE: RefCell<Option<StatusImage>> = const { RefCell::new(None) };
     }
 
     /// Screen rectangle (left, top, right, bottom) in GPUI's global top-left,
@@ -411,14 +382,11 @@ mod macos {
         y: f64,
     }
 
-    /// The two template variants for the current layout: a transparent
-    /// background for idle state and a rounded translucent background for the
-    /// active/hover state. Template rendering tints the alpha mask with the
-    /// menu-bar foreground color, so the highlight follows light/dark
-    /// automatically (black translucent in light, white translucent in dark).
-    struct StatusImages {
-        normal: Retained<NSImage>,
-        highlighted: Retained<NSImage>,
+    /// The template image currently mounted and the exact status-item width.
+    /// Template rendering tints the glyphs from the menu-bar appearance, so
+    /// light/dark inversion stays automatic.
+    struct StatusImage {
+        image: Retained<NSImage>,
         width: f64,
     }
 
@@ -498,13 +466,37 @@ mod macos {
     /// reach "100%"; network rates reserve the widest four-character numeric
     /// field across all unit tiers (see `RATE_RESERVE`).
     fn metric_reserve(metric: Metric, cfg: &Config, font: &Retained<NSFont>) -> f64 {
-        let (prefix, value) = match metric {
-            Metric::Cpu => (&cfg.display.prefix.cpu, "100%"),
-            Metric::Mem => (&cfg.display.prefix.mem, "100%"),
-            Metric::Up => (&cfg.display.prefix.up, RATE_RESERVE),
-            Metric::Down => (&cfg.display.prefix.down, RATE_RESERVE),
+        let value = match metric {
+            Metric::Cpu | Metric::Mem => "100%",
+            Metric::Up | Metric::Down => RATE_RESERVE,
         };
-        make_run(&join_prefix(prefix, value), font).1
+        make_run(&join_prefix(metric_prefix(metric, cfg), value), font).1
+    }
+
+    /// Configured label prefix for one metric.
+    fn metric_prefix(metric: Metric, cfg: &Config) -> &str {
+        match metric {
+            Metric::Cpu => &cfg.display.prefix.cpu,
+            Metric::Mem => &cfg.display.prefix.mem,
+            Metric::Up => &cfg.display.prefix.up,
+            Metric::Down => &cfg.display.prefix.down,
+        }
+    }
+
+    /// Split a formatted cell into its configured label and value. The
+    /// formatter joins them with one space; drawing the two runs separately
+    /// lets the label stay at the slot start while the value is pinned to the
+    /// slot end, so the indicator's outer edges hug its content. A cell that
+    /// does not start with the configured prefix (unexpected formatting) is
+    /// returned whole as the value.
+    fn split_cell(text: &str, prefix: &str) -> (String, String) {
+        let text = text.trim_end();
+        if !prefix.is_empty() {
+            if let Some(rest) = text.strip_prefix(prefix) {
+                return (prefix.to_string(), rest.trim_start().to_string());
+            }
+        }
+        (String::new(), text.to_string())
     }
 
     /// Widest reserved cell in a dual-row column, measured with the final
@@ -536,8 +528,10 @@ mod macos {
     /// Slot widths come from the format's upper bounds rather than the
     /// current sample: a value gaining or losing a digit only moves inside
     /// its own slot, so a dual-row column origin and the status item's length
-    /// stay fixed between samples. A symmetric content inset gives the
-    /// hover/press backdrop breathing room instead of hugging the glyphs.
+    /// stay fixed between samples. There is no baked outer inset and no
+    /// custom hover/press background: content meets the item's outer edges so
+    /// NSStatusBar can apply its normal inter-item spacing, as native extras
+    /// do.
     ///
     /// Skips every action when the render signature (layout parameters plus
     /// all texts) is unchanged: the mounted image simply stays, so an
@@ -662,34 +656,50 @@ mod macos {
                 );
             }
             let y0 = ((img_h - block_h) / 2.0).max(0.0);
-            // Fixed slots: the reserved widths are format upper bounds, so
-            // the right column starts at the same x on every sample. The
-            // actual widths are only a safety net for an unexpected value
-            // wider than the reservation.
+            // Fixed slots keep every origin stable, but the image has no
+            // baked outer padding: the left cell starts at x = 0 and the
+            // right value ends at the image's right edge. Inter-item spacing
+            // is left to NSStatusBar, matching native menu-bar extras. Within
+            // the right column the label stays at the column's fixed x while
+            // the value is right-aligned, so labels remain aligned and only
+            // the numerals' left edge moves inside their slot.
             let left_slot = column_reserve(&left_metrics, cfg, &font).max(left_w);
             let right_slot = column_reserve(&right_metrics, cfg, &font).max(right_w);
             let has_right = runs.iter().any(|r| r.ra.is_some());
-            let left_x = CONTENT_PAD_X;
-            let right_x = left_x + left_slot + spacing;
+            width = left_slot + (if has_right { spacing + right_slot } else { 0.0 });
+            let right_x = left_slot + spacing;
             for (i, r) in runs.iter().enumerate() {
                 let y = y0 + line_step * i as f64;
                 items.push(DrawItem {
                     attr: r.la.clone(),
-                    x: left_x,
+                    x: 0.0,
                     y,
                 });
-                if let Some(ra) = &r.ra {
-                    items.push(DrawItem {
-                        attr: ra.clone(),
-                        x: right_x,
-                        y,
-                    });
+                if r.ra.is_some() {
+                    let line = &row.lines[i];
+                    let prefix = right_metrics
+                        .get(i)
+                        .map(|m| metric_prefix(*m, cfg))
+                        .unwrap_or("");
+                    let (label, value) = split_cell(&line.right, prefix);
+                    if !label.is_empty() {
+                        let (attr, _, _) = make_run(&label, &font);
+                        items.push(DrawItem {
+                            attr,
+                            x: right_x,
+                            y,
+                        });
+                    }
+                    if !value.is_empty() {
+                        let (attr, value_w, _) = make_run(&value, &font);
+                        items.push(DrawItem {
+                            attr,
+                            x: width - value_w,
+                            y,
+                        });
+                    }
                 }
             }
-            width = left_x
-                + left_slot
-                + (if has_right { spacing + right_slot } else { 0.0 })
-                + CONTENT_PAD_X;
         } else {
             // Single row: each metric gets its own fixed slot, so a digit
             // change in one metric cannot push the following metrics around;
@@ -723,16 +733,26 @@ mod macos {
                     .map(|p| make_run(p.trim_end(), &font).1)
                     .collect();
             }
-            let mut x = CONTENT_PAD_X;
+            let count = parts.len();
+            let mut slot_start = 0.0;
             for (i, part) in parts.into_iter().enumerate() {
                 let (attr, w, h) = make_run(part.trim_end(), &font);
                 texts.push(part);
                 let slot = slots.get(i).copied().unwrap_or(w).max(w);
+                // First cell hugs the left edge; the last cell hugs the right
+                // edge so the item's visible bounds match its content and the
+                // system can apply its normal inter-item spacing. Middle
+                // slots stay left-aligned on their fixed origins.
+                let x = if count > 1 && i + 1 == count {
+                    slot_start + slot - w
+                } else {
+                    slot_start
+                };
                 let y = ((img_h - h) / 2.0).max(0.0);
                 items.push(DrawItem { attr, x, y });
-                x += slot + spacing;
+                slot_start += slot + spacing;
             }
-            width = x - spacing + CONTENT_PAD_X;
+            width = slot_start - spacing;
         }
         if items.is_empty() || width <= 0.0 {
             return;
@@ -747,67 +767,31 @@ mod macos {
             return;
         }
 
-        // --- build the template images -------------------------------------
+        // --- build the template image --------------------------------------
         // Flipped drawing context: origin top-left, y downward — the space the
-        // layout above was computed in. The handlers capture the run list, so
-        // rasterization never touches thread-local state.
-        //
-        // Two variants are pre-rendered: a transparent-background idle image
-        // and an active image with a rounded translucent background. Template
-        // rendering tints the alpha mask with the menu-bar foreground color,
-        // so the background is a black wash in light mode and a white wash in
-        // dark mode — the same direction as a native status-item highlight.
-        // The content inset leaves the backdrop visible around the glyphs.
-        let normal_items = items.clone();
-        let normal_block = block2::RcBlock::new(move |_rect: NSRect| -> Bool {
-            for it in &normal_items {
+        // layout above was computed in. The handler captures the run list, so
+        // rasterization never touches thread-local state. There is exactly one
+        // transparent image: no custom hover/press background is baked in;
+        // AppKit tints the glyphs for the menu-bar appearance.
+        let drawn_items = items.clone();
+        let draw_block = block2::RcBlock::new(move |_rect: NSRect| -> Bool {
+            for it in &drawn_items {
                 it.attr.drawAtPoint(NSPoint::new(it.x, it.y));
             }
             Bool::YES
         });
-        let normal = NSImage::imageWithSize_flipped_drawingHandler(
+        let image = NSImage::imageWithSize_flipped_drawingHandler(
             NSSize::new(width, img_h),
             true,
-            &normal_block,
+            &draw_block,
         );
-        normal.setTemplate(true);
+        image.setTemplate(true);
 
-        let highlight_items = items.clone();
-        let highlight_block = block2::RcBlock::new(move |_rect: NSRect| -> Bool {
-            let backdrop = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
-                NSRect::new(
-                    NSPoint::new(1.0, 1.0),
-                    NSSize::new((width - 2.0).max(1.0), (img_h - 2.0).max(1.0)),
-                ),
-                4.0,
-                4.0,
-            );
-            // Template images use the alpha channel as the mask; the RGB
-            // value is irrelevant, only 16% opacity matters.
-            NSColor::colorWithWhite_alpha(0.0, STATUS_HIGHLIGHT_ALPHA).set();
-            backdrop.fill();
-            for it in &highlight_items {
-                it.attr.drawAtPoint(NSPoint::new(it.x, it.y));
-            }
-            Bool::YES
+        STATUS_IMAGE.with(|slot| {
+            *slot.borrow_mut() = Some(StatusImage { image, width });
         });
-        let highlighted = NSImage::imageWithSize_flipped_drawingHandler(
-            NSSize::new(width, img_h),
-            true,
-            &highlight_block,
-        );
-        highlighted.setTemplate(true);
-
-        STATUS_IMAGES.with(|slot| {
-            *slot.borrow_mut() = Some(StatusImages {
-                normal,
-                highlighted,
-                width,
-            });
-        });
-        APPLIED_HIGHLIGHT.set(None);
         DRAW_SIGNATURE.with(|s| *s.borrow_mut() = sig);
-        refresh_status_highlight();
+        apply_status_image();
     }
 
     /// Sample metrics, record the history row, and update the indicator.
@@ -886,21 +870,14 @@ mod macos {
                 }
             }
         });
-        let history_exited = HISTORY_CHILD.with(|slot| {
+        HISTORY_CHILD.with(|slot| {
             let mut borrow = slot.borrow_mut();
             if let Some(child) = borrow.as_mut() {
                 if matches!(child.try_wait(), Ok(Some(_))) {
                     *borrow = None;
-                    return true;
                 }
             }
-            false
         });
-        if history_exited {
-            HISTORY_POPUP_OPEN.set(false);
-            stop_history_watch();
-            refresh_status_highlight();
-        }
     }
 
     /// Terminate a child panel and reap it so no zombie remains.
@@ -998,11 +975,6 @@ mod macos {
         match cmd.spawn() {
             Ok(child) => {
                 HISTORY_CHILD.with(|slot| *slot.borrow_mut() = Some(child));
-                // Keep the status item highlighted while the popup is open,
-                // like a system menu-bar extra with its panel showing.
-                HISTORY_POPUP_OPEN.set(true);
-                refresh_status_highlight();
-                start_history_watch();
             }
             Err(e) => log_event("WARN", &format!("launch_history: spawn failed: {e}")),
         }
@@ -1014,59 +986,7 @@ mod macos {
     /// popup was closed; `false` when nothing was running (or it had already
     /// exited, which is reaped here so the slot is free for the next open).
     fn close_history() -> bool {
-        let closed = HISTORY_CHILD.with(|slot| terminate_child(slot, "history popup"));
-        // Clear even when no live child was found: it may have just exited on
-        // its own while the watcher was between ticks.
-        HISTORY_POPUP_OPEN.set(false);
-        stop_history_watch();
-        refresh_status_highlight();
-        closed
-    }
-
-    /// Poll the history child while its popup is open. The child exits on
-    /// blur/Esc on its own, and the sample tick may be seconds away; this
-    /// watcher clears the persistent status highlight within ~150 ms.
-    fn start_history_watch() {
-        stop_history_watch();
-        let block = block2::RcBlock::new(|_timer: std::ptr::NonNull<NSTimer>| {
-            if HISTORY_CHILD.with(|slot| child_alive(slot)) {
-                // Reassert while the popup is alive: AppKit clears the
-                // pressed state when the click tracking loop ends, so the
-                // initial highlight from the action alone lasts one frame.
-                refresh_status_highlight();
-                return;
-            }
-            HISTORY_POPUP_OPEN.set(false);
-            refresh_status_highlight();
-            stop_history_watch();
-        });
-        // SAFETY: the block captures no non-Send state and runs on the main
-        // run loop, same contract as the sample timer above.
-        let timer = unsafe { NSTimer::timerWithTimeInterval_repeats_block(0.15, true, &block) };
-        let run_loop = NSRunLoop::mainRunLoop();
-        // SAFETY: adding a live timer to the current main run loop; common
-        // modes keep it alive during menu/popup tracking loops.
-        unsafe { run_loop.addTimer_forMode(&timer, NSRunLoopCommonModes) };
-        HISTORY_WATCH_TIMER.with(|slot| {
-            if let Some(prev) = slot.borrow_mut().replace(timer) {
-                prev.invalidate();
-            }
-        });
-    }
-
-    fn stop_history_watch() {
-        HISTORY_WATCH_TIMER.with(|slot| {
-            if let Some(timer) = slot.borrow_mut().take() {
-                timer.invalidate();
-            }
-        });
-    }
-
-    /// Recompute the status button's native highlight from all sources:
-    /// pointer hover, an open history popup, or an open context menu.
-    fn refresh_status_highlight() {
-        let on = HOVERING.get() || HISTORY_POPUP_OPEN.get() || CONTEXT_MENU_OPEN.get();
-        set_button_highlight(on);
+        HISTORY_CHILD.with(|slot| terminate_child(slot, "history popup"))
     }
 
     /// Open Activity Monitor (macOS equivalent of Task Manager). `status()`
@@ -1181,14 +1101,7 @@ mod macos {
             // runs a nested tracking loop that returns once the menu closes.
             let view: &NSView = &button;
             let location = NSPoint::new(0.0, button.bounds().size.height);
-            // `popUpMenuPositioningItem` runs the nested menu tracking loop and
-            // returns once the menu closes, so the button can hold the native
-            // highlight for the whole menu session like a system status item.
-            CONTEXT_MENU_OPEN.set(true);
-            refresh_status_highlight();
             let _ = menu.popUpMenuPositioningItem_atLocation_inView(None, location, Some(view));
-            CONTEXT_MENU_OPEN.set(false);
-            refresh_status_highlight();
         });
     }
 
@@ -1257,89 +1170,44 @@ mod macos {
                 let mtm = mtm();
                 NSApplication::sharedApplication(mtm).terminate(None);
             }
-
-            // Tray-style focus background on hover. The status button already
-            // draws AppKit's native menu-bar highlight while it is being
-            // clicked (the "pressed" state), so this only adds the resting
-            // pointer-over state: an `NSTrackingArea` (installed in `run`)
-            // routes `mouseEntered:` / `mouseExited:` here, and `highlight:`
-            // renders the very same native highlight — template-image tinting
-            // and light/dark inversion are untouched because AppKit owns the
-            // draw. `ActiveAlways` keeps hover alive even when the app is not
-            // key, and `InVisibleRect` re-binds the area to the button's
-            // current bounds so the grow-only width changes need no re-add.
-            #[unsafe(method(mouseEntered:))]
-            fn mouse_entered(&self, _event: Option<&AnyObject>) {
-                HOVERING.set(true);
-                refresh_status_highlight();
-            }
-
-            #[unsafe(method(mouseExited:))]
-            fn mouse_exited(&self, _event: Option<&AnyObject>) {
-                HOVERING.set(false);
-                // An open popup or menu keeps the highlight on even after the
-                // pointer leaves, matching system menu-bar extras.
-                refresh_status_highlight();
-            }
         }
 
         unsafe impl NSObjectProtocol for ActionHandler {}
     );
 
-    /// Select the status item image variant for the composed highlight state.
-    /// AppKit's native `highlight:` state is not used: it is tied to a
-    /// tracking loop and does not render reliably from programmatic state.
-    fn set_button_highlight(on: bool) {
-        HIGHLIGHT_ON.set(on);
-        apply_status_image();
-    }
-
-    /// Mount the pre-rendered template variant (idle or active) and its width.
-    /// Both variants are built together by `render_indicator`, so switching
-    /// never allocates or re-lays out text.
+    /// Mount the current template image and its width. AppKit keeps its own
+    /// momentary press feedback; there is no custom hover/selected backdrop,
+    /// so this is a plain image refresh.
     fn apply_status_image() {
-        let on = HIGHLIGHT_ON.get();
-        if APPLIED_HIGHLIGHT.get() == Some(on) {
-            return;
-        }
         let mtm = mtm();
-        let applied = STATUS_IMAGES.with(|images| {
-            let images = images.borrow();
-            let Some(images) = images.as_ref() else {
-                return false;
-            };
-            let image = if on {
-                &images.highlighted
-            } else {
-                &images.normal
+        STATUS_IMAGE.with(|slot| {
+            let slot = slot.borrow();
+            let Some(stored) = slot.as_ref() else {
+                return;
             };
             STATUS_ITEM.with(|si| {
                 let si_borrow = si.borrow();
                 let Some(item) = si_borrow.as_ref() else {
-                    return false;
+                    return;
                 };
                 let Some(button) = item.button(mtm) else {
-                    return false;
+                    return;
                 };
                 // Title cleared so only the image renders; `ImageOnly` +
                 // `ScaleNone` keeps AppKit from rescaling the point layout.
                 button.setTitle(&NSString::from_str(""));
-                button.setImage(Some(image));
+                button.setImage(Some(&stored.image));
                 button.setImagePosition(NSCellImagePosition::ImageOnly);
                 button.setImageScaling(NSImageScaling::ScaleNone);
-                item.setLength(images.width);
+                item.setLength(stored.width);
                 // Call through `NSView` explicitly: `NSControl` also declares a
                 // deprecated zero-argument `setNeedsDisplay()`, which wins
                 // method resolution on the button and shadows the view method.
                 let view: &NSView = &button;
                 view.setNeedsDisplay(true);
                 view.displayIfNeeded();
-                true
-            })
+            });
         });
-        if applied {
-            APPLIED_HIGHLIGHT.set(Some(on));
-        }
     }
 
     impl ActionHandler {
@@ -1398,28 +1266,6 @@ mod macos {
             // mouse-up events (Apple's documented pattern for status items).
             let mask = NSEventMask::LeftMouseUp | NSEventMask::RightMouseUp;
             let _ = button.sendActionOn(mask);
-
-            // Hover tracking for the focus background (see `mouseEntered:`).
-            // `InVisibleRect` binds the area to the button's live bounds, so
-            // the grow-only width changes re-aim it without a re-add; the
-            // area is owned by the button, whose lifetime matches the status
-            // item's.
-            let options = NSTrackingAreaOptions::MouseEnteredAndExited
-                | NSTrackingAreaOptions::ActiveAlways
-                | NSTrackingAreaOptions::InVisibleRect;
-            // SAFETY: `owner` is the live ActionHandler (kept for the process
-            // lifetime below), and the rect is ignored because `InVisibleRect`
-            // re-binds it to the button's bounds at layout time.
-            let area = unsafe {
-                NSTrackingArea::initWithRect_options_owner_userInfo(
-                    NSTrackingArea::alloc(),
-                    NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(0.0, 0.0)),
-                    options,
-                    Some(&handler),
-                    None,
-                )
-            };
-            button.addTrackingArea(&area);
         }
 
         // Keep the handler alive for the process lifetime, addressable so the
