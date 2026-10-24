@@ -243,6 +243,15 @@ impl TimeRange {
             TimeRange::Month1 => t(lang, "chart.range.1mo"),
         }
     }
+
+    /// Whether the open popup should reload this range every few seconds.
+    /// 5 m and 1 h read a small tail of the raw table and stay live; 1 d and
+    /// 1 mo scan the whole retention window (the month aggregate is seconds
+    /// at the 30-day cap), so they load once on open/range switch and stay
+    /// static while open. Clicking the active range button reloads it.
+    fn auto_refresh(self) -> bool {
+        matches!(self, TimeRange::Min5 | TimeRange::Hour1)
+    }
 }
 
 /// A single timestamped sample pair for the merged chart: one fine bucket
@@ -531,7 +540,12 @@ impl HistoryView {
                 if this
                     .update(cx, |view: &mut HistoryView, cx| {
                         view.reload_config();
-                        view.load_data();
+                        // 1 d / 1 mo scan the whole retention window; keep
+                        // them static while open. The range button loads them
+                        // on switch (and re-clicking the active range reloads).
+                        if view.range.auto_refresh() {
+                            view.load_data();
+                        }
                         cx.notify();
                     })
                     .is_err()
@@ -846,7 +860,14 @@ impl Render for HistoryView {
                     .child(t(lang, "chart.title").to_string()),
             )
             .child(h_flex().gap_2().child(range_buttons).child(copy_btn));
-        let header_divider = div().h(px(1.)).bg(cx.theme().border.opacity(0.6));
+        // `theme.border` resolves to a near-black neutral in dark mode, so
+        // on the dark tinted popup the hairline read as a black line. Derive
+        // it from the foreground instead: light on dark, dark on light, like
+        // the system separators.
+        let header_divider = div()
+            .h(px(1.))
+            .w_full()
+            .bg(cx.theme().foreground.opacity(0.12));
 
         // One merged chart for both series. AreaChart accumulates one entry
         // per `y`/`stroke`/`fill`/`name` call in order, so two of each give
@@ -951,15 +972,11 @@ impl Render for HistoryView {
 /// as the picker is confirmed — and only falls back to
 /// `DwmGetColorizationColor` when that value is absent. The DWM colorization
 /// blend can lag and can be darkened by the transparency/color-prevalence
-/// mix, so it does not always match the system accent. macOS follows only an
-/// *explicit* choice: `AppleAccentColor` in the standard defaults is present
-/// exactly when the user picked a specific accent (Graphite included) and
-/// absent under the default "multicolor / auto" mode, where AppKit derives
-/// the accent from the wallpaper. Staying absent under auto keeps the
-/// library look; the check is presence-only on purpose so a future
-/// key-reshuffle degrades to the safe path, not to a wrong color. When
-/// present, `NSColor.controlAccentColor` reflects the user's pick without any
-/// light/dark resolution. See app-settings for the same shape.
+/// mix, so it does not always match the system accent. macOS always follows
+/// `NSColor.controlAccentColor`, which resolves both an explicit pick and
+/// the default multicolor / wallpaper-derived accent; `controlAccentColor`
+/// reflects the current system accent without any light/dark resolution. See
+/// app-settings for the same shape.
 #[cfg(windows)]
 fn system_accent_hex() -> Option<u32> {
     const ACCENT_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Accent";
@@ -983,8 +1000,6 @@ fn system_accent_hex() -> Option<u32> {
 fn system_accent_hex() -> Option<u32> {
     use objc2::rc::Retained;
     use objc2_app_kit::{NSColor, NSColorSpace};
-    use objc2_foundation::{NSString, NSUserDefaults};
-    NSUserDefaults::standardUserDefaults().objectForKey(&NSString::from_str("AppleAccentColor"))?;
     let color = NSColor::controlAccentColor();
     let srgb = NSColorSpace::sRGBColorSpace();
     let converted: Retained<NSColor> = color.colorUsingColorSpace(&srgb)?;
@@ -1162,13 +1177,20 @@ fn backdrop_for(material: Material) -> WindowBackgroundAppearance {
 /// opaque fallback as a no-op. Same replay-after-theme-change contract as the
 /// accent; see the matching function in app-settings.
 fn apply_material(cx: &mut App) {
-    use sysvitals_core::backdrop::{material_tint_alpha, should_tint};
+    use sysvitals_core::backdrop::{material_tint_alpha, material_tint_alpha_macos, should_tint};
     let material = detect_material();
     if !should_tint(material) {
         return;
     }
     UiTheme::update(cx, |theme| {
-        let alpha = material_tint_alpha(theme.mode.is_dark());
+        let dark = theme.mode.is_dark();
+        // macOS blur needs a much stronger tint to match the native
+        // volume/Wi-Fi/battery popovers; Windows keeps its Mica tuning.
+        let alpha = if cfg!(target_os = "macos") {
+            material_tint_alpha_macos(dark)
+        } else {
+            material_tint_alpha(dark)
+        };
         let opaque = |c: Hsla| Hsla { a: 1.0, ..c };
         theme.colors.background = opaque(theme.colors.background).opacity(alpha);
     });
@@ -1222,6 +1244,13 @@ fn apply_theme_and_accent(cx: &mut App) {
     apply_system_theme(cx);
     apply_accent(cx);
     apply_material(cx);
+    // The library's `chart_grid` falls back to `border.opacity(0.6)`, and
+    // the dark palette's border is a near-black neutral, so the grid read as
+    // black lines on the dark panel. Derive it from the foreground instead:
+    // light hairlines on dark, dark hairlines on light.
+    UiTheme::update(cx, |theme| {
+        theme.colors.chart_grid = theme.foreground.opacity(0.12);
+    });
     // Win11's Segoe UI Variable has an optical-size axis tuned for UI text;
     // the palette reload above may reset the family, so re-apply it here.
     #[cfg(windows)]
