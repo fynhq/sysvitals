@@ -365,22 +365,25 @@ fn rgb_hex_to_hsla(hex: u32) -> Hsla {
 /// that does NOT derive from `ThemeColor.primary`, so both fields are
 /// written; the hover/active variants are derived by shifting lightness
 /// around the accent, and `ring` follows so the focus outline agrees with
-/// the button. The foreground is recomputed from the accent's lightness,
-/// mirroring the OS: near-white text on a dark accent, near-black on a
-/// light one. The palette default cannot be reused here — the shadcn
-/// neutral set flips per mode (dark mode ships `neutral-900` black on
-/// `neutral-50` white), which renders unreadable black text once the
-/// background is an accent of mid luminance. A no-op on hosts with no
-/// accent source or when the DWM call fails: the library's default palette
-/// is preferable to a half-set theme.
+/// the button. On Windows the foreground is recomputed from the accent's
+/// luminance, mirroring the OS: near-white text on a dark accent, near-black
+/// on a light one. macOS always uses white: the system blue accent is bright
+/// enough for the WCAG heuristic to pick a dark label, but on-device feedback
+/// is that accent-filled tiles and buttons should keep the light label in
+/// both appearances. A no-op on hosts with no accent source or when the
+/// platform probe fails: the library's default palette is preferable to a
+/// half-set theme.
 fn apply_accent(cx: &mut App) {
     let Some(hex) = system_accent_hex() else {
         return;
     };
     let base = rgb_hex_to_hsla(hex);
-    // Use WCAG relative luminance, not HSL lightness: a saturated yellow has
-    // an HSL lightness near 0.5 but is far brighter than a mid-blue, so the
-    // old HSL threshold painted white text on it.
+    // Windows uses WCAG relative luminance (not HSL lightness: a saturated
+    // yellow has an HSL lightness near 0.5 but is far brighter than a
+    // mid-blue). macOS is fixed to white per the on-device acceptance note.
+    #[cfg(target_os = "macos")]
+    let foreground = hsla(0.0, 0.0, 1.0, 1.0);
+    #[cfg(not(target_os = "macos"))]
     let foreground = if sysvitals_core::color::prefers_dark_foreground(hex) {
         hsla(0.0, 0.0, 0.08, 1.0)
     } else {
@@ -543,6 +546,12 @@ struct SettingsView {
     /// light/dark flip reloads the system palette (the panel always follows
     /// the system, independent of the indicator-only `display.theme`).
     _appearance: Option<Subscription>,
+    /// Kept alive so the Cmd+W / Cmd+Q observer is not cancelled. macOS has
+    /// no default window menu here, so those keys need an explicit handler;
+    /// both close this window (the indicator is a separate process and keeps
+    /// running).
+    #[cfg(target_os = "macos")]
+    _shortcuts: Option<Subscription>,
 }
 
 impl SettingsView {
@@ -663,6 +672,19 @@ impl SettingsView {
             );
         }
 
+        // macOS has no default application menu in this child process, so
+        // Cmd+W / Cmd+Q need an explicit handler; both close this window and
+        // leave the menu-bar indicator (a separate process) running.
+        #[cfg(target_os = "macos")]
+        let window_shortcuts = cx.observe_keystrokes(|_view, event, window, _cx| {
+            let keystroke = &event.keystroke;
+            if keystroke.modifiers.platform
+                && (keystroke.key.as_str() == "w" || keystroke.key.as_str() == "q")
+            {
+                window.remove_window();
+            }
+        });
+
         let view = Self {
             dual_row: cfg.display.dual_row,
             show_resources: cfg.display.show_resources,
@@ -694,6 +716,8 @@ impl SettingsView {
             _subscriptions,
             _deactivation: None,
             _appearance: None,
+            #[cfg(target_os = "macos")]
+            _shortcuts: Some(window_shortcuts),
         };
         // OS accent live-refresh. The appearance observer registered in
         // `render` only fires when the light/dark MODE flips (the platform
@@ -830,15 +854,16 @@ fn settings_card(bg: Hsla) -> Div {
     }
 }
 
-/// macOS grouped-list separator between option rows. Subtle by design: the
-/// rows already carry vertical padding, so the line only needs to mark the
-/// boundary without adding a second visual layer. Windows cards use the 4px
-/// gap instead and never insert this element.
+/// macOS grouped-list separator between option rows. The color matches
+/// AppKit's `NSColor.separatorColor` at the default contrast setting
+/// (10% black in light, 10% white in dark), which is what System Settings
+/// uses between rows. Windows cards use the 4px gap instead and never
+/// insert this element.
 fn card_divider(dark: bool) -> Div {
     let color = if dark {
-        hsla(0., 0., 1., 0.08)
+        hsla(0., 0., 1., 0.10)
     } else {
-        hsla(0., 0., 0., 0.08)
+        hsla(0., 0., 0., 0.10)
     };
     div().h(px(1.)).w_full().bg(color)
 }
@@ -1433,7 +1458,7 @@ fn main() {
         };
 
         let window_options = WindowOptions {
-            window_bounds: Some(WindowBounds::centered(size(px(420.), px(640.)), cx)),
+            window_bounds: Some(WindowBounds::centered(size(px(400.), px(720.)), cx)),
             titlebar: Some(titlebar),
             // System backdrop material (Win11 Mica / Win10-era acrylic blur /
             // macOS window blur, with an opaque fallback on anything older or
@@ -1444,9 +1469,35 @@ fn main() {
             ..Default::default()
         };
 
-        gpui_kit::open_window(window_options, cx, move |window, cx| {
-            cx.new(|cx| SettingsView::new(cfg, window, cx))
-        })
-        .expect("Failed to open settings window");
+        let (window_handle, _view) =
+            gpui_kit::open_window(window_options, cx, move |window, cx| {
+                cx.new(|cx| SettingsView::new(cfg, window, cx))
+            })
+            .expect("Failed to open settings window");
+
+        // macOS: a child process spawned by the menu-bar indicator starts in
+        // the background. Creating the window with `focus: true` only asks
+        // AppKit for key status; it does not activate the app, so the panel
+        // can land behind the frontmost window until the user clicks the Dock
+        // icon. Activate the app and raise the window explicitly, then
+        // reassert once the launch transition has completed (activation
+        // during `applicationDidFinishLaunching` is not always honored).
+        #[cfg(target_os = "macos")]
+        {
+            cx.activate(true);
+            let _ = window_handle.update(cx, |_, window, _| window.activate_window());
+            cx.spawn(async move |cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(120))
+                    .await;
+                let _ = cx.update(|app| {
+                    app.activate(true);
+                    let _ = window_handle.update(app, |_, window, _| window.activate_window());
+                });
+            })
+            .detach();
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = window_handle;
     });
 }

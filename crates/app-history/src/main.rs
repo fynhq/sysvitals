@@ -1027,9 +1027,13 @@ fn apply_accent(cx: &mut App) {
         return;
     };
     let base = rgb_hex_to_hsla(hex);
-    // Use WCAG relative luminance, not HSL lightness: a saturated yellow has
-    // an HSL lightness near 0.5 but is far brighter than a mid-blue, so the
-    // old HSL threshold painted white text on it.
+    // Windows uses WCAG relative luminance (not HSL lightness: a saturated
+    // yellow has an HSL lightness near 0.5 but is far brighter than a
+    // mid-blue). macOS is fixed to white so the active range tile keeps a
+    // light label in both appearances, matching the settings panel.
+    #[cfg(target_os = "macos")]
+    let foreground = hsla(0.0, 0.0, 1.0, 1.0);
+    #[cfg(not(target_os = "macos"))]
     let foreground = if sysvitals_core::color::prefers_dark_foreground(hex) {
         hsla(0.0, 0.0, 0.08, 1.0)
     } else {
