@@ -138,6 +138,13 @@ mod win {
     /// Timer used by the custom menu to catch Esc even if the menu never
     /// received keyboard focus.
     const TIMER_MENU_ESC: usize = 0x518;
+    /// One-shot timer that defers the history pre-warm until the pointer has
+    /// stayed on the indicator for [`PREWARM_DELAY_MS`]. Without the delay a
+    /// pointer merely crossing the indicator would spawn and immediately kill
+    /// a full GPUI process.
+    const TIMER_PREWARM: usize = 0x519;
+    /// Hover-intent delay before pre-warming the history process.
+    const PREWARM_DELAY_MS: u32 = 200;
     /// Custom context-menu metrics, in logical pixels (scaled by the owner's
     /// DPI when the window is created).
     const MENU_ROW_PX: i32 = 32;
@@ -2783,6 +2790,15 @@ mod win {
                     id if id == TIMER_SAMPLE => sample_now(hwnd),
                     id if id == TIMER_MOVE => reposition(hwnd),
                     id if id == TIMER_CONFIG => poll_config_change(hwnd),
+                    id if id == TIMER_PREWARM => {
+                        let _ = KillTimer(Some(hwnd), TIMER_PREWARM);
+                        // The pointer may have left between the timer request
+                        // and this tick (the leave path also kills the timer,
+                        // but a queued tick can still race it).
+                        if HOVER.load(Ordering::Relaxed) {
+                            prewarm_history(hwnd);
+                        }
+                    }
                     _ => {}
                 }
                 LRESULT(0)
@@ -2828,6 +2844,9 @@ mod win {
                 // Windows does not synthesize a `WM_LBUTTONDBLCLK`, and Task
                 // Manager lives in the right-click menu. Any left click is a
                 // left click.
+                // A click ends the hover-intent window: never start a
+                // pre-warm behind the popup that this click is opening.
+                let _ = KillTimer(Some(hwnd), TIMER_PREWARM);
                 let was_pressed = PRESSED.swap(false, Ordering::Relaxed);
                 let was_prewarm = HISTORY_PREWARMED.swap(false, Ordering::Relaxed);
                 if was_prewarm && history_busy() {
@@ -2860,6 +2879,9 @@ mod win {
             }
             WM_RBUTTONUP => {
                 PRESSED.store(false, Ordering::Relaxed);
+                // The menu is about to take over the pointer; a pre-warm
+                // started now would only live behind the menu.
+                let _ = KillTimer(Some(hwnd), TIMER_PREWARM);
                 show_context_menu(hwnd);
                 LRESULT(0)
             }
@@ -2883,17 +2905,23 @@ mod win {
                     if !armed {
                         HOVER.store(false, Ordering::Relaxed);
                     }
-                    // Paint the hover state before the (synchronous) process
-                    // spawn so the pill never waits on the pre-warm.
+                    // Paint the hover state now; the pre-warm is deliberately
+                    // deferred behind a short hover-intent timer so a pointer
+                    // merely crossing the indicator does not spawn and
+                    // immediately kill a GPUI process.
                     render_layered(hwnd);
                     if armed {
-                        prewarm_history(hwnd);
+                        let _ = SetTimer(Some(hwnd), TIMER_PREWARM, PREWARM_DELAY_MS, None);
                     }
                 }
                 LRESULT(0)
             }
             WM_MOUSELEAVE => {
                 PRESSED.store(false, Ordering::Relaxed);
+                // A pending hover-intent timer is canceled before it can
+                // spawn a process the user never asked for; an already
+                // launched pre-warm is released below.
+                let _ = KillTimer(Some(hwnd), TIMER_PREWARM);
                 // Leaving before the click means the user is not opening the
                 // chart; release the hidden pre-warm instead of keeping a
                 // process alive while the pointer is elsewhere.
