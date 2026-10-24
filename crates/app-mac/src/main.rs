@@ -869,6 +869,10 @@ mod macos {
         stop_history_watch();
         let block = block2::RcBlock::new(|_timer: std::ptr::NonNull<NSTimer>| {
             if HISTORY_CHILD.with(|slot| child_alive(slot)) {
+                // Reassert while the popup is alive: AppKit clears the
+                // pressed state when the click tracking loop ends, so the
+                // initial highlight from the action alone lasts one frame.
+                refresh_status_highlight();
                 return;
             }
             HISTORY_POPUP_OPEN.set(false);
