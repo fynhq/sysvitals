@@ -27,10 +27,11 @@ mod macos {
         define_class, msg_send, sel, AnyThread, ClassType, MainThreadMarker, MainThreadOnly,
     };
     use objc2_app_kit::{
-        NSApplication, NSApplicationActivationPolicy, NSAttributedStringNSStringDrawing,
-        NSCellImagePosition, NSEventMask, NSEventType, NSFont, NSFontAttributeName,
-        NSFontWeightSemibold, NSImage, NSImageScaling, NSMenu, NSMenuItem, NSScreen, NSStatusBar,
-        NSStatusItem, NSTrackingArea, NSTrackingAreaOptions, NSVariableStatusItemLength, NSView,
+        NSAppearanceCustomization, NSApplication, NSApplicationActivationPolicy,
+        NSAttributedStringNSStringDrawing, NSBezierPath, NSCellImagePosition, NSColor, NSEventMask,
+        NSEventType, NSFont, NSFontAttributeName, NSFontWeightSemibold, NSImage, NSImageScaling,
+        NSMenu, NSMenuItem, NSScreen, NSStatusBar, NSStatusItem, NSTrackingArea,
+        NSTrackingAreaOptions, NSVariableStatusItemLength, NSView,
     };
     use objc2_foundation::{
         NSAttributedString, NSDictionary, NSObject, NSObjectProtocol, NSPoint, NSRect, NSRunLoop,
@@ -46,6 +47,11 @@ mod macos {
     /// down (≈0.75 — the same factor the Windows overlay uses, see the
     /// `dual_row` note in core config).
     const DUAL_ROW_FONT_FACTOR: f64 = 0.75;
+
+    /// Alpha of the active-status rounded backdrop inside the template image.
+    /// The template tint supplies the light/dark color; only the mask opacity
+    /// is fixed here.
+    const STATUS_HIGHLIGHT_ALPHA: f64 = 0.16;
 
     // ------------------------------------------------------------- diagnostics
 
@@ -198,6 +204,14 @@ mod macos {
         static HOVERING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
         static HISTORY_POPUP_OPEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
         static CONTEXT_MENU_OPEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        /// Highlight request from `refresh_status_highlight`; drives which of
+        /// the two pre-rendered template images is mounted.
+        static HIGHLIGHT_ON: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        static STATUS_IMAGES: RefCell<Option<StatusImages>> = const { RefCell::new(None) };
+        /// Variant currently mounted; `None` forces a remount after the images
+        /// are rebuilt. Avoids replacing the image every watcher tick.
+        static APPLIED_HIGHLIGHT: std::cell::Cell<Option<bool>> =
+            const { std::cell::Cell::new(None) };
         /// Polls the history child while the popup is open, so the highlight
         /// clears promptly when it closes by blur/Esc rather than waiting for
         /// the next sample tick (which can be 3s away).
@@ -384,10 +398,22 @@ mod macos {
     /// flipped (top-left origin, y downward) space. The list is captured by the
     /// image's drawing handler, so AppKit can rasterize it without touching
     /// thread-local state from a possibly non-main thread.
+    #[derive(Clone)]
     struct DrawItem {
         attr: Retained<NSAttributedString>,
         x: f64,
         y: f64,
+    }
+
+    /// The two template variants for the current layout: a transparent
+    /// background for idle state and a rounded translucent background for the
+    /// active/hover state. Template rendering tints the alpha mask with the
+    /// menu-bar foreground color, so the highlight follows light/dark
+    /// automatically (black translucent in light, white translucent in dark).
+    struct StatusImages {
+        normal: Retained<NSImage>,
+        highlighted: Retained<NSImage>,
+        width: f64,
     }
 
     /// One laid-out dual-row line: left run, optional right run, with measured
@@ -610,42 +636,64 @@ mod macos {
             return;
         }
 
-        // --- build the template image --------------------------------------
+        // --- build the template images -------------------------------------
         // Flipped drawing context: origin top-left, y downward — the space the
-        // layout above was computed in. The handler captures the run list, so
+        // layout above was computed in. The handlers capture the run list, so
         // rasterization never touches thread-local state.
-        let block = block2::RcBlock::new(move |_rect: NSRect| -> Bool {
+        //
+        // Two variants are pre-rendered: a transparent-background idle image
+        // and an active image with a rounded translucent background. Template
+        // rendering tints the alpha mask with the menu-bar foreground color,
+        // so the background is a black wash in light mode and a white wash in
+        // dark mode — the same direction as a native status-item highlight.
+        let normal_block = block2::RcBlock::new(move |_rect: NSRect| -> Bool {
             for it in &items {
                 it.attr.drawAtPoint(NSPoint::new(it.x, it.y));
             }
             Bool::YES
         });
-        let image =
-            NSImage::imageWithSize_flipped_drawingHandler(NSSize::new(ceil, img_h), true, &block);
-        image.setTemplate(true);
+        let normal = NSImage::imageWithSize_flipped_drawingHandler(
+            NSSize::new(ceil, img_h),
+            true,
+            &normal_block,
+        );
+        normal.setTemplate(true);
 
-        STATUS_ITEM.with(|si| {
-            let binding = si.borrow();
-            let Some(item) = binding.as_ref() else {
-                return;
-            };
-            let Some(button) = item.button(mtm) else {
-                return;
-            };
-            // Title cleared so only the image renders; `ImageOnly` +
-            // `ScaleNone` keeps AppKit from rescaling our point-sized layout.
-            button.setTitle(&NSString::from_str(""));
-            button.setImage(Some(&image));
-            button.setImagePosition(NSCellImagePosition::ImageOnly);
-            button.setImageScaling(NSImageScaling::ScaleNone);
-            // Fixed width = canvas width (grow-only), replacing the variable
-            // length used for the string title.
-            item.setLength(ceil);
+        let highlight_items = items.clone();
+        let highlight_block = block2::RcBlock::new(move |_rect: NSRect| -> Bool {
+            let backdrop = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
+                NSRect::new(
+                    NSPoint::new(1.0, 1.0),
+                    NSSize::new((ceil - 2.0).max(1.0), (img_h - 2.0).max(1.0)),
+                ),
+                4.0,
+                4.0,
+            );
+            // Template images use the alpha channel as the mask; the RGB
+            // value is irrelevant, only 16% opacity matters.
+            NSColor::colorWithWhite_alpha(0.0, STATUS_HIGHLIGHT_ALPHA).set();
+            backdrop.fill();
+            for it in &highlight_items {
+                it.attr.drawAtPoint(NSPoint::new(it.x, it.y));
+            }
+            Bool::YES
         });
+        let highlighted = NSImage::imageWithSize_flipped_drawingHandler(
+            NSSize::new(ceil, img_h),
+            true,
+            &highlight_block,
+        );
+        highlighted.setTemplate(true);
+
+        STATUS_IMAGES.with(|slot| {
+            *slot.borrow_mut() = Some(StatusImages {
+                normal,
+                highlighted,
+                width: ceil,
+            });
+        });
+        APPLIED_HIGHLIGHT.set(None);
         DRAW_SIGNATURE.with(|s| *s.borrow_mut() = sig);
-        // Re-assert the composed highlight after mounting a new image: the
-        // value update path replaces the button image every few seconds, and
-        // AppKit can drop the cell highlight along with the image swap.
         refresh_status_highlight();
     }
 
@@ -959,6 +1007,13 @@ mod macos {
             };
 
             let menu = NSMenu::new(mtm);
+            // A menu popped from a status-item button can inherit the button's
+            // vibrant menu-bar appearance, which renders dark in light mode.
+            // Follow the app's effective appearance so the menu matches the
+            // system like native menu-extra menus.
+            let app = NSApplication::sharedApplication(mtm);
+            let appearance = app.effectiveAppearance();
+            menu.setAppearance(Some(&appearance));
             // Menu labels follow the configured language, like the Windows
             // overlay's tray menu (previously hardcoded English here).
             let lang = CONFIG.with(|c| c.borrow().display.language);
@@ -1118,36 +1173,60 @@ mod macos {
         unsafe impl NSObjectProtocol for ActionHandler {}
     );
 
-    /// Force the status item button's native highlight on or off. A no-op when
-    /// the button is unavailable (not yet installed, or torn down).
+    /// Select the status item image variant for the composed highlight state.
+    /// AppKit's native `highlight:` state is not used: it is tied to a
+    /// tracking loop and does not render reliably from programmatic state.
     fn set_button_highlight(on: bool) {
+        HIGHLIGHT_ON.set(on);
+        apply_status_image();
+    }
+
+    /// Mount the pre-rendered template variant (idle or active) and its width.
+    /// Both variants are built together by `render_indicator`, so switching
+    /// never allocates or re-lays out text.
+    fn apply_status_image() {
+        let on = HIGHLIGHT_ON.get();
+        if APPLIED_HIGHLIGHT.get() == Some(on) {
+            return;
+        }
         let mtm = mtm();
-        STATUS_ITEM.with(|si| {
-            let si_borrow = si.borrow();
-            let Some(item) = si_borrow.as_ref() else {
-                return;
+        let applied = STATUS_IMAGES.with(|images| {
+            let images = images.borrow();
+            let Some(images) = images.as_ref() else {
+                return false;
             };
-            if let Some(button) = item.button(mtm) {
-                // `highlight:` alone does not mark the status-bar button for
-                // display when the call comes from outside AppKit's mouse
-                // tracking loop, so a programmatic highlight after a click
-                // was invisible. Set the cell state as well and force a
-                // redraw; this is the same state the pressed appearance uses.
-                button.highlight(on);
-                // NSControl exposes the same highlight state separately; set
-                // every layer the status-bar cell may consult.
-                button.setHighlighted(on);
-                if let Some(cell) = button.cell() {
-                    cell.setHighlighted(on);
-                }
+            let image = if on {
+                &images.highlighted
+            } else {
+                &images.normal
+            };
+            STATUS_ITEM.with(|si| {
+                let si_borrow = si.borrow();
+                let Some(item) = si_borrow.as_ref() else {
+                    return false;
+                };
+                let Some(button) = item.button(mtm) else {
+                    return false;
+                };
+                // Title cleared so only the image renders; `ImageOnly` +
+                // `ScaleNone` keeps AppKit from rescaling the point layout.
+                button.setTitle(&NSString::from_str(""));
+                button.setImage(Some(image));
+                button.setImagePosition(NSCellImagePosition::ImageOnly);
+                button.setImageScaling(NSImageScaling::ScaleNone);
+                item.setLength(images.width);
                 // Call through `NSView` explicitly: `NSControl` also declares a
                 // deprecated zero-argument `setNeedsDisplay()`, which wins
                 // method resolution on the button and shadows the view method.
                 let view: &NSView = &button;
                 view.setNeedsDisplay(true);
                 view.displayIfNeeded();
-            }
+                true
+            })
         });
+        if applied {
+            APPLIED_HIGHLIGHT.set(Some(on));
+        }
     }
 
     impl ActionHandler {
