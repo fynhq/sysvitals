@@ -6,10 +6,10 @@
 //! the overlay watches the config file and hot-reloads it. The window itself
 //! is closed with the system title-bar close button.
 //!
-//! Visual theme: light/dark follows the user's config preference (auto
-//! mirrors the OS appearance and re-syncs on a live system flip), and on
-//! Windows the primary button color is derived from the OS accent color so
-//! the segmented controls match what the rest of the shell uses.
+//! Visual theme: the panel always follows the system light/dark appearance
+//! (the `display.theme` setting only governs the resident indicator). On
+//! Windows and macOS the primary color follows the system accent, so the
+//! segmented controls match what the rest of the shell uses.
 
 // A GUI child process must not allocate a console window on Windows: without
 // this attribute the binary is built as a console subsystem executable and a
@@ -228,7 +228,8 @@ fn backdrop_for(material: Material) -> WindowBackgroundAppearance {
 /// Unpack an AppKit `NSColor` into sRGB components packed `0xRRGGBB`.
 ///
 /// Only for colors whose resolved value does not depend on the current
-/// appearance (control accent, which reflects the user's color pick).
+/// appearance (the control accent, which reflects the current system accent
+/// in every mode, including the wallpaper-derived multicolor case).
 /// Dynamic-per-appearance catalog colors (window background, label colors)
 /// would resolve to their light variants outside a draw cycle, so callers
 /// wanting those must install the right NSAppearance first — none of our
@@ -257,13 +258,20 @@ fn system_color_hex(color: &objc2_app_kit::NSColor) -> Option<u32> {
 /// pre-material rendering byte-for-byte. Re-runs on every theme change (the
 /// palette reload overwrites it) — the same replay contract as the accent.
 fn apply_material(cx: &mut App) {
-    use sysvitals_core::backdrop::{material_tint_alpha, should_tint};
+    use sysvitals_core::backdrop::{material_tint_alpha, material_tint_alpha_macos, should_tint};
     let material = detect_material();
     if !should_tint(material) {
         return;
     }
     UiTheme::update(cx, |theme| {
-        let alpha = material_tint_alpha(theme.mode.is_dark());
+        let dark = theme.mode.is_dark();
+        // The macOS blur is much clearer than Windows Mica; native
+        // popovers are strongly tinted, so use the dedicated macOS alpha.
+        let alpha = if cfg!(target_os = "macos") {
+            material_tint_alpha_macos(dark)
+        } else {
+            material_tint_alpha(dark)
+        };
         // Force an opaque base before scaling alpha, so the "set" and
         // "multiply" readings of `opacity` agree and the tint does not hinge
         // on the helper's exact semantics.
@@ -282,16 +290,14 @@ fn apply_material(cx: &mut App) {
 /// is darkened by the transparency/color-prevalence mix, so it does not
 /// always match the accent Windows paints on its own controls.
 ///
-/// macOS follows only an *explicit* choice: `AppleAccentColor` in the
-/// standard defaults is present exactly when the user picked a specific
-/// accent (Graphite included) and absent under the default "auto" mode,
-/// where AppKit derives the accent from the wallpaper. Staying absent under
-/// auto keeps the library look (the agreed behavior — an auto wallpaper color
-/// must not silently re-tint every primary control), and the check is
-/// presence-only on purpose: if a future macOS reshuffles the key, the worst
-/// case degrades to "keep the library default", never to a wrong color. When
-/// present, `NSColor.controlAccentColor` is the user's pick and does not vary
-/// with light/dark, so no appearance resolution is needed.
+/// macOS always follows `NSColor.controlAccentColor`: it resolves both an
+/// explicit pick (including Graphite) and the default "multicolor" mode,
+/// where AppKit derives the accent from the desktop picture. The earlier
+/// presence check on `AppleAccentColor` deliberately kept the library look
+/// under multicolor, but on-device feedback is that the panels should match
+/// the system accent in every mode, not just when a named color is chosen.
+/// `controlAccentColor` does not vary with light/dark, so no appearance
+/// resolution is needed.
 #[cfg(windows)]
 fn system_accent_hex() -> Option<u32> {
     const ACCENT_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Accent";
@@ -313,9 +319,6 @@ fn system_accent_hex() -> Option<u32> {
 
 #[cfg(target_os = "macos")]
 fn system_accent_hex() -> Option<u32> {
-    use objc2_foundation::{NSString, NSUserDefaults};
-    let key = NSString::from_str("AppleAccentColor");
-    NSUserDefaults::standardUserDefaults().objectForKey(&key)?;
     system_color_hex(&objc2_app_kit::NSColor::controlAccentColor())
 }
 
@@ -812,11 +815,32 @@ fn section_label(text: String, dim: Hsla) -> impl IntoElement {
     div().text_xs().font_semibold().text_color(dim).child(text)
 }
 
-/// A Windows Settings-style card surface: rounded, subtly filled, and only
-/// wide enough to group its rows. The fill lets the Mica backdrop show
-/// through while giving the rows the same "card" separation the OS uses.
+/// A grouped option surface. Windows keeps the WinUI card (8px radius, 4px
+/// row gap); macOS uses a flatter grouped-list card (10px radius, rows touch
+/// and are separated by [`card_divider`]) so it reads like System Settings
+/// instead of a stack of floating cards.
 fn settings_card(bg: Hsla) -> Div {
-    v_flex().w_full().rounded(px(8.)).bg(bg).p_3().gap_1()
+    #[cfg(target_os = "macos")]
+    {
+        v_flex().w_full().rounded(px(10.)).bg(bg).p_3()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        v_flex().w_full().rounded(px(8.)).bg(bg).p_3().gap_1()
+    }
+}
+
+/// macOS grouped-list separator between option rows. Subtle by design: the
+/// rows already carry vertical padding, so the line only needs to mark the
+/// boundary without adding a second visual layer. Windows cards use the 4px
+/// gap instead and never insert this element.
+fn card_divider(dark: bool) -> Div {
+    let color = if dark {
+        hsla(0., 0., 1., 0.08)
+    } else {
+        hsla(0., 0., 0., 0.08)
+    };
+    div().h(px(1.)).w_full().bg(color)
 }
 
 /// A section heading paired with its card at the tight 4px label gap.
@@ -1029,15 +1053,28 @@ impl Render for SettingsView {
         }
 
         let dark = cx.theme().mode.is_dark();
-        // Shared card surface for both hosts. The library's `group_box` token
-        // is neutral-950 in dark mode — the same value as the page background
-        // — so using it would make the macOS cards disappear. A translucent
-        // neutral lift follows each platform's grouped-settings look while
-        // leaving the actual WinUI control chrome Windows-gated.
-        let card_bg = if dark {
-            hsla(0., 0., 1., 0.06)
-        } else {
-            hsla(0., 0., 1., 0.55)
+        // Grouped-card fill. Windows keeps the WinUI translucent lift over
+        // Mica. macOS uses a near-white card in light mode (the old 0.55
+        // white over the gray blur read as muddy gray next to System
+        // Settings) and a slightly stronger dark lift; the separators below
+        // do the row grouping that the Windows gap used to do.
+        let card_bg = {
+            #[cfg(target_os = "macos")]
+            {
+                if dark {
+                    hsla(0., 0., 1., 0.10)
+                } else {
+                    hsla(0., 0., 1., 0.82)
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                if dark {
+                    hsla(0., 0., 1., 0.06)
+                } else {
+                    hsla(0., 0., 1., 0.55)
+                }
+            }
         };
 
         let general_card = settings_card(card_bg)
@@ -1045,6 +1082,9 @@ impl Render for SettingsView {
                 t(lang, "settings.language").to_string(),
                 lang_row,
             ))
+            .when(cfg!(target_os = "macos"), |this| {
+                this.child(card_divider(dark))
+            })
             .child(labeled_row(
                 t(lang, "settings.sample_interval").to_string(),
                 interval_row,
@@ -1070,6 +1110,9 @@ impl Render for SettingsView {
                         cx.notify();
                     })),
             ))
+            .when(cfg!(target_os = "macos"), |this| {
+                this.child(card_divider(dark))
+            })
             .child(switch_row(
                 t(lang, "settings.group_resources").to_string(),
                 Switch::new("show-res")
@@ -1080,6 +1123,9 @@ impl Render for SettingsView {
                         cx.notify();
                     })),
             ))
+            .when(cfg!(target_os = "macos"), |this| {
+                this.child(card_divider(dark))
+            })
             .child(switch_row(
                 t(lang, "settings.group_network").to_string(),
                 Switch::new("show-net")
@@ -1090,6 +1136,9 @@ impl Render for SettingsView {
                         cx.notify();
                     })),
             ))
+            .when(cfg!(target_os = "macos"), |this| {
+                this.child(card_divider(dark))
+            })
             .child(labeled_row(
                 t(lang, "settings.item_spacing").to_string(),
                 blur_on_outside(div().w(px(160.))).child(spacing_select),
@@ -1110,6 +1159,9 @@ impl Render for SettingsView {
         let show_margin = (self.layout_available && self.anchor_idx == 1 && !self.vertical_taskbar)
             || self.vertical_taskbar;
         if show_margin {
+            if cfg!(target_os = "macos") && show_layout {
+                layout_card = layout_card.child(card_divider(dark));
+            }
             layout_card = layout_card.child(labeled_row(
                 if self.vertical_taskbar {
                     t(lang, "settings.top_margin").to_string()
@@ -1162,10 +1214,13 @@ impl Render for SettingsView {
                 div()
                     .text_xs()
                     .text_color(faint)
+                    // The macOS card has no row gap; keep the hint separated
+                    // from the 2x2 prefix grid. Windows keeps its 4px gap.
+                    .when(cfg!(target_os = "macos"), |this| this.pt_2())
                     .child(t(lang, "settings.prefix_hint").to_string()),
             );
 
-        v_flex()
+        let body = v_flex()
             .size_full()
             .p_4()
             .gap_3()
@@ -1212,7 +1267,39 @@ impl Render for SettingsView {
                     .text_color(faint)
                     .text_center()
                     .child(SV_BUILD_ID),
-            )
+            );
+
+        // macOS: the native titlebar is transparent and the content is
+        // full-size, so the tinted material already paints behind it. Draw a
+        // fixed 34px header inside that surface (title centered, traffic
+        // lights at the leading edge) instead of letting AppKit paint a
+        // separate titlebar shade. Windows keeps its native titlebar.
+        #[cfg(target_os = "macos")]
+        {
+            let title = t(lang, "settings.title").to_string();
+            v_flex()
+                .size_full()
+                .child(
+                    h_flex()
+                        .h(px(34.))
+                        .w_full()
+                        .flex_shrink_0()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            div()
+                                .text_size(px(13.))
+                                .font_semibold()
+                                .text_color(cx.theme().foreground.opacity(0.9))
+                                .child(title),
+                        ),
+                )
+                .child(div().flex_1().child(body))
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            body
+        }
     }
 }
 
@@ -1321,12 +1408,33 @@ fn main() {
         // together).
         apply_theme_and_accent(cx);
 
+        let titlebar = {
+            #[cfg(target_os = "macos")]
+            {
+                // Full-size content: the tinted material continues under the
+                // titlebar and a custom 34px header draws the title, so the
+                // window no longer shows a separate native titlebar shade.
+                TitlebarOptions {
+                    // Keep the native window title for Mission Control and
+                    // accessibility; `appears_transparent` hides it visually
+                    // and the header below draws the visible copy.
+                    title: Some(t(cfg.display.language, "settings.title").to_string().into()),
+                    appears_transparent: true,
+                    traffic_light_position: Some(point(px(9.), px(9.))),
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                TitlebarOptions {
+                    title: Some(t(cfg.display.language, "settings.title").to_string().into()),
+                    ..Default::default()
+                }
+            }
+        };
+
         let window_options = WindowOptions {
             window_bounds: Some(WindowBounds::centered(size(px(420.), px(640.)), cx)),
-            titlebar: Some(TitlebarOptions {
-                title: Some(t(cfg.display.language, "settings.title").to_string().into()),
-                ..Default::default()
-            }),
+            titlebar: Some(titlebar),
             // System backdrop material (Win11 Mica / Win10-era acrylic blur /
             // macOS window blur, with an opaque fallback on anything older or
             // when the user disabled transparency effects). The palette tint

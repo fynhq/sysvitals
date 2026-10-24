@@ -87,12 +87,37 @@ pub const MATERIAL_TINT_ALPHA: f32 = 0.45;
 /// toward a stronger material while keeping body text readable.
 pub const MATERIAL_TINT_ALPHA_DARK: f32 = 0.30;
 
+/// macOS tint alpha (light). The window blur is much clearer than Mica, and
+/// on-device feedback was that the settings panel and history popup read as
+/// too transparent next to the system volume / Wi-Fi / battery popovers.
+/// Those popovers are strongly tinted (only a quiet hint of the desktop shows
+/// through), so the macOS panels use a much higher tint than the Windows Mica
+/// values above. The actual blur is still behind it; this only controls how
+/// much of the palette background covers the blur.
+pub const MATERIAL_TINT_ALPHA_MACOS: f32 = 0.82;
+
+/// macOS tint alpha (dark). Same reasoning as the light value: a strong dark
+/// tint keeps the panel close to the native popover material instead of
+/// letting the desktop dominate. 0.72 leaves a little more of the blur
+/// visible than light mode, matching the system's own dark popovers.
+pub const MATERIAL_TINT_ALPHA_MACOS_DARK: f32 = 0.72;
+
 /// Pick the tint alpha for the current palette mode.
 pub fn material_tint_alpha(dark: bool) -> f32 {
     if dark {
         MATERIAL_TINT_ALPHA_DARK
     } else {
         MATERIAL_TINT_ALPHA
+    }
+}
+
+/// Pick the macOS tint alpha for the current palette mode. Kept separate from
+/// [`material_tint_alpha`] so the Windows Mica tuning is untouched.
+pub fn material_tint_alpha_macos(dark: bool) -> f32 {
+    if dark {
+        MATERIAL_TINT_ALPHA_MACOS_DARK
+    } else {
+        MATERIAL_TINT_ALPHA_MACOS
     }
 }
 
@@ -168,5 +193,18 @@ mod tests {
     fn dark_mode_uses_a_clearer_tint() {
         assert_eq!(material_tint_alpha(false), MATERIAL_TINT_ALPHA);
         assert_eq!(material_tint_alpha(true), MATERIAL_TINT_ALPHA_DARK);
+    }
+
+    #[test]
+    fn macos_uses_a_stronger_tint_than_mica() {
+        // The macOS blur is much clearer than Mica; the native popover look
+        // needs a stronger palette tint in both modes.
+        assert!(material_tint_alpha_macos(false) > material_tint_alpha(false));
+        assert!(material_tint_alpha_macos(true) > material_tint_alpha(true));
+        assert_eq!(material_tint_alpha_macos(false), MATERIAL_TINT_ALPHA_MACOS);
+        assert_eq!(
+            material_tint_alpha_macos(true),
+            MATERIAL_TINT_ALPHA_MACOS_DARK
+        );
     }
 }
