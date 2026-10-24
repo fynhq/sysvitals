@@ -39,14 +39,25 @@ mod macos {
     };
 
     use sysvitals_core::config::{config_path, history_path};
-    use sysvitals_core::format::format_frame;
-    use sysvitals_core::{t, Config, FormattedRow, NetSelection, Sampler};
+    use sysvitals_core::format::{format_frame, join_prefix};
+    use sysvitals_core::{t, Config, FormattedRow, Metric, NetSelection, Sampler};
 
     /// Font-size factor for the dual-row layout: the menu bar has a fixed
     /// height, so two lines only fit with the system menu-bar font scaled
-    /// down (≈0.75 — the same factor the Windows overlay uses, see the
-    /// `dual_row` note in core config).
-    const DUAL_ROW_FONT_FACTOR: f64 = 0.75;
+    /// down. 0.8 is the default tuning; the fit loop in `render_indicator`
+    /// reduces it further only if the two line boxes still exceed the bar.
+    const DUAL_ROW_FONT_FACTOR: f64 = 0.8;
+
+    /// Symmetric horizontal inset around the drawn content, in points. The
+    /// highlight backdrop spans the whole image, so this is what keeps the
+    /// pill from hugging the glyphs on the left and right.
+    const CONTENT_PAD_X: f64 = 6.0;
+
+    /// Conservative upper bound for one rate cell. `format_rate` keeps the
+    /// numeric field at most four characters per unit tier (including the
+    /// 1024 rounding), and "M" is the widest tier letter, so measuring this
+    /// string reserves every possible rate value for the current font.
+    const RATE_RESERVE: &str = "8888 M/s";
 
     /// Alpha of the active-status rounded backdrop inside the template image.
     /// The template tint supplies the light/dark color; only the mask opacity
@@ -187,11 +198,10 @@ mod macos {
         /// all texts). `tick` compares it first and skips everything when the
         /// frame is identical — no rebuild, no redraw, no bitmap churn.
         static DRAW_SIGNATURE: RefCell<String> = const { RefCell::new(String::new()) };
-        /// Grow-only ceiling for the item width: the indicator never shrinks
-        /// below the widest it has been, so a number losing a digit (or a rate
-        /// unit stepping down) cannot shift the block left/right. Mirrors the
-        /// Windows overlay's grow-only window sizing.
-        static DRAW_WIDTH_CEIL: RefCell<f64> = const { RefCell::new(0.0) };
+        /// Last effective dual-row size after the height fit loop, so a
+        /// requested-vs-effective font shrink is logged once rather than on
+        /// every sample.
+        static DUAL_SHRUNK_FONT: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
         /// One-shot diagnostic for a dual-row block that still exceeds the
         /// menu-bar thickness after the automatic font shrink.
         static DUAL_OVERFLOW_LOGGED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -279,10 +289,6 @@ mod macos {
                 CONFIG_MTIME.with(|m| *m.borrow_mut() = mtime);
                 CONFIG_ERROR_MTIME.set(0);
                 CONFIG.with(|c| *c.borrow_mut() = cfg.clone());
-                // A layout/prefix change should be able to make the item
-                // narrower; grow-only applies to live values, not to an
-                // explicit configuration change.
-                DRAW_WIDTH_CEIL.with(|c| *c.borrow_mut() = 0.0);
                 log_event(
                     "INFO",
                     &format!(
@@ -477,6 +483,39 @@ mod macos {
         (runs, left_w, right_w, line_h)
     }
 
+    /// The metrics the current config shows, in the same order
+    /// `format_frame` uses.
+    fn visible_metrics(cfg: &Config) -> Vec<Metric> {
+        Metric::ALL
+            .into_iter()
+            .filter(|m| cfg.display.metric_visible(*m))
+            .collect()
+    }
+
+    /// Worst-case width of one metric cell for the font currently in use.
+    /// This is the fixed slot width: the value may gain or lose a digit
+    /// inside the slot, but the slot itself never moves. Percentages can only
+    /// reach "100%"; network rates reserve the widest four-character numeric
+    /// field across all unit tiers (see `RATE_RESERVE`).
+    fn metric_reserve(metric: Metric, cfg: &Config, font: &Retained<NSFont>) -> f64 {
+        let (prefix, value) = match metric {
+            Metric::Cpu => (&cfg.display.prefix.cpu, "100%"),
+            Metric::Mem => (&cfg.display.prefix.mem, "100%"),
+            Metric::Up => (&cfg.display.prefix.up, RATE_RESERVE),
+            Metric::Down => (&cfg.display.prefix.down, RATE_RESERVE),
+        };
+        make_run(&join_prefix(prefix, value), font).1
+    }
+
+    /// Widest reserved cell in a dual-row column, measured with the final
+    /// (possibly height-fitted) font.
+    fn column_reserve(metrics: &[Metric], cfg: &Config, font: &Retained<NSFont>) -> f64 {
+        metrics
+            .iter()
+            .map(|m| metric_reserve(*m, cfg, font))
+            .fold(0f64, f64::max)
+    }
+
     /// Font used for the two-line layout: the regular menu-bar face scaled
     /// down to fit the fixed bar height would lose too much stroke weight, so
     /// dual-row uses a semibold system face at the same reduced size. The
@@ -494,65 +533,124 @@ mod macos {
     /// painting, giving pixel control over dual-row alignment, item spacing
     /// and vertical centering that AppKit's string title does not offer.
     ///
+    /// Slot widths come from the format's upper bounds rather than the
+    /// current sample: a value gaining or losing a digit only moves inside
+    /// its own slot, so a dual-row column origin and the status item's length
+    /// stay fixed between samples. A symmetric content inset gives the
+    /// hover/press backdrop breathing room instead of hugging the glyphs.
+    ///
     /// Skips every action when the render signature (layout parameters plus
     /// all texts) is unchanged: the mounted image simply stays, so an
     /// idle-second tick costs nothing (no rebuild, no bitmap churn). On change
     /// a fresh block-image is built and mounted; the previous image is
-    /// reference-counted away. Grow-only width keeps the block from shifting
-    /// when values lose a digit.
+    /// reference-counted away.
     fn render_indicator(row: &FormattedRow, cfg: &Config) {
         let dual = cfg.display.dual_row && row.lines.len() > 1;
         let spacing = f64::from(cfg.display.item_spacing.max(1));
+        if !cfg.display.show_resources && !cfg.display.show_network {
+            return;
+        }
         // The menu-bar height (logical points) is the canvas height; drawing
         // inside it keeps the glyphs at the system's own vertical band.
         let img_h = NSStatusBar::systemStatusBar().thickness();
 
         // Single-row strictly follows the system menu-bar font (size 0 =
-        // standard); dual-row uses the 0.75-scaled variant so two lines fit
-        // the fixed bar height (same factor as the Windows quadrant).
+        // standard); dual-row starts from the 0.8x variant and the fit loop
+        // below shrinks it further only when the two line boxes exceed the
+        // fixed bar height.
         let base = NSFont::menuBarFontOfSize(0.0);
+        // Never shrink below the previous 0.75x baseline: if 0.8x cannot be
+        // made to fit by tightening the line step, fall back to the known-good
+        // size instead of ending up smaller than before.
+        let font_floor = (base.pointSize() * 0.75).max(1.0);
         let mut font = if dual {
             let scaled = (base.pointSize() * DUAL_ROW_FONT_FACTOR).max(1.0);
             dual_row_font(scaled)
         } else {
             base
         };
+        let requested_size = font.pointSize();
 
         // --- lay out the runs (flipped space: y grows downward) -----------
         let mut items: Vec<DrawItem> = Vec::new();
         let mut texts: Vec<String> = Vec::new();
-        let mut width = 0f64;
+        let width;
+        let mut line_step = 0.0_f64;
         // `display.theme` is deliberately not consulted: the indicator is a
         // template image, which AppKit tints from the menu-bar appearance —
         // light/dark inversion is automatic and per-item color is not a thing
         // on the menu bar (see the theme-picker removal in app-settings).
         if dual {
             // 2x2 quadrant mirroring the Windows overlay's `measure_frame`:
-            // both rows' left columns start at x = 0 (left alignment, ②),
-            // the right column starts at `left_col_w + item_spacing` (③),
-            // and the two-line block is vertically centered in the bar (⑤).
+            // left column resources, right column network. When only one
+            // group is enabled, `format_frame` puts those metrics in the left
+            // column; mirror that split here so the reserved slots match.
+            let (left_metrics, right_metrics) =
+                if cfg.display.show_resources && cfg.display.show_network {
+                    (
+                        vec![Metric::Cpu, Metric::Mem],
+                        vec![Metric::Up, Metric::Down],
+                    )
+                } else if cfg.display.show_resources {
+                    (vec![Metric::Cpu, Metric::Mem], Vec::new())
+                } else {
+                    (vec![Metric::Up, Metric::Down], Vec::new())
+                };
             for line in &row.lines {
                 texts.push(line.left.clone());
                 texts.push(line.right.clone());
             }
             let (mut runs, mut left_w, mut right_w, mut line_h) = layout_dual(row, &font);
             let n = runs.len() as f64;
-            let mut block_h = line_h * n;
-            // The system menu-bar thickness is the hard canvas height. If the
-            // 0.75x two-line block still does not fit (e.g. a 22pt reported
-            // thickness on a 24pt bar), shrink once more and re-measure rather
-            // than silently clipping the second row at the image bottom.
+            line_step = line_h;
+            let mut block_h = line_h + line_step * (n - 1.0).max(0.0);
+            // The system menu-bar thickness is the hard canvas height. The
+            // attributed line box includes leading, so first try tightening
+            // the inter-line step (two short rows of labels can sit closer
+            // without touching); only if even the minimum step does not fit
+            // do we shrink the font and re-measure. This is what lets the
+            // requested 0.8x size survive on a standard bar instead of being
+            // silently pulled back to the old 0.75x by the height guard.
             let mut attempts = 0;
-            while block_h > img_h && attempts < 2 {
+            while block_h > img_h && attempts < 3 {
+                // The two rows are short labels without descenders in the
+                // default configuration, so a step equal to the font size is
+                // still readable; this keeps the requested 0.8x size instead
+                // of letting the old height guard pull it back to 0.75x.
+                let min_step = font.pointSize().max(1.0);
+                let candidate = ((img_h - 0.5).max(1.0) - line_h) / (n - 1.0).max(1.0);
+                if candidate >= min_step {
+                    line_step = candidate.min(line_h);
+                    block_h = line_h + line_step * (n - 1.0).max(0.0);
+                    break;
+                }
                 let factor = (img_h / block_h * 0.98).clamp(0.5, 1.0);
-                font = dual_row_font((font.pointSize() * factor).max(1.0));
+                let target = (font.pointSize() * factor).max(font_floor);
+                if target >= font.pointSize() - 0.01 {
+                    break;
+                }
+                font = dual_row_font(target);
                 let laid = layout_dual(row, &font);
                 runs = laid.0;
                 left_w = laid.1;
                 right_w = laid.2;
                 line_h = laid.3;
-                block_h = line_h * n;
+                line_step = line_h;
+                block_h = line_h + line_step * (n - 1.0).max(0.0);
                 attempts += 1;
+            }
+            if attempts > 0 {
+                let effective = font.pointSize();
+                if (DUAL_SHRUNK_FONT.with(|slot| slot.get()) - effective).abs() > 0.01 {
+                    DUAL_SHRUNK_FONT.with(|slot| slot.set(effective));
+                    log_event(
+                        "INFO",
+                        &format!(
+                            "dual-row font fitted: requested={requested_size:.2} \
+                             effective={effective:.2} bar={img_h:.1}"
+                        ),
+                    );
+                }
             }
             if block_h > img_h && !DUAL_OVERFLOW_LOGGED.replace(true) {
                 log_event(
@@ -564,12 +662,20 @@ mod macos {
                 );
             }
             let y0 = ((img_h - block_h) / 2.0).max(0.0);
-            let right_x = left_w + spacing;
+            // Fixed slots: the reserved widths are format upper bounds, so
+            // the right column starts at the same x on every sample. The
+            // actual widths are only a safety net for an unexpected value
+            // wider than the reservation.
+            let left_slot = column_reserve(&left_metrics, cfg, &font).max(left_w);
+            let right_slot = column_reserve(&right_metrics, cfg, &font).max(right_w);
+            let has_right = runs.iter().any(|r| r.ra.is_some());
+            let left_x = CONTENT_PAD_X;
+            let right_x = left_x + left_slot + spacing;
             for (i, r) in runs.iter().enumerate() {
-                let y = y0 + line_h * i as f64;
+                let y = y0 + line_step * i as f64;
                 items.push(DrawItem {
                     attr: r.la.clone(),
-                    x: 0.0,
+                    x: left_x,
                     y,
                 });
                 if let Some(ra) = &r.ra {
@@ -580,15 +686,14 @@ mod macos {
                     });
                 }
             }
-            width = if right_w > 0.0 {
-                right_x + right_w
-            } else {
-                left_w
-            };
+            width = left_x
+                + left_slot
+                + (if has_right { spacing + right_slot } else { 0.0 })
+                + CONTENT_PAD_X;
         } else {
-            // Single row: lay the individual metric items with a pixel gap
-            // (③ exact `item_spacing`, mirroring the Windows single-row path);
-            // vertically centered on its own measured height (⑤).
+            // Single row: each metric gets its own fixed slot, so a digit
+            // change in one metric cannot push the following metrics around;
+            // each slot is vertically centered on its own measured height.
             let parts: Vec<String> = if !row.items.is_empty() {
                 row.items.clone()
             } else {
@@ -601,33 +706,40 @@ mod macos {
                 }
                 v
             };
-            let mut x = 0f64;
-            for part in parts {
+            if parts.is_empty() {
+                return;
+            }
+            let metrics = visible_metrics(cfg);
+            let mut slots: Vec<f64> = metrics
+                .iter()
+                .map(|m| metric_reserve(*m, cfg, &font))
+                .collect();
+            if slots.len() != parts.len() {
+                // Defensive fallback: the frame and config disagree on the
+                // visible metric set, so measure the actual strings instead
+                // of risking a clipped slot.
+                slots = parts
+                    .iter()
+                    .map(|p| make_run(p.trim_end(), &font).1)
+                    .collect();
+            }
+            let mut x = CONTENT_PAD_X;
+            for (i, part) in parts.into_iter().enumerate() {
                 let (attr, w, h) = make_run(part.trim_end(), &font);
                 texts.push(part);
+                let slot = slots.get(i).copied().unwrap_or(w).max(w);
                 let y = ((img_h - h) / 2.0).max(0.0);
                 items.push(DrawItem { attr, x, y });
-                x += w + spacing;
-                width = width.max(x - spacing);
+                x += slot + spacing;
             }
+            width = x - spacing + CONTENT_PAD_X;
         }
         if items.is_empty() || width <= 0.0 {
             return;
         }
 
-        // Grow-only: keep the widest width ever laid out so later frames with
-        // narrower content do not shift the block (② anti-jitter). Content
-        // stays left-aligned inside the padded canvas.
-        let ceil = DRAW_WIDTH_CEIL.with(|c| {
-            let prev = *c.borrow();
-            let next = prev.max(width);
-            if next != prev {
-                *c.borrow_mut() = next;
-            }
-            next
-        });
         let sig = format!(
-            "{dual}|{spacing}|{img_h:.1}|{:.2}|{ceil:.1}|{}",
+            "{dual}|{spacing}|{img_h:.1}|{:.2}|{width:.1}|{line_step:.2}|{}",
             font.pointSize(),
             texts.join("\u{1}")
         );
@@ -645,6 +757,7 @@ mod macos {
         // rendering tints the alpha mask with the menu-bar foreground color,
         // so the background is a black wash in light mode and a white wash in
         // dark mode — the same direction as a native status-item highlight.
+        // The content inset leaves the backdrop visible around the glyphs.
         let normal_items = items.clone();
         let normal_block = block2::RcBlock::new(move |_rect: NSRect| -> Bool {
             for it in &normal_items {
@@ -653,7 +766,7 @@ mod macos {
             Bool::YES
         });
         let normal = NSImage::imageWithSize_flipped_drawingHandler(
-            NSSize::new(ceil, img_h),
+            NSSize::new(width, img_h),
             true,
             &normal_block,
         );
@@ -664,7 +777,7 @@ mod macos {
             let backdrop = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
                 NSRect::new(
                     NSPoint::new(1.0, 1.0),
-                    NSSize::new((ceil - 2.0).max(1.0), (img_h - 2.0).max(1.0)),
+                    NSSize::new((width - 2.0).max(1.0), (img_h - 2.0).max(1.0)),
                 ),
                 4.0,
                 4.0,
@@ -679,7 +792,7 @@ mod macos {
             Bool::YES
         });
         let highlighted = NSImage::imageWithSize_flipped_drawingHandler(
-            NSSize::new(ceil, img_h),
+            NSSize::new(width, img_h),
             true,
             &highlight_block,
         );
@@ -689,7 +802,7 @@ mod macos {
             *slot.borrow_mut() = Some(StatusImages {
                 normal,
                 highlighted,
-                width: ceil,
+                width,
             });
         });
         APPLIED_HIGHLIGHT.set(None);
