@@ -1124,7 +1124,20 @@ mod macos {
                 return;
             };
             if let Some(button) = item.button(mtm) {
+                // `highlight:` alone does not mark the status-bar button for
+                // display when the call comes from outside AppKit's mouse
+                // tracking loop, so a programmatic highlight after a click
+                // was invisible. Set the cell state as well and force a
+                // redraw; this is the same state the pressed appearance uses.
                 button.highlight(on);
+                // NSControl exposes the same highlight state separately; set
+                // every layer the status-bar cell may consult.
+                button.setHighlighted(on);
+                if let Some(cell) = button.cell() {
+                    cell.setHighlighted(on);
+                }
+                button.setNeedsDisplay(true);
+                button.displayIfNeeded();
             }
         });
     }
