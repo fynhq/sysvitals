@@ -854,18 +854,20 @@ fn settings_card(bg: Hsla) -> Div {
     }
 }
 
-/// macOS grouped-list separator between option rows. The color matches
-/// AppKit's `NSColor.separatorColor` at the default contrast setting
-/// (10% black in light, 10% white in dark), which is what System Settings
-/// uses between rows. Windows cards use the 4px gap instead and never
-/// insert this element.
-fn card_divider(dark: bool) -> Div {
+/// macOS grouped-list separator between option rows. AppKit's official
+/// separator color is `NSColor.separatorColor` (10% black in light, 10%
+/// white in dark at the default contrast); the thickness is a hairline, i.e.
+/// one device pixel, not one point. A one-point line is two pixels on a
+/// Retina display and reads heavier than System Settings. Windows cards use
+/// the 4px gap instead and never insert this element.
+fn card_divider(dark: bool, scale_factor: f32) -> Div {
     let color = if dark {
         hsla(0., 0., 1., 0.10)
     } else {
         hsla(0., 0., 0., 0.10)
     };
-    div().h(px(1.)).w_full().bg(color)
+    let hairline = 1.0 / scale_factor.max(1.0);
+    div().h(px(hairline)).w_full().bg(color)
 }
 
 /// A section heading paired with its card at the tight 4px label gap.
@@ -1078,6 +1080,10 @@ impl Render for SettingsView {
         }
 
         let dark = cx.theme().mode.is_dark();
+        // Native separators are hairlines: one device pixel. GPUI lays out in
+        // logical pixels, so divide by the display scale to land on one
+        // physical pixel on Retina instead of drawing a two-pixel line.
+        let scale_factor = window.scale_factor();
         // Grouped-card fill. Windows keeps the WinUI translucent lift over
         // Mica. macOS uses a near-white card in light mode (the old 0.55
         // white over the gray blur read as muddy gray next to System
@@ -1108,7 +1114,7 @@ impl Render for SettingsView {
                 lang_row,
             ))
             .when(cfg!(target_os = "macos"), |this| {
-                this.child(card_divider(dark))
+                this.child(card_divider(dark, scale_factor))
             })
             .child(labeled_row(
                 t(lang, "settings.sample_interval").to_string(),
@@ -1136,7 +1142,7 @@ impl Render for SettingsView {
                     })),
             ))
             .when(cfg!(target_os = "macos"), |this| {
-                this.child(card_divider(dark))
+                this.child(card_divider(dark, scale_factor))
             })
             .child(switch_row(
                 t(lang, "settings.group_resources").to_string(),
@@ -1149,7 +1155,7 @@ impl Render for SettingsView {
                     })),
             ))
             .when(cfg!(target_os = "macos"), |this| {
-                this.child(card_divider(dark))
+                this.child(card_divider(dark, scale_factor))
             })
             .child(switch_row(
                 t(lang, "settings.group_network").to_string(),
@@ -1162,7 +1168,7 @@ impl Render for SettingsView {
                     })),
             ))
             .when(cfg!(target_os = "macos"), |this| {
-                this.child(card_divider(dark))
+                this.child(card_divider(dark, scale_factor))
             })
             .child(labeled_row(
                 t(lang, "settings.item_spacing").to_string(),
@@ -1185,7 +1191,7 @@ impl Render for SettingsView {
             || self.vertical_taskbar;
         if show_margin {
             if cfg!(target_os = "macos") && show_layout {
-                layout_card = layout_card.child(card_divider(dark));
+                layout_card = layout_card.child(card_divider(dark, scale_factor));
             }
             layout_card = layout_card.child(labeled_row(
                 if self.vertical_taskbar {
