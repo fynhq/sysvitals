@@ -446,15 +446,11 @@ fn apply_theme_and_accent(cx: &mut App) {
         theme.focus_ring = false;
         #[cfg(target_os = "macos")]
         {
-            // The switch thumb must stay visible against both the unchecked
-            // track and the accent track: white in dark mode, mid-gray in
-            // light mode. Option buttons keep their original library styling;
-            // only the selected tile is accent-tinted by `apply_accent`.
-            theme.colors.switch_thumb = if theme.mode.is_dark() {
-                hsla(0., 0., 1., 1.)
-            } else {
-                hsla(0., 0., 0.55, 1.)
-            };
+            // Keep the switch thumb white in both appearances, on both the
+            // unchecked track and the accent track. Option buttons keep their
+            // original library styling; only the selected tile is
+            // accent-tinted by `apply_accent`.
+            theme.colors.switch_thumb = hsla(0., 0., 1., 1.);
         }
         #[cfg(windows)]
         {
