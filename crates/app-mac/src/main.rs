@@ -501,7 +501,6 @@ mod macos {
     /// reference-counted away. Grow-only width keeps the block from shifting
     /// when values lose a digit.
     fn render_indicator(row: &FormattedRow, cfg: &Config) {
-        let mtm = mtm();
         let dual = cfg.display.dual_row && row.lines.len() > 1;
         let spacing = f64::from(cfg.display.item_spacing.max(1));
         // The menu-bar height (logical points) is the canvas height; drawing
@@ -646,8 +645,9 @@ mod macos {
         // rendering tints the alpha mask with the menu-bar foreground color,
         // so the background is a black wash in light mode and a white wash in
         // dark mode — the same direction as a native status-item highlight.
+        let normal_items = items.clone();
         let normal_block = block2::RcBlock::new(move |_rect: NSRect| -> Bool {
-            for it in &items {
+            for it in &normal_items {
                 it.attr.drawAtPoint(NSPoint::new(it.x, it.y));
             }
             Bool::YES
