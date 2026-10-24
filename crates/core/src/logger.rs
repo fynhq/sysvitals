@@ -7,6 +7,10 @@
 //! (`YYYY-MM-DD`) and time (`HH:MM:SS`) strings. This crate only handles file
 //! naming, rolling, formatting and retention pruning.
 //!
+//! Retention is applied both at startup (the first line of a process prunes)
+//! and on every date roll, so a process that stays resident for weeks prunes
+//! old daily files without needing a restart.
+//!
 //! Logging must never break the indicator, so every public function swallows
 //! I/O errors silently.
 
@@ -44,6 +48,11 @@ pub fn log_line(data_dir: &Path, date: &str, time: &str, level: &str, message: &
     if *date_guard != date {
         *file_guard = open_for_date(&log_dir(data_dir), date);
         *date_guard = date.to_string();
+        // A long-running process only rolls the file, it never restarts, so
+        // the startup-only prune would let the directory grow without bound.
+        // Pruning on the first line of each new local day keeps the retention
+        // window enforced for the life of the process.
+        prune_logs(data_dir, date, DEFAULT_RETENTION_DAYS);
     }
     if let Some(file) = file_guard.as_mut() {
         let _ = writeln!(file, "{date} {time} [{level}] {message}");
@@ -171,15 +180,38 @@ mod tests {
     fn log_line_writes_and_rolls() {
         let dir = std::env::temp_dir().join(format!("sysvitals-logwrite-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
+        let logs = log_dir(&dir);
+        fs::create_dir_all(&logs).unwrap();
+        // Two files with different ages: the first is already outside the
+        // retention window when the process starts, the second falls out on
+        // the next date roll (7 days old today, 8 tomorrow).
+        for name in ["sysvitals-2026-09-01.log", "sysvitals-2026-10-12.log"] {
+            fs::write(logs.join(name), b"x").unwrap();
+        }
         log_line(&dir, "2026-10-19", "13:00:00", "INFO", "hello");
+        // The first line of a process prunes, so a resident process does not
+        // need a restart to enforce retention.
+        assert!(
+            !logs.join("sysvitals-2026-09-01.log").exists(),
+            "stale file pruned on first line"
+        );
+        assert!(
+            logs.join("sysvitals-2026-10-12.log").exists(),
+            "file inside the window kept"
+        );
         log_line(&dir, "2026-10-19", "13:01:00", "WARN", "world");
         let f1 = log_dir(&dir).join("sysvitals-2026-10-19.log");
         let content = fs::read_to_string(&f1).unwrap();
         assert!(content.contains("2026-10-19 13:00:00 [INFO] hello"));
         assert!(content.contains("2026-10-19 13:01:00 [WARN] world"));
-        // Rolling to the next day creates a second file.
+        // Rolling to the next day creates a second file and prunes the file
+        // that has just crossed the seven-day boundary.
         log_line(&dir, "2026-10-20", "09:00:00", "INFO", "next day");
         assert!(log_dir(&dir).join("sysvitals-2026-10-20.log").exists());
+        assert!(
+            !logs.join("sysvitals-2026-10-12.log").exists(),
+            "file pruned on date roll"
+        );
         // Reset globals so other tests are unaffected.
         *LOG_FILE.lock().unwrap() = None;
         *LOG_DATE.lock().unwrap() = String::new();
