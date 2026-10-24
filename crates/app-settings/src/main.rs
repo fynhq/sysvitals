@@ -446,14 +446,15 @@ fn apply_theme_and_accent(cx: &mut App) {
         theme.focus_ring = false;
         #[cfg(target_os = "macos")]
         {
-            // On-device request: unselected option buttons are white in both
-            // appearances, while the selected tile keeps the system accent.
-            // A white fill needs a dark label; primary tiles are handled by
-            // `apply_accent` and keep the white accent foreground.
-            theme.colors.button = hsla(0., 0., 1., 1.);
-            theme.colors.button_hover = hsla(0., 0., 0.94, 1.);
-            theme.colors.button_active = hsla(0., 0., 0.88, 1.);
-            theme.colors.button_foreground = hsla(0., 0., 0.08, 1.);
+            // The switch thumb must stay visible against both the unchecked
+            // track and the accent track: white in dark mode, mid-gray in
+            // light mode. Option buttons keep their original library styling;
+            // only the selected tile is accent-tinted by `apply_accent`.
+            theme.colors.switch_thumb = if theme.mode.is_dark() {
+                hsla(0., 0., 1., 1.)
+            } else {
+                hsla(0., 0., 0.55, 1.)
+            };
         }
         #[cfg(windows)]
         {
