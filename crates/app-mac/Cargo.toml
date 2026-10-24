@@ -26,6 +26,7 @@ objc2-app-kit = { version = "=0.3.2", features = [
     "NSControl",
     "NSEvent",
     "NSFont",
+    "NSFontDescriptor",
     "NSImage",
     "NSMenu",
     "NSMenuItem",

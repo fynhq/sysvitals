@@ -28,9 +28,9 @@ mod macos {
     };
     use objc2_app_kit::{
         NSApplication, NSApplicationActivationPolicy, NSAttributedStringNSStringDrawing,
-        NSCellImagePosition, NSEventMask, NSEventType, NSFont, NSFontAttributeName, NSImage,
-        NSImageScaling, NSMenu, NSMenuItem, NSScreen, NSStatusBar, NSStatusItem, NSTrackingArea,
-        NSTrackingAreaOptions, NSVariableStatusItemLength, NSView,
+        NSCellImagePosition, NSEventMask, NSEventType, NSFont, NSFontAttributeName,
+        NSFontWeightSemibold, NSImage, NSImageScaling, NSMenu, NSMenuItem, NSScreen, NSStatusBar,
+        NSStatusItem, NSTrackingArea, NSTrackingAreaOptions, NSVariableStatusItemLength, NSView,
     };
     use objc2_foundation::{
         NSAttributedString, NSDictionary, NSObject, NSObjectProtocol, NSPoint, NSRect, NSRunLoop,
@@ -189,6 +189,20 @@ mod macos {
         /// One-shot diagnostic for a dual-row block that still exceeds the
         /// menu-bar thickness after the automatic font shrink.
         static DUAL_OVERFLOW_LOGGED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+
+        // --- Status-button highlight state --------------------------------
+        // AppKit's native highlight is otherwise tied to the pointer press:
+        // it clears on mouse-up, which reads as a brief flash instead of the
+        // persistent highlight system menu-bar extras show while their panel
+        // or menu is open. These three flags feed one refresh function.
+        static HOVERING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        static HISTORY_POPUP_OPEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        static CONTEXT_MENU_OPEN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        /// Polls the history child while the popup is open, so the highlight
+        /// clears promptly when it closes by blur/Esc rather than waiting for
+        /// the next sample tick (which can be 3s away).
+        static HISTORY_WATCH_TIMER: RefCell<Option<Retained<NSTimer>>> =
+            const { RefCell::new(None) };
     }
 
     /// Screen rectangle (left, top, right, bottom) in GPUI's global top-left,
@@ -437,6 +451,18 @@ mod macos {
         (runs, left_w, right_w, line_h)
     }
 
+    /// Font used for the two-line layout: the regular menu-bar face scaled
+    /// down to fit the fixed bar height would lose too much stroke weight, so
+    /// dual-row uses a semibold system face at the same reduced size. The
+    /// single-row layout keeps `menuBarFontOfSize(0.0)` untouched.
+    fn dual_row_font(size: f64) -> Retained<NSFont> {
+        // SAFETY: `NSFontWeightSemibold` is an AppKit extern static; reading
+        // any extern static is unsafe, matching the `NSFontAttributeName` use
+        // below. The value itself is a plain `CGFloat` constant.
+        let weight = unsafe { NSFontWeightSemibold };
+        NSFont::systemFontOfSize_weight(size, weight)
+    }
+
     /// Render the formatted frame into the status item as a self-drawn
     /// template image — the macOS counterpart of the Windows overlay's GDI
     /// painting, giving pixel control over dual-row alignment, item spacing
@@ -462,7 +488,7 @@ mod macos {
         let base = NSFont::menuBarFontOfSize(0.0);
         let mut font = if dual {
             let scaled = (base.pointSize() * DUAL_ROW_FONT_FACTOR).max(1.0);
-            NSFont::menuBarFontOfSize(scaled)
+            dual_row_font(scaled)
         } else {
             base
         };
@@ -494,7 +520,7 @@ mod macos {
             let mut attempts = 0;
             while block_h > img_h && attempts < 2 {
                 let factor = (img_h / block_h * 0.98).clamp(0.5, 1.0);
-                font = NSFont::menuBarFontOfSize((font.pointSize() * factor).max(1.0));
+                font = dual_row_font((font.pointSize() * factor).max(1.0));
                 let laid = layout_dual(row, &font);
                 runs = laid.0;
                 left_w = laid.1;
@@ -695,14 +721,21 @@ mod macos {
                 }
             }
         });
-        HISTORY_CHILD.with(|slot| {
+        let history_exited = HISTORY_CHILD.with(|slot| {
             let mut borrow = slot.borrow_mut();
             if let Some(child) = borrow.as_mut() {
                 if matches!(child.try_wait(), Ok(Some(_))) {
                     *borrow = None;
+                    return true;
                 }
             }
+            false
         });
+        if history_exited {
+            HISTORY_POPUP_OPEN.set(false);
+            stop_history_watch();
+            refresh_status_highlight();
+        }
     }
 
     /// Terminate a child panel and reap it so no zombie remains.
@@ -800,6 +833,11 @@ mod macos {
         match cmd.spawn() {
             Ok(child) => {
                 HISTORY_CHILD.with(|slot| *slot.borrow_mut() = Some(child));
+                // Keep the status item highlighted while the popup is open,
+                // like a system menu-bar extra with its panel showing.
+                HISTORY_POPUP_OPEN.set(true);
+                refresh_status_highlight();
+                start_history_watch();
             }
             Err(e) => log_event("WARN", &format!("launch_history: spawn failed: {e}")),
         }
@@ -811,7 +849,55 @@ mod macos {
     /// popup was closed; `false` when nothing was running (or it had already
     /// exited, which is reaped here so the slot is free for the next open).
     fn close_history() -> bool {
-        HISTORY_CHILD.with(|slot| terminate_child(slot, "history popup"))
+        let closed = HISTORY_CHILD.with(|slot| terminate_child(slot, "history popup"));
+        // Clear even when no live child was found: it may have just exited on
+        // its own while the watcher was between ticks.
+        HISTORY_POPUP_OPEN.set(false);
+        stop_history_watch();
+        refresh_status_highlight();
+        closed
+    }
+
+    /// Poll the history child while its popup is open. The child exits on
+    /// blur/Esc on its own, and the sample tick may be seconds away; this
+    /// watcher clears the persistent status highlight within ~150 ms.
+    fn start_history_watch() {
+        stop_history_watch();
+        let block = block2::RcBlock::new(|_timer: std::ptr::NonNull<NSTimer>| {
+            if HISTORY_CHILD.with(|slot| child_alive(slot)) {
+                return;
+            }
+            HISTORY_POPUP_OPEN.set(false);
+            refresh_status_highlight();
+            stop_history_watch();
+        });
+        // SAFETY: the block captures no non-Send state and runs on the main
+        // run loop, same contract as the sample timer above.
+        let timer = unsafe { NSTimer::timerWithTimeInterval_repeats_block(0.15, true, &block) };
+        let run_loop = NSRunLoop::mainRunLoop();
+        // SAFETY: adding a live timer to the current main run loop; common
+        // modes keep it alive during menu/popup tracking loops.
+        unsafe { run_loop.addTimer_forMode(&timer, NSRunLoopCommonModes) };
+        HISTORY_WATCH_TIMER.with(|slot| {
+            if let Some(prev) = slot.borrow_mut().replace(timer) {
+                prev.invalidate();
+            }
+        });
+    }
+
+    fn stop_history_watch() {
+        HISTORY_WATCH_TIMER.with(|slot| {
+            if let Some(timer) = slot.borrow_mut().take() {
+                timer.invalidate();
+            }
+        });
+    }
+
+    /// Recompute the status button's native highlight from all sources:
+    /// pointer hover, an open history popup, or an open context menu.
+    fn refresh_status_highlight() {
+        let on = HOVERING.get() || HISTORY_POPUP_OPEN.get() || CONTEXT_MENU_OPEN.get();
+        set_button_highlight(on);
     }
 
     /// Open Activity Monitor (macOS equivalent of Task Manager). `status()`
@@ -919,7 +1005,14 @@ mod macos {
             // runs a nested tracking loop that returns once the menu closes.
             let view: &NSView = &button;
             let location = NSPoint::new(0.0, button.bounds().size.height);
+            // `popUpMenuPositioningItem` runs the nested menu tracking loop and
+            // returns once the menu closes, so the button can hold the native
+            // highlight for the whole menu session like a system status item.
+            CONTEXT_MENU_OPEN.set(true);
+            refresh_status_highlight();
             let _ = menu.popUpMenuPositioningItem_atLocation_inView(None, location, Some(view));
+            CONTEXT_MENU_OPEN.set(false);
+            refresh_status_highlight();
         });
     }
 
@@ -1001,12 +1094,16 @@ mod macos {
             // current bounds so the grow-only width changes need no re-add.
             #[unsafe(method(mouseEntered:))]
             fn mouse_entered(&self, _event: Option<&AnyObject>) {
-                set_button_highlight(true);
+                HOVERING.set(true);
+                refresh_status_highlight();
             }
 
             #[unsafe(method(mouseExited:))]
             fn mouse_exited(&self, _event: Option<&AnyObject>) {
-                set_button_highlight(false);
+                HOVERING.set(false);
+                // An open popup or menu keeps the highlight on even after the
+                // pointer leaves, matching system menu-bar extras.
+                refresh_status_highlight();
             }
         }
 
