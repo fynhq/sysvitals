@@ -1464,7 +1464,7 @@ fn main() {
         };
 
         let window_options = WindowOptions {
-            window_bounds: Some(WindowBounds::centered(size(px(400.), px(720.)), cx)),
+            window_bounds: Some(WindowBounds::centered(size(px(400.), px(680.)), cx)),
             titlebar: Some(titlebar),
             // System backdrop material (Win11 Mica / Win10-era acrylic blur /
             // macOS window blur, with an opaque fallback on anything older or
