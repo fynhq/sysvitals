@@ -444,6 +444,17 @@ fn apply_theme_and_accent(cx: &mut App) {
     UiTheme::update(cx, |theme| {
         theme.font_size = px(16.);
         theme.focus_ring = false;
+        #[cfg(target_os = "macos")]
+        {
+            // On-device request: unselected option buttons are white in both
+            // appearances, while the selected tile keeps the system accent.
+            // A white fill needs a dark label; primary tiles are handled by
+            // `apply_accent` and keep the white accent foreground.
+            theme.colors.button = hsla(0., 0., 1., 1.);
+            theme.colors.button_hover = hsla(0., 0., 0.94, 1.);
+            theme.colors.button_active = hsla(0., 0., 0.88, 1.);
+            theme.colors.button_foreground = hsla(0., 0., 0.08, 1.);
+        }
         #[cfg(windows)]
         {
             if let Some(family) = panel_font_family() {
