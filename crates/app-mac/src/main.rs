@@ -1140,8 +1140,12 @@ mod macos {
                 if let Some(cell) = button.cell() {
                     cell.setHighlighted(on);
                 }
-                button.setNeedsDisplay(true);
-                button.displayIfNeeded();
+                // Call through `NSView` explicitly: `NSControl` also declares a
+                // deprecated zero-argument `setNeedsDisplay()`, which wins
+                // method resolution on the button and shadows the view method.
+                let view: &NSView = &button;
+                view.setNeedsDisplay(true);
+                view.displayIfNeeded();
             }
         });
     }
