@@ -458,6 +458,14 @@ fn apply_theme_and_accent(cx: &mut App) {
                 theme.font_family = family.into();
             }
             let dark = theme.mode.is_dark();
+            // The library's switch thumb falls back to the theme background:
+            // white in light mode, but neutral-950 in dark mode, which nearly
+            // disappears against the #404040 track. WinUI keeps the thumb
+            // white in both appearances; the checked track still follows the
+            // system accent through `tokens.primary` (apply_accent).
+            if dark {
+                theme.colors.switch_thumb = hsla(0., 0., 1., 1.);
+            }
             // WinUI control strokes and flyout surfaces. The library's
             // neutral-200/neutral-950 pair is much flatter than the Windows
             // Settings controls, which draw a visible stroke around a
