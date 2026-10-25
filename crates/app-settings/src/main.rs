@@ -1361,9 +1361,13 @@ impl Render for SettingsView {
         // logical pixels, so divide by the display scale to land on one
         // physical pixel on Retina instead of drawing a two-pixel line.
         let scale_factor = window.scale_factor();
-        // Grouped-card fill. Windows keeps the WinUI translucent lift over
-        // Mica. macOS uses a near-white card in light mode (the old 0.55
-        // white over the gray blur read as muddy gray next to System
+        // Grouped-card fill. Windows paints an opaque WinUI card tone: the
+        // platform renderer accumulates layer alpha additively, so a
+        // translucent card over the translucent page tint saturates to alpha 1
+        // and composites as an opaque gray — the Mica lift never reaches it.
+        // #FAFAFA / #2B2B2B are the opaque equivalents of WinUI's card over
+        // light / dark Mica. macOS uses a near-white card in light mode (the
+        // old 0.55 white over the gray blur read as muddy gray next to System
         // Settings) and a slightly stronger dark lift; the separators below
         // do the row grouping that the Windows gap used to do.
         let card_bg = {
@@ -1378,13 +1382,9 @@ impl Render for SettingsView {
             #[cfg(not(target_os = "macos"))]
             {
                 if dark {
-                    hsla(0., 0., 1., 0.06)
+                    hsla(0., 0., 0.17, 1.)
                 } else {
-                    // WinUI's CardBackgroundFillColorDefault is #B3FFFFFF
-                    // (70% white). The previous 55% let the tinted page show
-                    // through and read as a gray card next to Windows
-                    // Settings.
-                    hsla(0., 0., 1., 0.70)
+                    hsla(0., 0., 0.98, 1.)
                 }
             }
         };
