@@ -8,82 +8,140 @@
 
 ## English
 
-A lightweight CPU / memory / network monitor living in your taskbar (Windows) and menu bar (macOS).
+A lightweight CPU / memory / network monitor for the Windows taskbar and macOS menu bar. It shows live percentages and transfer rates, follows system font, DPI and appearance, and opens a CPU / memory history chart when clicked. Built in Rust, it aims to look native and stay cheap to run 24/7.
 
-SysVitals shows live percentages and transfer rates directly in the system status bar, follows
-your system font, DPI and light/dark theme, and opens a small history chart beside it when
-clicked. It is built in Rust and aims to stay visually native and negligibly cheap to run 24/7.
+### Supported systems
 
-### Status
-
-**Early development, no releases yet.** The core logic and the first working display layers are
-implemented:
-
-- `crates/core` — sampling (CPU / memory / network differentials), formatting, configuration,
-  history store, logging and i18n; pure Rust, unit-tested on any platform
-- `crates/app-win` — Windows taskbar indicator (topmost layered overlay + GDI text)
-- `crates/app-mac` — macOS menu-bar indicator (`NSStatusItem`)
-- `crates/app-settings` — settings window (GPUI), launched as a separate process
-- `crates/app-history` — CPU / memory trend-chart popup (GPUI), with one-click copy for pasting
-  into spreadsheets
-
-Nothing is tagged or packaged yet; the Windows and macOS layers are still being validated on real
-desktops.
-
-### Features
-
-- Taskbar (Windows) / menu bar (macOS) indicator for CPU, memory, upload and download
-- Configurable prefixes, single-line or dual-row layout, tray-adjacent or far-left anchoring on
-  Windows, vertical-taskbar support
-- Binary (1024-base) units with adaptive `B/s` / `K/s` / `M/s` / `G/s` rate formatting (the
-  compact no-`/s` form is used on a vertical taskbar, where the bar's thickness caps the width)
-- Light / dark theme following the system across the indicator, the settings window and the
-  history chart; the settings window's primary color follows the system accent color on both
-  platforms (Windows: Settings → Personalization → Colors; macOS: System Settings → Appearance),
-  while the chart series colors stay stable
-- Click the indicator to open a CPU / memory history chart beside it (5 min / 1 h / 1 d / 1 mo),
-  retained for up to a month, with one-click copy of the visible data as spreadsheet-friendly
-  rows; the popup closes on click-away or Esc
-- English and Chinese UI (switchable; prefixes are independent of language)
+- Windows 10 2004+ / 11 (x64 or arm64)
+- macOS 13+ (Apple Silicon or Intel)
 
 ### Footprint
 
-Measured on real machines with the release build running normally (all
-indicator groups on, default 2 s sampling, no popup open):
+Measured with the release build running normally (all groups on, default 2 s sampling, no popup):
 
-- Windows 11 taskbar indicator: **~17 MB** resident
-- macOS 27 (Apple Silicon) menu-bar indicator: **~18 MB** resident
+- Windows 11 taskbar: **~17 MB** resident
+- macOS 27 (Apple Silicon) menu bar: **~18 MB** resident
 
-### Building the core
+### Install
 
-Requirements: a stable Rust toolchain (`rust-toolchain.toml` pins it).
+**Windows**
 
-```sh
-cargo build            # cross-platform crate only (core)
-cargo test             # core unit tests
-cargo run -p sysvitals-core --example monitor   # terminal demo of the sampling loop
+1. Download the zip for your architecture from the [Releases page](https://github.com/fynhq/sysvitals/releases) and extract it.
+2. The archive contains one `SysVitals/` folder with `SysVitals.exe`, `SysVitalsSettings.exe`, `SysVitalsHistory.exe`, and `LICENSE`. Keep the three executables together.
+3. Run `SysVitals.exe`; Settings and History are launched by the indicator.
+4. The build is unsigned. If SmartScreen appears, choose **More info → Run anyway**.
+
+**macOS**
+
+1. Download the zip for your Mac from the [Releases page](https://github.com/fynhq/sysvitals/releases) and extract `SysVitals.app`.
+2. Move it to `/Applications` and launch the `.app` (not the binaries inside `Contents/MacOS`).
+3. The build is unsigned and not notarized. If macOS blocks it, try right-click → **Open**; otherwise open **System Settings → Privacy & Security → Open Anyway**. If it is still blocked, remove the quarantine flag:
+
+   ```sh
+   sudo xattr -d -r com.apple.quarantine /Applications/SysVitals.app
+   ```
+
+4. SysVitals appears in the menu bar; the indicator has no Dock icon (Settings may show one while open).
+
+### Upgrade
+
+SysVitals has no built-in auto-update; install a newer release manually.
+
+**Windows**
+
+1. Quit SysVitals.
+2. Download the new zip and replace the existing `SysVitals/` folder; keep the three executables together.
+3. Run `SysVitals.exe` again. Settings, history and logs in `%APPDATA%\SysVitals` are kept.
+
+**macOS**
+
+1. Quit SysVitals.
+2. Download the new zip and replace `/Applications/SysVitals.app`; leave `~/Library/Application Support/SysVitals` untouched.
+3. A newly downloaded app is quarantined again, so the command **must be re-run**:
+
+   ```sh
+   sudo xattr -d -r com.apple.quarantine /Applications/SysVitals.app
+   ```
+
+4. Launch the new `SysVitals.app`.
+
+### Usage
+
+- Click the indicator to open the CPU / memory history chart; click again, click away, or press Esc to close.
+- Right-click for the menu:
+  - Windows: Task Manager, Settings, Restart, Quit.
+  - macOS: Activity Monitor, Settings, Restart, Quit.
+- Settings save immediately; there is no Apply button. Quit closes the indicator and any open panels.
+- Configure language, sampling interval (1/2/3 s; default 2 s), layout, spacing, prefixes, indicator theme (Windows), and Windows taskbar anchor/margin. Vertical taskbars are supported.
+- Settings and history follow system appearance and accent color; the Windows indicator theme can be auto/light/dark.
+- History ranges: 5 minutes, 1 hour, 1 day, 1 month; up to one month is retained.
+- The copy button exports the visible range as tab-separated rows with a UTF-8 BOM.
+- Network rates are live-only; history and CSV cover CPU and memory.
+- All data stays local; no telemetry, cloud service, or account.
+
+### Verify the download
+
+Each zip has a matching `.sha256`; `SHA256SUMS` covers all assets.
+
+**Windows (PowerShell)**
+
+```powershell
+Get-FileHash .\SysVitals_Windows_x64_v<version>.zip -Algorithm SHA256
+Get-Content .\SysVitals_Windows_x64_v<version>.zip.sha256
 ```
 
-Platform display crates are isolated from the default build and are compiled explicitly on
-their own OS:
+**macOS**
 
 ```sh
-cargo build -p app-win        # Windows, MSVC toolchain
-cargo build -p app-mac        # macOS
-cargo build -p app-settings   # GPUI settings window (Windows / macOS)
-cargo build -p app-history    # GPUI history chart popup (Windows / macOS)
+shasum -a 256 -c SysVitals_macOS_arm64_v<version>.zip.sha256
+# or verify every asset at once:
+shasum -a 256 -c SHA256SUMS
+```
+
+Checksums verify download integrity, not a signature.
+
+### Data and uninstall
+
+**Windows**
+
+- Data: `%APPDATA%\SysVitals`.
+- Uninstall: quit SysVitals, delete the extracted `SysVitals/` folder, and remove the data folder to delete settings, history and logs.
+
+**macOS**
+
+- Data: `~/Library/Application Support/SysVitals`.
+- Uninstall: quit SysVitals, move `SysVitals.app` to the Trash, and remove the data folder.
+
+History is kept for up to one month; logs older than 7 days are removed.
+
+### Known limitations
+
+- Launch at login is not implemented.
+- Windows support covers the primary display only.
+- The month view may take a moment on first open.
+
+### Build from source
+
+Requires a stable Rust toolchain (`rust-toolchain.toml`). Windows uses MSVC; macOS uses the Xcode command-line tools.
+
+```sh
+cargo build
+cargo test
+cargo run -p sysvitals-core --example monitor
+```
+
+`cargo build` and `cargo test` cover the cross-platform core crate. Platform crates are built explicitly on their own OS:
+
+```sh
+cargo build -p app-win
+cargo build -p app-mac
+cargo build -p app-settings
+cargo build -p app-history
 ```
 
 ### Design notes
 
-SysVitals keeps all error-prone logic — counter differencing, wrap-around protection, NIC
-selection, unit selection, layout — in the pure-Rust `core` crate, where it is unit-tested on
-any platform. The status-bar surfaces themselves are drawn by thin, platform-native glue:
-on Windows a topmost layered popup aligned to the taskbar geometry (the taskbar is rendered by
-XAML Islands, so an embedded child window cannot draw crisply — verified empirically), on macOS
-an `NSStatusItem`. The settings window and history chart are separate GPUI processes launched by
-the indicator, so the resident indicator stays minimal (no UI toolkit, no modal loops in its own
-message pump).
+Counter differencing, wrap-around protection, NIC selection, units and layout live in the pure-Rust `core` crate and are unit-tested. The status bar is drawn by thin platform-native code: a topmost layered window on Windows and an `NSStatusItem` on macOS. Settings and history run as separate GPUI processes, keeping the resident indicator minimal.
 
 ### License
 
@@ -93,68 +151,140 @@ Released under the MIT License. See [LICENSE](LICENSE).
 
 ## 中文
 
-常驻 Windows 任务栏 / macOS 菜单栏的轻量 CPU、内存、网速监控，Rust 构建。
+常驻 Windows 任务栏 / macOS 菜单栏的轻量 CPU、内存、网速监控。实时显示占用百分比与上下行速度，字号、DPI 与亮暗跟随系统，点击可查看 CPU / 内存历史走势图；Rust 构建，目标是与系统原生一致且长期运行开销低。
 
-SysVitals 直接在系统状态栏里实时显示占用百分比与上下行速度，字号跟随系统、支持亮暗主题、
-DPI 自适应，点击状态栏项可弹出 CPU / 内存历史走势图。目标是视觉上像系统自带、长期运行
-开销可忽略。
+### 支持系统
 
-### 状态
-
-**开发早期，尚无发布版本。** 核心层与首版显示层已实现：
-
-- `crates/core` —— 采样（CPU / 内存 / 网络差分）、格式化、配置、历史存储、日志与国际化；纯 Rust，可在任意平台单元测试
-- `crates/app-win` —— Windows 任务栏指示器（topmost 分层窗口 + GDI 文本）
-- `crates/app-mac` —— macOS 菜单栏指示器（`NSStatusItem`）
-- `crates/app-settings` —— 设置窗口（GPUI），作为独立进程拉起
-- `crates/app-history` —— CPU / 内存走势图弹窗（GPUI），一键复制可粘贴进表格的数据
-
-尚未打 tag 或出包；Windows 与 macOS 显示层仍在真实桌面上验证。
-
-### 特性
-
-- 任务栏（Windows）/ 菜单栏（macOS）指示器：CPU、内存、上行、下行
-- 前缀可自定义，单行 / 双行布局，Windows 上可选托盘旁或最左侧锚位，支持垂直任务栏
-- 1024 进制，网速按 `B/s` / `K/s` / `M/s` / `G/s` 四档自适应（垂直任务栏下用去掉 `/s` 的紧凑形式，任务栏厚度限制宽度）
-- 亮 / 暗主题跟随系统，指示器、设置窗口与走势图三处同步；设置窗主色在两平台均跟随系统主题色
-  （Windows：设置 → 个性化 → 颜色；macOS：系统设置 → 外观），走势图两系列颜色保持稳定
-- 点击指示器在其旁弹出 CPU / 内存走势图（5 分钟 / 1 小时 / 1 天 / 1 个月），历史最长保留一个月，
-  一键复制当前可视范围数据（可直接粘贴进表格）；弹窗点击别处或按 Esc 自动关闭
-- 中英文界面（可切换；前缀不受语言影响）
+- Windows 10 2004+ / 11（x64 / arm64）
+- macOS 13+（Apple Silicon / Intel）
 
 ### 资源占用
 
-真机实测，release 构建正常运行状态（指标全开、默认 2 秒采样、无弹窗打开）：
+真机实测，release 构建正常运行（指标全开、默认 2 秒采样、无弹窗）：
 
-- Windows 11 任务栏指示器：常驻内存 **约 17 MB**
-- macOS 27（Apple Silicon）菜单栏指示器：常驻内存 **约 18 MB**
+- Windows 11 任务栏：常驻 **约 17 MB**
+- macOS 27（Apple Silicon）菜单栏：常驻 **约 18 MB**
 
-### 构建核心层
+### 安装
 
-要求：stable Rust 工具链（版本由 `rust-toolchain.toml` 锁定）。
+**Windows**
 
-```sh
-cargo build            # 仅跨平台 crate（core）
-cargo test             # 核心层单元测试
-cargo run -p sysvitals-core --example monitor   # 终端版采样循环演示
+1. 从 [Releases 页面](https://github.com/fynhq/sysvitals/releases) 下载对应架构的 zip 并解压。
+2. 压缩包内是单一 `SysVitals/` 目录，含 `SysVitals.exe`、`SysVitalsSettings.exe`、`SysVitalsHistory.exe` 和 `LICENSE`；三个 exe 请保持在一起。
+3. 运行 `SysVitals.exe`；设置与走势图由指示器自动拉起。
+4. 构建未签名。首次启动如出现 SmartScreen，选择“更多信息”→“仍要运行”。
+
+**macOS**
+
+1. 从 [Releases 页面](https://github.com/fynhq/sysvitals/releases) 下载对应 Mac 的 zip，解压 `SysVitals.app`。
+2. 移到 `/Applications`，启动 `.app`（不要直接运行 `Contents/MacOS` 里的二进制）。
+3. 构建未签名/未公证。如被拦截，先右键→“打开”；否则到“系统设置→隐私与安全性→仍要打开”。如仍被拦截，移除隔离标记：
+
+   ```sh
+   sudo xattr -d -r com.apple.quarantine /Applications/SysVitals.app
+   ```
+
+4. SysVitals 出现在菜单栏；指示器无 Dock 图标（设置窗打开时可能显示）。
+
+### 升级
+
+SysVitals 没有内置自动更新；需要手动安装新版。
+
+**Windows**
+
+1. 退出 SysVitals。
+2. 下载新 zip，替换旧的 `SysVitals/` 目录；三个 exe 保持在一起。
+3. 重新运行 `SysVitals.exe`。`%APPDATA%\SysVitals` 中的设置、历史与日志保留。
+
+**macOS**
+
+1. 退出 SysVitals。
+2. 下载新 zip，替换 `/Applications/SysVitals.app`；保留 `~/Library/Application Support/SysVitals`。
+3. 新下载的 app 会重新带上隔离标记，**必须重新执行**：
+
+   ```sh
+   sudo xattr -d -r com.apple.quarantine /Applications/SysVitals.app
+   ```
+
+4. 启动新版 `SysVitals.app`。
+
+### 使用
+
+- 单击指示器打开 CPU / 内存走势图；再次单击、点击别处或按 Esc 关闭。
+- 右键菜单：
+  - Windows：任务管理器、设置、重启、退出。
+  - macOS：活动监视器、设置、重启、退出。
+- 设置即时保存，没有应用按钮。退出会关闭指示器及所有打开的窗口。
+- 可配置语言、采样间隔（1/2/3 秒，默认 2 秒）、布局、间距、前缀、指示器主题（Windows）、Windows 任务栏锚位/边距。支持垂直任务栏。
+- 设置与走势图跟随系统亮暗与强调色；Windows 指示器主题可选自动/亮色/暗色。
+- 走势图范围：5 分钟、1 小时、1 天、1 个月；历史最多保留一个月。
+- 复制按钮导出当前可视范围，Tab 分隔 + UTF-8 BOM。
+- 网速只实时显示；历史与 CSV 覆盖 CPU / 内存。
+- 所有数据都在本地；无遥测、云服务或账号。
+
+### 校验下载
+
+每个 zip 都有同名 `.sha256`；`SHA256SUMS` 覆盖全部资产。
+
+**Windows（PowerShell）**
+
+```powershell
+Get-FileHash .\SysVitals_Windows_x64_v<version>.zip -Algorithm SHA256
+Get-Content .\SysVitals_Windows_x64_v<version>.zip.sha256
 ```
 
-平台显示 crate 已从默认构建隔离，需在各自系统上显式编译：
+**macOS**
 
 ```sh
-cargo build -p app-win        # Windows，需 MSVC 工具链
-cargo build -p app-mac        # macOS
-cargo build -p app-settings   # GPUI 设置窗（Windows / macOS）
-cargo build -p app-history    # GPUI 走势图弹窗（Windows / macOS）
+shasum -a 256 -c SysVitals_macOS_arm64_v<version>.zip.sha256
+# 或一次校验全部资产：
+shasum -a 256 -c SHA256SUMS
+```
+
+校验只保证下载完整，不代表签名。
+
+### 数据与卸载
+
+**Windows**
+
+- 数据：`%APPDATA%\SysVitals`。
+- 卸载：退出 SysVitals，删除解压出的 `SysVitals/` 目录；如需清除设置、历史与日志，再删除数据目录。
+
+**macOS**
+
+- 数据：`~/Library/Application Support/SysVitals`。
+- 卸载：退出 SysVitals，把 `SysVitals.app` 移到废纸篓；如需清除数据，再删除数据目录。
+
+历史最多保留一个月；日志超过 7 天自动清理。
+
+### 已知限制
+
+- 尚未实现开机自启。
+- Windows 仅支持主显示器。
+- 月视图首次打开可能需要一点时间。
+
+### 从源码构建
+
+要求 stable Rust 工具链（`rust-toolchain.toml`）。Windows 用 MSVC，macOS 用 Xcode 命令行工具。
+
+```sh
+cargo build
+cargo test
+cargo run -p sysvitals-core --example monitor
+```
+
+`cargo build` / `cargo test` 覆盖跨平台 core crate；平台 crate 需在各自系统显式编译：
+
+```sh
+cargo build -p app-win
+cargo build -p app-mac
+cargo build -p app-settings
+cargo build -p app-history
 ```
 
 ### 设计说明
 
-SysVitals 把所有容易出错的逻辑——计数器差分、回绕保护、网卡选择与聚合、单位换算、排版——
-收敛在纯 Rust 的 `core` crate 里，任何平台都能单元测试。状态栏表面本身由薄的平台原生胶水
-绘制：Windows 用贴合任务栏几何的 topmost 分层悬浮窗（任务栏由 XAML Islands 渲染，嵌入子窗
-无法清晰绘制——已实测证伪），macOS 用 `NSStatusItem`。设置窗与走势图是指示器拉起的独立 GPUI
-进程，常驻指示器进程因此保持精简（自身消息循环里没有 UI 工具包，也没有模态循环）。
+计数器差分、回绕保护、网卡选择、单位与排版都放在纯 Rust 的 `core` crate 中并做单元测试。状态栏由薄的平台原生代码绘制：Windows 为 topmost 分层窗口，macOS 为 `NSStatusItem`。设置与走势图是独立 GPUI 进程，常驻指示器保持精简。
 
 ### 许可
 
