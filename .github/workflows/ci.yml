@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
 
 env:
@@ -24,6 +25,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Verify tag matches workspace version
+        if: github.ref_type == 'tag'
+        shell: bash
+        run: |
+          version=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "tag $GITHUB_REF_NAME does not match workspace version v$version" >&2
+            exit 1
+          fi
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -55,6 +65,8 @@ jobs:
             target: x86_64-pc-windows-msvc
           - arch: arm64
             target: aarch64-pc-windows-msvc
+    env:
+      SV_BUILD_ID_OVERRIDE: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -72,20 +84,23 @@ jobs:
       - name: Build GPUI history chart
         run: cargo build --locked --release --target ${{ matrix.target }} -p app-history
       # Portable (green) distribution: one SysVitals/ directory containing the
-      # overlay, settings and history executables plus LICENSE. Package name:
-      # SysVitals_Windows_{arch}_v{version}_{short-hash}_dev.zip. The version
-      # comes from the workspace Cargo.toml and the commit stamp from
-      # `git rev-parse --short HEAD`, matching the settings footer. The `_dev`
-      # suffix marks a development-phase build and is dropped at the first
-      # tagged release.
+      # overlay, settings and history executables, LICENSE and the generated
+      # third-party notices. Tag builds use the exact tag version, e.g.
+      # SysVitals_Windows_{arch}_v0.1.0-rc.1.zip; main builds keep the dev name
+      # with the workspace version, short commit hash and `_dev` suffix.
       - name: Package Windows portable zip
         shell: pwsh
         run: |
           $version = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
-          $commit = (git rev-parse --short HEAD)
           $arch = "${{ matrix.arch }}"
           $target = "${{ matrix.target }}"
-          $zip = "SysVitals_Windows_${arch}_v${version}_${commit}_dev.zip"
+          if ($env:GITHUB_REF_TYPE -eq "tag") {
+            $releaseVersion = $env:GITHUB_REF_NAME -replace "^v", ""
+            $zip = "SysVitals_Windows_${arch}_v${releaseVersion}.zip"
+          } else {
+            $commit = (git rev-parse --short HEAD)
+            $zip = "SysVitals_Windows_${arch}_v${version}_${commit}_dev.zip"
+          }
           $stage = "SysVitals"
           Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Path $stage | Out-Null
@@ -93,7 +108,8 @@ jobs:
             "target/$target/release/SysVitals.exe",
             "target/$target/release/SysVitalsSettings.exe",
             "target/$target/release/SysVitalsHistory.exe",
-            "LICENSE"
+            "LICENSE",
+            "THIRD_PARTY_NOTICES.md"
           )
           foreach ($f in $files) {
             if (!(Test-Path $f)) { throw "missing build output: $f" }
@@ -121,6 +137,7 @@ jobs:
             target: x86_64-apple-darwin
     env:
       MACOSX_DEPLOYMENT_TARGET: "13.0"
+      SV_BUILD_ID_OVERRIDE: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -139,18 +156,23 @@ jobs:
         run: cargo build --locked --release --target ${{ matrix.target }} -p app-history
       # One bundle, not three apps: the indicator is the declared
       # CFBundleExecutable, and the settings/history binaries are sibling
-      # executables it launches from Contents/MacOS. Package name:
-      # SysVitals_macOS_{arch}_v{version}_{short-hash}_dev.zip. The version is
-      # read from the workspace Cargo.toml and the commit stamp from
-      # `git rev-parse --short HEAD`, matching the Windows step. The bundle
-      # also carries LICENSE under Contents/Resources. The `_dev` suffix marks
-      # a development-phase build and is dropped at the first tagged release.
+      # executables it launches from Contents/MacOS. Tag builds use the exact
+      # tag version in the zip name; main builds keep the dev name. The bundle
+      # also carries LICENSE and the generated third-party notices under
+      # Contents/Resources.
       - name: Package macOS app bundle
         run: |
           version=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
-          commit=$(git rev-parse --short HEAD)
           arch="${{ matrix.arch }}"
           target="${{ matrix.target }}"
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            release_version="${GITHUB_REF_NAME#v}"
+            short_version="${release_version%%-*}"
+          else
+            commit=$(git rev-parse --short HEAD)
+            release_version="$version"
+            short_version="${version%%-*}"
+          fi
           app="SysVitals.app"
           bin="target/$target/release"
           rm -rf "$app"
@@ -167,17 +189,180 @@ jobs:
           cp crates/app-mac/assets/Info.plist "$app/Contents/Info.plist"
           cp crates/app-mac/assets/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
           cp LICENSE "$app/Contents/Resources/LICENSE"
-          # The plist is a template; substitute the workspace version and a
+          cp THIRD_PARTY_NOTICES.md "$app/Contents/Resources/THIRD_PARTY_NOTICES.md"
+          # The plist is a template; substitute the numeric base version and a
           # numeric build number so Finder/Get Info never shows a stale 0.0.0.
+          # rc tags keep the rc suffix in the zip/tag/settings footer, while
+          # CFBundleShortVersionString stays a plain numeric version.
           # `github.run_number` is monotonic even on the default shallow clone;
           # `git rev-list --count HEAD` would always be 1 there.
-          plutil -replace CFBundleShortVersionString -string "$version" "$app/Contents/Info.plist"
+          plutil -replace CFBundleShortVersionString -string "$short_version" "$app/Contents/Info.plist"
           plutil -replace CFBundleVersion -string "${{ github.run_number }}" "$app/Contents/Info.plist"
-          zip -qr "SysVitals_macOS_${arch}_v${version}_${commit}_dev.zip" "$app"
-          echo "Packaged SysVitals_macOS_${arch}_v${version}_${commit}_dev.zip"
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            zip_name="SysVitals_macOS_${arch}_v${release_version}.zip"
+          else
+            zip_name="SysVitals_macOS_${arch}_v${release_version}_${commit}_dev.zip"
+          fi
+          zip -qr "$zip_name" "$app"
+          echo "Packaged $zip_name"
       - name: Upload macOS app bundle
         uses: actions/upload-artifact@v4
         with:
           name: SysVitals-macos-${{ matrix.arch }}
           path: SysVitals_macOS_${{ matrix.arch }}_*.zip
           if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Release gate: tag pushes only. The four build legs have already produced
+  # the formal zips; this job validates their contents, writes the per-archive
+  # .sha256 files plus SHA256SUMS, creates a draft Release from the annotated
+  # tag message, and re-downloads the uploaded assets to verify the upload.
+  #
+  # rc tags are marked --prerelease and stay drafts until the user publishes
+  # them. The final 0.1.0 tag follows the same path without --prerelease.
+  # ---------------------------------------------------------------------------
+  release:
+    name: Draft release
+    if: github.ref_type == 'tag'
+    needs: [quality, build-windows, build-macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - name: Read release metadata
+        id: meta
+        shell: bash
+        run: |
+          version=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "tag $GITHUB_REF_NAME does not match workspace version v$version" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          case "$version" in
+            *-*) echo "prerelease=true" >> "$GITHUB_OUTPUT" ;;
+            *)   echo "prerelease=false" >> "$GITHUB_OUTPUT" ;;
+          esac
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: SysVitals-*
+          path: release-assets
+          merge-multiple: true
+      - name: Validate release assets
+        shell: bash
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          cd release-assets
+
+          expected=(
+            "SysVitals_Windows_x64_v${VERSION}.zip"
+            "SysVitals_Windows_arm64_v${VERSION}.zip"
+            "SysVitals_macOS_arm64_v${VERSION}.zip"
+            "SysVitals_macOS_x64_v${VERSION}.zip"
+          )
+          for f in "${expected[@]}"; do
+            test -f "$f" || { echo "missing asset: $f" >&2; exit 1; }
+          done
+          if find . -maxdepth 1 -name '*_dev.zip' | grep -q .; then
+            echo "development assets must not be published" >&2
+            exit 1
+          fi
+
+          find . -maxdepth 1 -name 'SysVitals_*.zip' -printf '%f\n' | LC_ALL=C sort > /tmp/actual-zips
+          printf '%s\n' "${expected[@]}" | LC_ALL=C sort > /tmp/expected-zips
+          diff -u /tmp/expected-zips /tmp/actual-zips
+
+          windows_zip="SysVitals_Windows_x64_v${VERSION}.zip"
+          for entry in \
+            "SysVitals/SysVitals.exe" \
+            "SysVitals/SysVitalsSettings.exe" \
+            "SysVitals/SysVitalsHistory.exe" \
+            "SysVitals/LICENSE" \
+            "SysVitals/THIRD_PARTY_NOTICES.md"; do
+            unzip -Z1 "$windows_zip" | tr '\\' '/' | grep -Fxq "$entry" \
+              || { echo "missing in $windows_zip: $entry" >&2; exit 1; }
+          done
+
+          macos_zip="SysVitals_macOS_arm64_v${VERSION}.zip"
+          for entry in \
+            "SysVitals.app/Contents/MacOS/sysvitals" \
+            "SysVitals.app/Contents/MacOS/SysVitalsSettings" \
+            "SysVitals.app/Contents/MacOS/SysVitalsHistory" \
+            "SysVitals.app/Contents/Info.plist" \
+            "SysVitals.app/Contents/Resources/AppIcon.icns" \
+            "SysVitals.app/Contents/Resources/LICENSE" \
+            "SysVitals.app/Contents/Resources/THIRD_PARTY_NOTICES.md"; do
+            unzip -Z1 "$macos_zip" | tr '\\' '/' | grep -Fxq "$entry" \
+              || { echo "missing in $macos_zip: $entry" >&2; exit 1; }
+          done
+
+          unzip -p "$macos_zip" "SysVitals.app/Contents/Info.plist" > /tmp/Info.plist
+          python3 - "$VERSION" <<'PY'
+          import plistlib
+          import sys
+
+          version = sys.argv[1]
+          base = version.split("-", 1)[0]
+          with open("/tmp/Info.plist", "rb") as fh:
+              plist = plistlib.load(fh)
+          assert plist["CFBundleShortVersionString"] == base, plist
+          assert str(plist["CFBundleVersion"]).strip(), plist
+          print(f"plist ok: {base} / {plist['CFBundleVersion']}")
+          PY
+
+          for zip in "${expected[@]}"; do
+            sha256sum "$zip" > "$zip.sha256"
+          done
+          sha256sum "${expected[@]}" | LC_ALL=C sort -k2 > SHA256SUMS
+          echo "checksums written for ${#expected[@]} assets"
+      - name: Create draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          PRERELEASE: ${{ steps.meta.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            is_draft=$(gh release view "$TAG" --json isDraft --jq .isDraft)
+            if [ "$is_draft" != "true" ]; then
+              echo "release $TAG is already published" >&2
+              exit 1
+            fi
+            gh release upload "$TAG" release-assets/* --clobber
+          else
+            args=( "$TAG" --title "sysvitals v$VERSION" --draft --verify-tag --notes-from-tag )
+            if [ "$PRERELEASE" = "true" ]; then
+              args+=(--prerelease)
+            fi
+            gh release create "${args[@]}" release-assets/*
+          fi
+      - name: Verify uploaded assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p verify
+          gh release download "$TAG" --dir verify
+          cd verify
+          test -f SHA256SUMS
+          sha256sum -c SHA256SUMS
+          for f in SysVitals_*.zip; do
+            test -f "$f.sha256"
+            sha256sum -c "$f.sha256"
+          done
+          echo "uploaded assets verified"
+      - name: Show draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release view "$TAG"
