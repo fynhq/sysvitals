@@ -28,7 +28,9 @@ use windows::Win32::UI::HiDpi::{
 use gpui_kit::component::button::*;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::scroll::ScrollableElement as _;
+#[cfg(windows)]
 use gpui_kit::component::searchable_list::SearchableVec;
+#[cfg(windows)]
 use gpui_kit::component::select::{Select, SelectEvent, SelectState};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::theme::Theme as UiTheme;
@@ -143,6 +145,172 @@ fn taskbar_is_vertical() -> bool {
 #[cfg(not(windows))]
 fn taskbar_is_vertical() -> bool {
     false
+}
+
+// ---------------------------------------------------------------------------
+// Native macOS dropdown menus
+// ---------------------------------------------------------------------------
+
+/// A system menu for the three string dropdowns on macOS.
+///
+/// The GPUI `Select` popover is a deferred element inside the settings
+/// window, so it can never blur the desktop behind it: a translucent surface
+/// would reveal the settings rows underneath, not the window material. Native
+/// menus own their own vibrant window, which is the platform-correct way to
+/// get the blur (and the keyboard/dismiss behavior) users expect from a
+/// dropdown on macOS.
+#[cfg(target_os = "macos")]
+mod macos_select {
+    use std::cell::Cell;
+
+    use objc2::rc::Retained;
+    use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
+    use objc2_app_kit::{
+        NSAppearanceCustomization, NSApplication, NSControlStateValueOn, NSEvent, NSMenu,
+        NSMenuItem, NSView,
+    };
+    use objc2_foundation::{NSObject, NSObjectProtocol, NSString};
+
+    thread_local! {
+        static MENU_SELECTION: Cell<Option<isize>> = const { Cell::new(None) };
+    }
+
+    define_class!(
+        // SAFETY: NSObject has no subclassing requirements; no Drop impl.
+        #[unsafe(super(NSObject))]
+        #[thread_kind = MainThreadOnly]
+        #[name = "SysVitalsSettingsMenuTarget"]
+        struct MenuTarget;
+
+        impl MenuTarget {
+            #[unsafe(method(selectItem:))]
+            fn select_item(&self, sender: Option<&NSMenuItem>) {
+                if let Some(item) = sender {
+                    MENU_SELECTION.with(|slot| slot.set(Some(item.tag())));
+                }
+            }
+        }
+
+        unsafe impl NSObjectProtocol for MenuTarget {}
+    );
+
+    impl MenuTarget {
+        fn new(mtm: MainThreadMarker) -> Retained<Self> {
+            let this = Self::alloc(mtm);
+            // SAFETY: MenuTarget does not override init; this dispatches to
+            // NSObject's init, avoiding the super() wrapper's RetainSemantics
+            // issues with Allocated<T> in objc2 0.6.5.
+            unsafe { msg_send![this, init] }
+        }
+    }
+
+    /// Show `items` at the pointer as a native menu and return the chosen
+    /// index. The current item carries the system checkmark. `None` means the
+    /// menu was dismissed without a selection (or no window was available).
+    pub fn show(items: &[String], selected: usize) -> Option<usize> {
+        if items.is_empty() {
+            return None;
+        }
+        let mtm = MainThreadMarker::new()?;
+        let app = NSApplication::sharedApplication(mtm);
+        let Some(window) = app.keyWindow().or_else(|| app.mainWindow()) else {
+            eprintln!("app-settings: native select menu has no window");
+            return None;
+        };
+        let Some(view) = window.contentView() else {
+            eprintln!("app-settings: native select menu has no content view");
+            return None;
+        };
+
+        let menu = NSMenu::new(mtm);
+        // Every item has an explicit target/action below; automatic enabling
+        // would otherwise walk the responder chain and gray them out.
+        menu.setAutoenablesItems(false);
+        // A menu raised from a vibrant window can inherit the button's
+        // appearance and render dark in light mode. Follow the app's
+        // effective appearance, like the indicator's context menu.
+        let appearance = app.effectiveAppearance();
+        menu.setAppearance(Some(&appearance));
+
+        let target = MenuTarget::new(mtm);
+        let target_ref: &MenuTarget = &target;
+        for (index, label) in items.iter().enumerate() {
+            let item = NSMenuItem::new(mtm);
+            item.setTitle(&NSString::from_str(label));
+            // SAFETY: the selector is implemented by MenuTarget above.
+            unsafe { item.setAction(Some(sel!(selectItem:))) };
+            // SAFETY: target_ref stays alive through the nested tracking loop.
+            unsafe { item.setTarget(Some(target_ref)) };
+            item.setTag(index as isize);
+            if index == selected {
+                item.setState(NSControlStateValueOn);
+            }
+            menu.addItem(&item);
+        }
+
+        // `mouseLocation` is in screen coordinates; convert through the
+        // window into its content view, the space popUpMenuPositioningItem
+        // expects. The menu's upper-left lands at the click point, like a
+        // context menu raised from the trigger.
+        let screen_point = NSEvent::mouseLocation();
+        let window_point = window.convertPointFromScreen(screen_point);
+        let view_point = view.convertPoint_fromView(window_point, None);
+        let view_ref: &NSView = &view;
+
+        MENU_SELECTION.with(|slot| slot.set(None));
+        let _ = menu.popUpMenuPositioningItem_atLocation_inView(None, view_point, Some(view_ref));
+        MENU_SELECTION
+            .with(|slot| slot.take())
+            .and_then(|tag| usize::try_from(tag).ok())
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Copy, Clone)]
+struct MacSelectStyle {
+    background: Hsla,
+    foreground: Hsla,
+    border: Hsla,
+    caret: Hsla,
+    radius: Pixels,
+}
+
+/// The macOS dropdown trigger: the same filled control look as the GPUI
+/// Select, but clicking it raises a native menu instead of an in-window
+/// popover. Width is owned by the caller so all three dropdowns keep their
+/// existing layout slots.
+#[cfg(target_os = "macos")]
+fn mac_select_trigger(
+    id: &'static str,
+    label: String,
+    style: MacSelectStyle,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    h_flex()
+        .id(id)
+        .w_full()
+        .h(px(32.))
+        .px(px(10.))
+        .items_center()
+        .justify_between()
+        .gap_1()
+        .bg(style.background)
+        .text_color(style.foreground)
+        .border_1()
+        .border_color(style.border)
+        .rounded(style.radius)
+        .cursor_pointer()
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .whitespace_nowrap()
+                .truncate()
+                .child(label),
+        )
+        .child(Icon::new(IconName::ChevronDown).text_color(style.caret))
+        .on_click(on_click)
 }
 
 // ---------------------------------------------------------------------------
@@ -507,7 +675,9 @@ fn anchor_items(lang: Language) -> Vec<String> {
 }
 
 /// Every dropdown here is a single-choice list of strings (pixel values
-/// rendered as decimal text, or translated anchor labels).
+/// rendered as decimal text, or translated anchor labels). macOS uses native
+/// menus instead, so this state exists only on Windows.
+#[cfg(windows)]
 type StringSelectState = SelectState<SearchableVec<String>>;
 
 // ---------------------------------------------------------------------------
@@ -532,9 +702,14 @@ struct SettingsView {
     margin_idx: usize,
     theme_idx: usize,
     anchor_idx: usize,
-    // Dropdown states (item text may carry the selected language)
+    // Dropdown states (item text may carry the selected language). Windows
+    // renders the library Select; macOS raises a native menu from the index
+    // fields instead.
+    #[cfg(windows)]
     spacing_select: Entity<StringSelectState>,
+    #[cfg(windows)]
     margin_select: Entity<StringSelectState>,
+    #[cfg(windows)]
     anchor_select: Entity<StringSelectState>,
     /// Whether the layout section is offered on this machine (see
     /// `layout_available`). False hides it entirely.
@@ -608,7 +783,9 @@ impl SettingsView {
             Theme::Dark => 2,
         };
 
+        #[cfg(windows)]
         let lang = Language::ALL[lang_idx];
+        #[cfg(windows)]
         let spacing_select = cx.new(|cx| {
             SelectState::new(
                 SearchableVec::new(px_items(&ALLOWED_ITEM_SPACING_PX)),
@@ -617,6 +794,7 @@ impl SettingsView {
                 cx,
             )
         });
+        #[cfg(windows)]
         let margin_select = cx.new(|cx| {
             SelectState::new(
                 SearchableVec::new(px_items(&ALLOWED_LEFT_MARGIN_PX)),
@@ -625,6 +803,7 @@ impl SettingsView {
                 cx,
             )
         });
+        #[cfg(windows)]
         let anchor_select = cx.new(|cx| {
             SelectState::new(
                 SearchableVec::new(anchor_items(lang)),
@@ -637,41 +816,44 @@ impl SettingsView {
         // Every change is applied immediately: dropdown selections commit on
         // confirm, text fields commit on blur or Enter.
         let mut _subscriptions: Vec<Subscription> = Vec::new();
-        _subscriptions.push(cx.subscribe(&spacing_select, |this: &mut Self, _, ev, cx| {
-            if let SelectEvent::Confirm(Some(value)) = ev {
-                if let Some(i) = ALLOWED_ITEM_SPACING_PX
-                    .iter()
-                    .position(|p| value.parse::<u32>().ok() == Some(*p))
-                {
-                    this.spacing_idx = i;
-                    this.save(cx);
-                    cx.notify();
+        #[cfg(windows)]
+        {
+            _subscriptions.push(cx.subscribe(&spacing_select, |this: &mut Self, _, ev, cx| {
+                if let SelectEvent::Confirm(Some(value)) = ev {
+                    if let Some(i) = ALLOWED_ITEM_SPACING_PX
+                        .iter()
+                        .position(|p| value.parse::<u32>().ok() == Some(*p))
+                    {
+                        this.spacing_idx = i;
+                        this.save(cx);
+                        cx.notify();
+                    }
                 }
-            }
-        }));
-        _subscriptions.push(cx.subscribe(&margin_select, |this: &mut Self, _, ev, cx| {
-            if let SelectEvent::Confirm(Some(value)) = ev {
-                if let Some(i) = ALLOWED_LEFT_MARGIN_PX
-                    .iter()
-                    .position(|p| value.parse::<u32>().ok() == Some(*p))
-                {
-                    this.margin_idx = i;
-                    this.save(cx);
-                    cx.notify();
+            }));
+            _subscriptions.push(cx.subscribe(&margin_select, |this: &mut Self, _, ev, cx| {
+                if let SelectEvent::Confirm(Some(value)) = ev {
+                    if let Some(i) = ALLOWED_LEFT_MARGIN_PX
+                        .iter()
+                        .position(|p| value.parse::<u32>().ok() == Some(*p))
+                    {
+                        this.margin_idx = i;
+                        this.save(cx);
+                        cx.notify();
+                    }
                 }
-            }
-        }));
-        _subscriptions.push(cx.subscribe(&anchor_select, |this: &mut Self, _, ev, cx| {
-            if let SelectEvent::Confirm(Some(value)) = ev {
-                let items = anchor_items(this.current_lang());
-                if let Some(i) = items.iter().position(|s| s == value) {
-                    this.anchor_idx = i;
-                    this.save(cx);
-                    // The margin row appears only for the far-left anchor.
-                    cx.notify();
+            }));
+            _subscriptions.push(cx.subscribe(&anchor_select, |this: &mut Self, _, ev, cx| {
+                if let SelectEvent::Confirm(Some(value)) = ev {
+                    let items = anchor_items(this.current_lang());
+                    if let Some(i) = items.iter().position(|s| s == value) {
+                        this.anchor_idx = i;
+                        this.save(cx);
+                        // The margin row appears only for the far-left anchor.
+                        cx.notify();
+                    }
                 }
-            }
-        }));
+            }));
+        }
         for state in [&prefix_cpu, &prefix_mem, &prefix_up, &prefix_down] {
             _subscriptions.push(
                 cx.subscribe(state, |this: &mut Self, _, ev: &InputEvent, cx| {
@@ -716,8 +898,11 @@ impl SettingsView {
             margin_idx,
             theme_idx,
             anchor_idx,
+            #[cfg(windows)]
             spacing_select,
+            #[cfg(windows)]
             margin_select,
+            #[cfg(windows)]
             anchor_select,
             layout_available: layout_available(),
             vertical_taskbar: taskbar_is_vertical(),
@@ -841,12 +1026,21 @@ impl SettingsView {
     /// keeping the current selection. The dropdown entity and its
     /// subscription stay in place; only the items are swapped.
     fn refresh_anchor_items(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let items = anchor_items(self.current_lang());
-        let idx = self.anchor_idx;
-        self.anchor_select.update(cx, |state, cx| {
-            state.set_items(SearchableVec::new(items), window, cx);
-            state.set_selected_index(Some(IndexPath::new(idx)), window, cx);
-        });
+        #[cfg(windows)]
+        {
+            let items = anchor_items(self.current_lang());
+            let idx = self.anchor_idx;
+            self.anchor_select.update(cx, |state, cx| {
+                state.set_items(SearchableVec::new(items), window, cx);
+                state.set_selected_index(Some(IndexPath::new(idx)), window, cx);
+            });
+        }
+        #[cfg(not(windows))]
+        {
+            // macOS builds the native menu from `anchor_items` on every
+            // click, so there is no persistent list to refresh here.
+            let _ = (window, cx);
+        }
     }
 }
 
@@ -1077,9 +1271,13 @@ impl Render for SettingsView {
                 None
             }
         };
+        #[cfg(windows)]
         let mut spacing_select = Select::new(&self.spacing_select);
+        #[cfg(windows)]
         let mut margin_select = Select::new(&self.margin_select);
+        #[cfg(windows)]
         let mut anchor_select = Select::new(&self.anchor_select);
+        #[cfg(windows)]
         if let Some((bg, border, radius)) = control {
             spacing_select = spacing_select
                 .bg(bg)
@@ -1094,6 +1292,69 @@ impl Render for SettingsView {
                 .border_color(border)
                 .rounded(px(radius));
         }
+
+        // macOS raises the three dropdowns as native menus. The trigger keeps
+        // the same 160/240px slots and filled-control look, so the layout
+        // below is shared with Windows.
+        #[cfg(target_os = "macos")]
+        let mac_style = {
+            let theme = cx.theme();
+            MacSelectStyle {
+                background: theme.input_background(),
+                foreground: theme.foreground,
+                border: theme.input,
+                caret: theme.muted_foreground,
+                radius: theme.radius,
+            }
+        };
+        #[cfg(windows)]
+        let spacing_control = blur_on_outside(div().w(px(160.))).child(spacing_select);
+        #[cfg(windows)]
+        let margin_control = blur_on_outside(div().w(px(160.))).child(margin_select);
+        #[cfg(windows)]
+        let anchor_control = blur_on_outside(div().w(px(240.))).child(anchor_select);
+        #[cfg(target_os = "macos")]
+        let spacing_control = div().w(px(160.)).child(mac_select_trigger(
+            "spacing-trigger",
+            px_items(&ALLOWED_ITEM_SPACING_PX)[self.spacing_idx].clone(),
+            mac_style,
+            cx.listener(|this, _, _, cx| {
+                let items = px_items(&ALLOWED_ITEM_SPACING_PX);
+                if let Some(index) = macos_select::show(&items, this.spacing_idx) {
+                    this.spacing_idx = index;
+                    this.save(cx);
+                    cx.notify();
+                }
+            }),
+        ));
+        #[cfg(target_os = "macos")]
+        let margin_control = div().w(px(160.)).child(mac_select_trigger(
+            "margin-trigger",
+            px_items(&ALLOWED_LEFT_MARGIN_PX)[self.margin_idx].clone(),
+            mac_style,
+            cx.listener(|this, _, _, cx| {
+                let items = px_items(&ALLOWED_LEFT_MARGIN_PX);
+                if let Some(index) = macos_select::show(&items, this.margin_idx) {
+                    this.margin_idx = index;
+                    this.save(cx);
+                    cx.notify();
+                }
+            }),
+        ));
+        #[cfg(target_os = "macos")]
+        let anchor_control = div().w(px(240.)).child(mac_select_trigger(
+            "anchor-trigger",
+            anchor_items(self.current_lang())[self.anchor_idx].clone(),
+            mac_style,
+            cx.listener(|this, _, _, cx| {
+                let items = anchor_items(this.current_lang());
+                if let Some(index) = macos_select::show(&items, this.anchor_idx) {
+                    this.anchor_idx = index;
+                    this.save(cx);
+                    cx.notify();
+                }
+            }),
+        ));
 
         let dark = cx.theme().mode.is_dark();
         // Native separators are hairlines: one device pixel. GPUI lays out in
@@ -1192,7 +1453,7 @@ impl Render for SettingsView {
             })
             .child(labeled_row(
                 t(lang, "settings.item_spacing").to_string(),
-                blur_on_outside(div().w(px(160.))).child(spacing_select),
+                spacing_control,
             ));
 
         // One layout card holds the anchor and margin rows together; either
@@ -1203,7 +1464,7 @@ impl Render for SettingsView {
         if self.layout_available && !self.vertical_taskbar {
             layout_card = layout_card.child(labeled_row(
                 t(lang, "settings.anchor").to_string(),
-                blur_on_outside(div().w(px(240.))).child(anchor_select),
+                anchor_control,
             ));
             show_layout = true;
         }
@@ -1219,7 +1480,7 @@ impl Render for SettingsView {
                 } else {
                     t(lang, "settings.left_margin").to_string()
                 },
-                blur_on_outside(div().w(px(160.))).child(margin_select),
+                margin_control,
             ));
             show_layout = true;
         }
