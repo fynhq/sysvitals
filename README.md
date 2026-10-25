@@ -81,7 +81,7 @@ SysVitals has no built-in auto-update; install a newer release manually.
 
 ### Verify the download
 
-Each zip has a matching `.sha256`; `SHA256SUMS` covers all assets.
+Each zip has a matching `.sha256` file.
 
 **Windows (PowerShell)**
 
@@ -94,8 +94,6 @@ Get-Content .\SysVitals_Windows_x64_v<version>.zip.sha256
 
 ```sh
 shasum -a 256 -c SysVitals_macOS_arm64_v<version>.zip.sha256
-# or verify every asset at once:
-shasum -a 256 -c SHA256SUMS
 ```
 
 Checksums verify download integrity, not a signature.
@@ -224,7 +222,7 @@ SysVitals 没有内置自动更新；需要手动安装新版。
 
 ### 校验下载
 
-每个 zip 都有同名 `.sha256`；`SHA256SUMS` 覆盖全部资产。
+每个 zip 都有同名 `.sha256`。
 
 **Windows（PowerShell）**
 
@@ -237,8 +235,6 @@ Get-Content .\SysVitals_Windows_x64_v<version>.zip.sha256
 
 ```sh
 shasum -a 256 -c SysVitals_macOS_arm64_v<version>.zip.sha256
-# 或一次校验全部资产：
-shasum -a 256 -c SHA256SUMS
 ```
 
 校验只保证下载完整，不代表签名。

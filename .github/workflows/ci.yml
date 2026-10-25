@@ -219,8 +219,8 @@ jobs:
   # ---------------------------------------------------------------------------
   # Release gate: tag pushes only. The four build legs have already produced
   # the formal zips; this job validates their contents, writes the per-archive
-  # .sha256 files plus SHA256SUMS, creates a draft Release from the annotated
-  # tag message, and re-downloads the uploaded assets to verify the upload.
+  # .sha256 files, creates a draft Release from the annotated tag message, and
+  # re-downloads the uploaded assets to verify the upload.
   #
   # rc tags are marked --prerelease and stay drafts until the user publishes
   # them. The final 0.1.0 tag follows the same path without --prerelease.
@@ -324,8 +324,7 @@ jobs:
           for zip in "${expected[@]}"; do
             sha256sum "$zip" > "$zip.sha256"
           done
-          sha256sum "${expected[@]}" | LC_ALL=C sort -k2 > SHA256SUMS
-          echo "checksums written for ${#expected[@]} assets"
+          echo "checksums written for ${#expected[@]} archives"
       - name: Create draft release
         shell: bash
         env:
@@ -340,6 +339,9 @@ jobs:
             if [ "$is_draft" != "true" ]; then
               echo "release $TAG is already published" >&2
               exit 1
+            fi
+            if gh release view "$TAG" --json assets --jq '.assets[].name' | grep -Fxq SHA256SUMS; then
+              gh release delete-asset "$TAG" SHA256SUMS --yes
             fi
             gh release upload "$TAG" release-assets/* --clobber
           else
@@ -359,8 +361,10 @@ jobs:
           mkdir -p verify
           gh release download "$TAG" --dir verify
           cd verify
-          test -f SHA256SUMS
-          sha256sum -c SHA256SUMS
+          if [ -e SHA256SUMS ]; then
+            echo "SHA256SUMS must not be published" >&2
+            exit 1
+          fi
           for f in SysVitals_*.zip; do
             test -f "$f.sha256"
             sha256sum -c "$f.sha256"
