@@ -25,6 +25,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
       - name: Verify tag matches workspace version
         if: github.ref_type == 'tag'
         shell: bash
@@ -70,6 +72,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.ref }}
           fetch-tags: true
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -141,6 +144,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.ref }}
           fetch-tags: true
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -231,6 +235,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.ref }}
           fetch-depth: 0
           fetch-tags: true
       - name: Read release metadata
