@@ -7,6 +7,8 @@ The list covers the components used by the Windows and macOS binaries
 (516 packages in the union of all four shipped targets).
 A package may be present on only some platforms or architectures.
 
+Generated from Cargo.lock. Dependency-set fingerprint: 93cfe29e79746be66345fc3ac9a5fe62275aed3c8026ccfed1bec80765d0f47b.
+
 License expressions are shown as declared by the upstream package (usually
 SPDX syntax). Where a component is offered under several licenses, SysVitals
 relies on one of the permissive options; the full upstream expression is
@@ -540,7 +542,8 @@ authoritative.
 
 Each entry below is reproduced from the package's license/notice file or
 from the upstream repository. Copyright lines, where present, are part of
-the reproduced text.
+the reproduced text. Entries marked as upstream copyright notices cover
+components whose packaged crate does not include a license file.
 
 ### AccessKit__accesskit / main__LICENSE-APACHE / AccessKit__accesskit / master__LICENSE-APACHE / LICENSE-APACHE
 
@@ -2333,6 +2336,20 @@ CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
+</pre>
+
+### upstream copyright notice for block 0.1.6
+
+Used by: block 0.1.6
+
+<pre>
+Copyright (c) Steven Sheldon
+
+This component is distributed under the MIT license. The standard license text is reproduced in "Standard license texts".
+
+Source: https://github.com/SSheldon/rust-block
+
+Note: The crate manifest names Steven Sheldon as the author and declares MIT; the packaged crate and upstream repository do not include a license file.
 </pre>
 
 ### LICENSE-APACHE
@@ -7674,6 +7691,20 @@ IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 </pre>
 
+### upstream copyright notice for mac 0.1.1
+
+Used by: mac 0.1.1
+
+<pre>
+Copyright (c) Jonathan Reem
+
+This component is distributed under the MIT license. The standard license text is reproduced in "Standard license texts".
+
+Source: https://github.com/reem/rust-mac
+
+Note: The crate manifest names Jonathan Reem as the author and declares MIT/Apache-2.0; the packaged crate and upstream repository do not include a license file. SysVitals relies on the MIT option.
+</pre>
+
 ### LICENSE-BSD
 
 Used by: mach2 0.6.0
@@ -9454,6 +9485,20 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+</pre>
+
+### upstream copyright notice for objc_exception 0.1.2
+
+Used by: objc_exception 0.1.2
+
+<pre>
+Copyright (c) Steven Sheldon
+
+This component is distributed under the MIT license. The standard license text is reproduced in "Standard license texts".
+
+Source: https://github.com/SSheldon/rust-objc-exception
+
+Note: The crate manifest names Steven Sheldon as the author and declares MIT; the packaged crate and upstream repository do not include a license file.
 </pre>
 
 ### LICENSE-MIT
@@ -11687,6 +11732,20 @@ CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
 OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
 IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
+</pre>
+
+### upstream copyright notice for seahash 4.1.0
+
+Used by: seahash 4.1.0
+
+<pre>
+Copyright (c) ticki and Tom Almeida
+
+This component is distributed under the MIT license. The standard license text is reproduced in "Standard license texts".
+
+Source: https://gitlab.redox-os.org/redox-os/seahash
+
+Note: The crate manifest names ticki and Tom Almeida as authors and declares MIT; the upstream LICENSE file contains the MIT text without a copyright line.
 </pre>
 
 ### LICENSE-APACHE
@@ -14526,20 +14585,6 @@ freely, subject to the following restrictions:
    misrepresented as being the original software.
 3. This notice may not be removed or altered from any source distribution.
 </pre>
-
-## Components whose license files were not present in the packaged crate
-
-The following components declare the licenses in the table but their
-crate packages do not carry a license file. Their copyright notices are
-retained in the upstream repositories linked below; the corresponding
-standard license texts are included in the next section.
-
-| Package | Version | License | Upstream source |
-|---|---|---|---|
-| block | 0.1.6 | MIT | http://github.com/SSheldon/rust-block |
-| mac | 0.1.1 | MIT/Apache-2.0 | https://github.com/reem/rust-mac.git |
-| objc_exception | 0.1.2 | MIT | http://github.com/SSheldon/rust-objc-exception |
-| seahash | 4.1.0 | MIT | https://gitlab.redox-os.org/redox-os/seahash |
 
 ## Standard license texts
 
