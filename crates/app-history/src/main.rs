@@ -102,6 +102,11 @@ fn anchor_work_area(anchor: &AnchorRect, cx: &App) -> Bounds<Pixels> {
         .unwrap_or_else(|| Bounds::new(point(px(0.), px(0.)), size(px(1280.), px(720.))))
 }
 
+/// Logical breathing room between the popup and the edges it is placed
+/// against: the taskbar/menu-bar side and, when the anchor sits close to a
+/// monitor edge, the left/right work-area edges too.
+const POPUP_GAP: f32 = 8.0;
+
 /// Origin for the popup. The indicator sits inside the taskbar/menu bar,
 /// which is *outside* the work area, so anchoring to `anchor.top - gap`
 /// leaves almost no visual gap to the bar. Place the popup relative to the
@@ -114,14 +119,19 @@ fn anchor_origin(
     size_h: f32,
     work: &Bounds<Pixels>,
 ) -> Point<Pixels> {
-    /// Logical gap between the popup and the taskbar/menu-bar edge.
-    const TRAY_POPUP_GAP: f32 = 8.0;
-
     let work_left = f32::from(work.origin.x);
     let work_right = work_left + f32::from(work.size.width);
     let work_top = f32::from(work.origin.y);
     let work_bottom = work_top + f32::from(work.size.height);
-    let clamp_x = |x: f32| x.max(work_left).min((work_right - size_w).max(work_left));
+    // Keep the same gap on the left/right screen edges: with the indicator
+    // anchored at the taskbar's far left the centered popup would otherwise
+    // be clamped flush against the monitor edge (x = 0). The width passed in
+    // is already shrunk to leave room for both gaps on a narrow work area.
+    let clamp_x = |x: f32| {
+        let min = work_left + POPUP_GAP;
+        let max = (work_right - size_w - POPUP_GAP).max(min);
+        x.max(min).min(max)
+    };
     let clamp_y = |y: f32| y.max(work_top).min((work_bottom - size_h).max(work_top));
     let center_x = (anchor.left + anchor.right) * 0.5;
     let center_y = (anchor.top + anchor.bottom) * 0.5;
@@ -136,31 +146,31 @@ fn anchor_origin(
     if bar_below {
         return point(
             px(clamp_x(center_x - size_w * 0.5)),
-            px((work_bottom - TRAY_POPUP_GAP - size_h).max(work_top)),
+            px((work_bottom - POPUP_GAP - size_h).max(work_top)),
         );
     }
     if bar_above {
         return point(
             px(clamp_x(center_x - size_w * 0.5)),
-            px((work_top + TRAY_POPUP_GAP).min((work_bottom - size_h).max(work_top))),
+            px((work_top + POPUP_GAP).min((work_bottom - size_h).max(work_top))),
         );
     }
     if bar_left {
         return point(
-            px((work_left + TRAY_POPUP_GAP).min(work_right - size_w)),
+            px((work_left + POPUP_GAP).min(work_right - size_w)),
             px(clamp_y(center_y - size_h * 0.5)),
         );
     }
     if bar_right {
         return point(
-            px((work_right - TRAY_POPUP_GAP - size_w).max(work_left)),
+            px((work_right - POPUP_GAP - size_w).max(work_left)),
             px(clamp_y(center_y - size_h * 0.5)),
         );
     }
 
     // Fallback for a free-floating indicator: prefer below, then above.
-    let below = anchor.bottom + TRAY_POPUP_GAP;
-    let above = anchor.top - TRAY_POPUP_GAP - size_h;
+    let below = anchor.bottom + POPUP_GAP;
+    let above = anchor.top - POPUP_GAP - size_h;
     let y = if below + size_h <= work_bottom {
         below
     } else if above >= work_top {
@@ -1326,19 +1336,19 @@ fn main() {
         // Popup geometry in GPUI logical pixels. Height cut 25% (520 -> 390):
         // a 3x shorter vertical span is still readable for a two-line trend,
         // and the popup sits closer to the indicator without dominating the
-        // desktop. Anchor origin logic clamps this inside the work area.
+        // desktop. Anchor origin logic keeps `POPUP_GAP` on every edge it is
+        // placed against, so a work area narrower than the default width
+        // shrinks the popup instead of pinning it flush to a screen edge.
         let popup_size = size(px(680.), px(390.));
         let anchor = parse_anchor();
         let window_bounds = match anchor.as_ref() {
             Some(a) => {
                 let work = anchor_work_area(a, cx);
+                let work_w = f32::from(work.size.width);
+                let width = f32::from(popup_size.width).min((work_w - 2.0 * POPUP_GAP).max(1.0));
+                let popup_size = size(px(width), popup_size.height);
                 Bounds::new(
-                    anchor_origin(
-                        a,
-                        f32::from(popup_size.width),
-                        f32::from(popup_size.height),
-                        &work,
-                    ),
+                    anchor_origin(a, width, f32::from(popup_size.height), &work),
                     popup_size,
                 )
             }
