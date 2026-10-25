@@ -82,10 +82,10 @@ pub fn choose_macos_material(transparency_enabled: bool) -> Material {
 pub const MATERIAL_TINT_ALPHA: f32 = 0.45;
 
 /// Dark-mode tint alpha. The dark palette itself is already a dark layer; at
-/// 0.55 it hides most of the Mica wallpaper tint (on-device: light mode looked
-/// right, dark mode looked flat). 0.30 (was 0.40) follows the same feedback
-/// toward a stronger material while keeping body text readable.
-pub const MATERIAL_TINT_ALPHA_DARK: f32 = 0.30;
+/// 0.55 it hid most of the Mica wallpaper tint (on-device: light mode looked
+/// right, dark mode looked flat). 0.22 (was 0.30, 0.40) follows the same
+/// feedback toward a stronger material while keeping body text readable.
+pub const MATERIAL_TINT_ALPHA_DARK: f32 = 0.22;
 
 /// macOS tint alpha (light). The window blur is much clearer than Mica, and
 /// on-device feedback was that the settings panel and history popup read as
