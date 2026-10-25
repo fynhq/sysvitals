@@ -426,7 +426,9 @@ fn system_color_hex(color: &objc2_app_kit::NSColor) -> Option<u32> {
 /// pre-material rendering byte-for-byte. Re-runs on every theme change (the
 /// palette reload overwrites it) — the same replay contract as the accent.
 fn apply_material(cx: &mut App) {
-    use sysvitals_core::backdrop::{material_tint_alpha, material_tint_alpha_macos, should_tint};
+    use sysvitals_core::backdrop::{
+        material_tint_alpha_macos, material_tint_alpha_settings, should_tint,
+    };
     let material = detect_material();
     if !should_tint(material) {
         return;
@@ -438,7 +440,9 @@ fn apply_material(cx: &mut App) {
         let alpha = if cfg!(target_os = "macos") {
             material_tint_alpha_macos(dark)
         } else {
-            material_tint_alpha(dark)
+            // The settings page is a stack of opaque cards, so its light page
+            // can expose more Mica than the history popup's chart surface.
+            material_tint_alpha_settings(dark)
         };
         // Force an opaque base before scaling alpha, so the "set" and
         // "multiply" readings of `opacity` agree and the tint does not hinge
@@ -658,10 +662,11 @@ fn apply_theme_and_accent(cx: &mut App) {
 // Dropdown item builders
 // ---------------------------------------------------------------------------
 
-/// Pixel-choice items are bare numbers; the row label carries the meaning, so
-/// no unit suffix is repeated in every option.
+/// Pixel-choice items carry their unit so the dropdown does not read as a
+/// bare count. "px" is a unit symbol shared by both locales, so the list never
+/// needs a language refresh.
 fn px_items(values: &[u32]) -> Vec<String> {
-    values.iter().map(|v| v.to_string()).collect()
+    values.iter().map(|v| format!("{v} px")).collect()
 }
 
 /// Anchor items are translated text (the choice labels), rebuilt whenever the
@@ -820,10 +825,8 @@ impl SettingsView {
         {
             _subscriptions.push(cx.subscribe(&spacing_select, |this: &mut Self, _, ev, cx| {
                 if let SelectEvent::Confirm(Some(value)) = ev {
-                    if let Some(i) = ALLOWED_ITEM_SPACING_PX
-                        .iter()
-                        .position(|p| value.parse::<u32>().ok() == Some(*p))
-                    {
+                    let items = px_items(&ALLOWED_ITEM_SPACING_PX);
+                    if let Some(i) = items.iter().position(|s| s == value) {
                         this.spacing_idx = i;
                         this.save(cx);
                         cx.notify();
@@ -832,10 +835,8 @@ impl SettingsView {
             }));
             _subscriptions.push(cx.subscribe(&margin_select, |this: &mut Self, _, ev, cx| {
                 if let SelectEvent::Confirm(Some(value)) = ev {
-                    if let Some(i) = ALLOWED_LEFT_MARGIN_PX
-                        .iter()
-                        .position(|p| value.parse::<u32>().ok() == Some(*p))
-                    {
+                    let items = px_items(&ALLOWED_LEFT_MARGIN_PX);
+                    if let Some(i) = items.iter().position(|s| s == value) {
                         this.margin_idx = i;
                         this.save(cx);
                         cx.notify();
@@ -1050,18 +1051,21 @@ fn section_label(text: String, dim: Hsla) -> impl IntoElement {
 }
 
 /// A grouped option surface. Windows keeps the WinUI card (8px radius, 4px
-/// row gap); macOS uses a flatter grouped-list card (10px radius, rows touch
-/// and are separated by [`card_divider`]) so it reads like System Settings
-/// instead of a stack of floating cards.
-fn settings_card(bg: Hsla) -> Div {
-    #[cfg(target_os = "macos")]
-    {
-        v_flex().w_full().rounded(px(10.)).bg(bg).p_3()
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        v_flex().w_full().rounded(px(8.)).bg(bg).p_3().gap_1()
-    }
+/// row gap, plus an optional hairline when the opaque light fill would melt
+/// into a bright Mica page); macOS uses a flatter grouped-list card (10px
+/// radius, rows touch and are separated by [`card_divider`]) so it reads like
+/// System Settings instead of a stack of floating cards.
+fn settings_card(bg: Hsla, border: Option<Hsla>) -> Div {
+    v_flex()
+        .w_full()
+        .rounded(px(if cfg!(target_os = "macos") { 10. } else { 8. }))
+        .bg(bg)
+        .when(cfg!(not(target_os = "macos")), |this| this.gap_1())
+        .when(border.is_some(), |this| {
+            this.border_1()
+                .border_color(border.unwrap_or_else(|| hsla(0., 0., 0., 0.)))
+        })
+        .p_3()
 }
 
 /// macOS grouped-list separator between option rows. AppKit's official
@@ -1160,8 +1164,10 @@ impl Render for SettingsView {
         // Theme colors are read once up front so the conditional `.when`
         // closure below never touches `cx` (keeps the borrow checker out of
         // the builder-chain argument positions).
-        let dim = cx.theme().foreground.opacity(0.5);
-        let faint = cx.theme().foreground.opacity(0.4);
+        // Secondary text targets WCAG AA at the 12px sizes used here. The
+        // previous 0.5/0.4 pair read too light on the tinted page and cards.
+        let dim = cx.theme().foreground.opacity(0.6);
+        let faint = cx.theme().foreground.opacity(0.55);
 
         // --- Flattened (segmented) option rows for small choice sets: every
         // choice is a visible tile, the active one carries the primary style.
@@ -1184,6 +1190,10 @@ impl Render for SettingsView {
                             // them so the dropdown repaints in the new
                             // language, then persist immediately.
                             this.refresh_anchor_items(window, cx);
+                            // The custom titlebar repaints from `lang`, but the
+                            // platform title (taskbar / Mission Control /
+                            // accessibility) needs an explicit update.
+                            window.set_window_title(t(Language::ALL[i], "settings.title"));
                             this.save(cx);
                             cx.notify();
                         },
@@ -1312,7 +1322,7 @@ impl Render for SettingsView {
         #[cfg(windows)]
         let margin_control = blur_on_outside(div().w(px(160.))).child(margin_select);
         #[cfg(windows)]
-        let anchor_control = blur_on_outside(div().w(px(240.))).child(anchor_select);
+        let anchor_control = blur_on_outside(div().w(px(160.))).child(anchor_select);
         #[cfg(target_os = "macos")]
         let spacing_control = div().w(px(160.)).child(mac_select_trigger(
             "spacing-trigger",
@@ -1342,7 +1352,7 @@ impl Render for SettingsView {
             }),
         ));
         #[cfg(target_os = "macos")]
-        let anchor_control = div().w(px(240.)).child(mac_select_trigger(
+        let anchor_control = div().w(px(160.)).child(mac_select_trigger(
             "anchor-trigger",
             anchor_items(self.current_lang())[self.anchor_idx].clone(),
             mac_style,
@@ -1365,8 +1375,9 @@ impl Render for SettingsView {
         // platform renderer accumulates layer alpha additively, so a
         // translucent card over the translucent page tint saturates to alpha 1
         // and composites as an opaque gray — the Mica lift never reaches it.
-        // #FAFAFA / #2B2B2B are the opaque equivalents of WinUI's card over
-        // light / dark Mica. macOS uses a near-white card in light mode (the
+        // #FBFBFB / #2B2B2B are the opaque equivalents of WinUI's 70% / 5%
+        // white card over the light / dark page. macOS uses a near-white card
+        // in light mode (the
         // old 0.55 white over the gray blur read as muddy gray next to System
         // Settings) and a slightly stronger dark lift; the separators below
         // do the row grouping that the Windows gap used to do.
@@ -1382,14 +1393,35 @@ impl Render for SettingsView {
             #[cfg(not(target_os = "macos"))]
             {
                 if dark {
+                    // Opaque equivalent of WinUI's #0DFFFFFF (5% white) card
+                    // over the dark settings page (~#2B2B2B).
                     hsla(0., 0., 0.17, 1.)
                 } else {
-                    hsla(0., 0., 0.98, 1.)
+                    // Opaque equivalent of WinUI's #B3FFFFFF (70% white) card
+                    // over the light settings page (~#FBFBFB).
+                    hsla(0., 0., 0.984, 1.)
+                }
+            }
+        };
+        // WinUI's CardStrokeColorDefault is 6% black in light and 10% black
+        // in dark. The light stroke is what keeps the near-white card readable
+        // on a bright Mica page; the dark stroke is the system's own edge.
+        let card_border = {
+            #[cfg(target_os = "macos")]
+            {
+                None
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                if dark {
+                    Some(hsla(0., 0., 0., 0.10))
+                } else {
+                    Some(hsla(0., 0., 0., 0.06))
                 }
             }
         };
 
-        let general_card = settings_card(card_bg)
+        let general_card = settings_card(card_bg, card_border)
             .child(labeled_row(
                 t(lang, "settings.language").to_string(),
                 lang_row,
@@ -1411,7 +1443,7 @@ impl Render for SettingsView {
                 ))
             });
 
-        let display_card = settings_card(card_bg)
+        let display_card = settings_card(card_bg, card_border)
             .child(switch_row(
                 t(lang, "settings.dual_row").to_string(),
                 Switch::new("dual-row")
@@ -1459,7 +1491,7 @@ impl Render for SettingsView {
         // One layout card holds the anchor and margin rows together; either
         // row may be hidden by the platform/taskbar shape, but they read as a
         // single group when both apply.
-        let mut layout_card = settings_card(card_bg);
+        let mut layout_card = settings_card(card_bg, card_border);
         let mut show_layout = false;
         if self.layout_available && !self.vertical_taskbar {
             layout_card = layout_card.child(labeled_row(
@@ -1485,7 +1517,7 @@ impl Render for SettingsView {
             show_layout = true;
         }
 
-        let prefix_card = settings_card(card_bg)
+        let prefix_card = settings_card(card_bg, card_border)
             .child(
                 v_flex()
                     .gap_3()
@@ -1495,13 +1527,13 @@ impl Render for SettingsView {
                             .child(prefix_cell(
                                 t(lang, "settings.cpu").to_string(),
                                 &self.prefix_cpu,
-                                faint,
+                                dim,
                                 control,
                             ))
                             .child(prefix_cell(
                                 t(lang, "settings.mem").to_string(),
                                 &self.prefix_mem,
-                                faint,
+                                dim,
                                 control,
                             )),
                     )
@@ -1511,13 +1543,13 @@ impl Render for SettingsView {
                             .child(prefix_cell(
                                 t(lang, "settings.upload").to_string(),
                                 &self.prefix_up,
-                                faint,
+                                dim,
                                 control,
                             ))
                             .child(prefix_cell(
                                 t(lang, "settings.download").to_string(),
                                 &self.prefix_down,
-                                faint,
+                                dim,
                                 control,
                             )),
                     ),
@@ -1581,11 +1613,11 @@ impl Render for SettingsView {
                     .child(SV_BUILD_ID),
             );
 
-        // macOS: the native titlebar is transparent and the content is
-        // full-size, so the tinted material already paints behind it. Draw a
-        // fixed 34px header inside that surface (title centered, traffic
-        // lights at the leading edge) instead of letting AppKit paint a
-        // separate titlebar shade. Windows keeps its native titlebar.
+        // Both desktop panels draw into a transparent client area so the
+        // tinted material continues behind the caption. macOS keeps its
+        // centered 34px header and native traffic lights; Windows renders the
+        // component title bar (caption drag + window controls) with a
+        // transparent background, making the caption part of the page.
         #[cfg(target_os = "macos")]
         {
             let title = t(lang, "settings.title").to_string();
@@ -1608,7 +1640,28 @@ impl Render for SettingsView {
                 )
                 .child(div().flex_1().child(body))
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(windows)]
+        {
+            let title = t(lang, "settings.title").to_string();
+            v_flex()
+                .size_full()
+                .child(
+                    TitleBar::new()
+                        .w_full()
+                        .pl(px(16.))
+                        .bg(hsla(0., 0., 0., 0.))
+                        .border_color(hsla(0., 0., 0., 0.))
+                        .child(
+                            div()
+                                .text_size(px(13.))
+                                .font_semibold()
+                                .text_color(cx.theme().foreground.opacity(0.9))
+                                .child(title),
+                        ),
+                )
+                .child(div().flex_1().child(body))
+        }
+        #[cfg(not(any(windows, target_os = "macos")))]
         {
             body
         }
@@ -1628,7 +1681,7 @@ const SV_BUILD_ID: &str = match option_env!("SV_BUILD_ID") {
 fn prefix_cell(
     label: String,
     input: &Entity<InputState>,
-    faint: Hsla,
+    label_color: Hsla,
     control: Option<(Hsla, Hsla, f32)>,
 ) -> impl IntoElement {
     let mut field = Input::new(input).w_full();
@@ -1638,7 +1691,7 @@ fn prefix_cell(
     v_flex()
         .flex_1()
         .gap_1()
-        .child(div().text_xs().text_color(faint).child(label))
+        .child(div().text_xs().text_color(label_color).child(label))
         .child(blur_on_outside(div().w_full()).child(field))
 }
 
@@ -1735,7 +1788,17 @@ fn main() {
                     traffic_light_position: Some(point(px(9.), px(9.))),
                 }
             }
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(windows)]
+            {
+                // A client-area title bar keeps the caption on the same Mica
+                // surface as the page; the component owns the caption drag
+                // area and the minimize/maximize/close hit boxes.
+                TitlebarOptions {
+                    title: Some(t(cfg.display.language, "settings.title").to_string().into()),
+                    ..TitleBar::title_bar_options()
+                }
+            }
+            #[cfg(not(any(windows, target_os = "macos")))]
             {
                 TitlebarOptions {
                     title: Some(t(cfg.display.language, "settings.title").to_string().into()),
