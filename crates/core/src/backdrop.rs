@@ -75,11 +75,18 @@ pub fn choose_macos_material(transparency_enabled: bool) -> Material {
 
 /// Alpha for the theme background tint painted over a live material, so the
 /// desktop shows through without collapsing text contrast against a busy
-/// background. Kept here so both panels share one value and the choice is
+/// background. This is the default for panels whose content sits directly on
+/// the material (the history popup's chart). Kept here so the choice is
 /// unit-testable. 0.45 (was 0.72, then 0.55) after on-device feedback that
 /// Mica still read as a flat fill; the wallpaper tint is now the dominant
 /// layer while text stays readable.
 pub const MATERIAL_TINT_ALPHA: f32 = 0.45;
+
+/// Light-mode tint for the settings panel. Its content is a stack of opaque
+/// cards, so the page itself can expose more of the wallpaper than the history
+/// popup without hurting control readability. 0.30 is a visible step toward
+/// the material; the dark value already matches the shared dark tint.
+pub const MATERIAL_TINT_ALPHA_SETTINGS: f32 = 0.30;
 
 /// Dark-mode tint alpha. The dark palette itself is already a dark layer; at
 /// 0.55 it hid most of the Mica wallpaper tint (on-device: light mode looked
@@ -108,6 +115,17 @@ pub fn material_tint_alpha(dark: bool) -> f32 {
         MATERIAL_TINT_ALPHA_DARK
     } else {
         MATERIAL_TINT_ALPHA
+    }
+}
+
+/// Pick the tint alpha for the settings panel. The dark value is the shared
+/// one; light mode exposes more Mica because every option lives on an opaque
+/// card. macOS keeps its own (stronger) native-popover tint.
+pub fn material_tint_alpha_settings(dark: bool) -> f32 {
+    if dark {
+        MATERIAL_TINT_ALPHA_DARK
+    } else {
+        MATERIAL_TINT_ALPHA_SETTINGS
     }
 }
 
@@ -193,6 +211,17 @@ mod tests {
     fn dark_mode_uses_a_clearer_tint() {
         assert_eq!(material_tint_alpha(false), MATERIAL_TINT_ALPHA);
         assert_eq!(material_tint_alpha(true), MATERIAL_TINT_ALPHA_DARK);
+    }
+
+    #[test]
+    fn settings_light_tint_exposes_more_mica() {
+        assert_eq!(
+            material_tint_alpha_settings(false),
+            MATERIAL_TINT_ALPHA_SETTINGS
+        );
+        assert_eq!(material_tint_alpha_settings(true), MATERIAL_TINT_ALPHA_DARK);
+        // A lower alpha lets more of the material through.
+        assert!(material_tint_alpha_settings(false) < material_tint_alpha(false));
     }
 
     #[test]
