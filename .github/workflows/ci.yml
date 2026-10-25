@@ -40,6 +40,8 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - name: Verify third-party notices are current
+        run: python3 .github/scripts/check_third_party_notices.py
       - name: Format check (all workspace members)
         run: cargo fmt --check
       - name: Clippy (default members)
