@@ -1111,7 +1111,11 @@ impl Render for SettingsView {
                 if dark {
                     hsla(0., 0., 1., 0.06)
                 } else {
-                    hsla(0., 0., 1., 0.55)
+                    // WinUI's CardBackgroundFillColorDefault is #B3FFFFFF
+                    // (70% white). The previous 55% let the tinted page show
+                    // through and read as a gray card next to Windows
+                    // Settings.
+                    hsla(0., 0., 1., 0.70)
                 }
             }
         };
