@@ -120,7 +120,7 @@ History is kept for up to one month; logs older than 7 days are removed.
 
 ### Build from source
 
-Requires a stable Rust toolchain (`rust-toolchain.toml`). Windows uses MSVC; macOS uses the Xcode command-line tools.
+Requires a stable Rust toolchain. Windows uses MSVC; macOS uses the Xcode command-line tools.
 
 ```sh
 cargo build
@@ -261,7 +261,7 @@ shasum -a 256 -c SysVitals_macOS_arm64_v<version>.zip.sha256
 
 ### 从源码构建
 
-要求 stable Rust 工具链（`rust-toolchain.toml`）。Windows 用 MSVC，macOS 用 Xcode 命令行工具。
+要求 stable Rust 工具链。Windows 用 MSVC，macOS 用 Xcode 命令行工具。
 
 ```sh
 cargo build
