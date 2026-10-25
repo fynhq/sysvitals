@@ -219,14 +219,16 @@ jobs:
   # ---------------------------------------------------------------------------
   # Release gate: tag pushes only. The four build legs have already produced
   # the formal zips; this job validates their contents, writes the per-archive
-  # .sha256 files, creates a draft Release from the annotated tag message, and
-  # re-downloads the uploaded assets to verify the upload.
+  # .sha256 files, creates a draft Release, uploads and re-downloads the assets
+  # to verify them, then publishes the Release.
   #
-  # rc tags are marked --prerelease and stay drafts until the user publishes
-  # them. The final 0.1.0 tag follows the same path without --prerelease.
+  # rc tags are marked --prerelease and are published as pre-releases once the
+  # assets are verified. The final 0.1.0 tag follows the same path without
+  # --prerelease. A failed verification leaves the Release as a draft so a
+  # re-run can complete it without exposing partial assets.
   # ---------------------------------------------------------------------------
   release:
-    name: Draft release
+    name: Release
     if: github.ref_type == 'tag'
     needs: [quality, build-windows, build-macos]
     runs-on: ubuntu-latest
@@ -370,7 +372,21 @@ jobs:
             sha256sum -c "$f.sha256"
           done
           echo "uploaded assets verified"
-      - name: Show draft release
+      - name: Publish release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          PRERELEASE: ${{ steps.meta.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          if [ "$PRERELEASE" = "true" ]; then
+            gh release edit "$TAG" --draft=false --prerelease
+          else
+            gh release edit "$TAG" --draft=false
+          fi
+          gh release view "$TAG" --json tagName,isDraft,isPrerelease
+      - name: Show release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
