@@ -1056,6 +1056,15 @@ fn section_label(text: String, dim: Hsla) -> impl IntoElement {
     div().text_xs().font_semibold().text_color(dim).child(text)
 }
 
+/// Windows uses WinUI's `ControlCornerRadius` (4px) inside its 8px card
+/// (`OverlayCornerRadius`), so the nested corners keep a clear hierarchy
+/// instead of competing with the card's radius. macOS keeps the library's 6px
+/// controls inside its 10px card.
+#[cfg(windows)]
+const CONTROL_RADIUS: f32 = 4.0;
+#[cfg(not(windows))]
+const CONTROL_RADIUS: f32 = 6.0;
+
 /// A grouped option surface. Windows keeps the WinUI card (8px radius plus
 /// an optional hairline when the opaque light fill would melt into a bright
 /// Mica page); macOS uses a flatter grouped-list card (10px radius). Rows
@@ -1191,6 +1200,7 @@ impl Render for SettingsView {
             lang_row = lang_row.child(
                 Button::new(format!("lang-{i}"))
                     .small()
+                    .rounded(px(CONTROL_RADIUS))
                     .when(active, |b| b.primary())
                     .label(Language::ALL[i].label().to_string())
                     .on_click(cx.listener(
@@ -1222,6 +1232,7 @@ impl Render for SettingsView {
             interval_row = interval_row.child(
                 Button::new(format!("interval-{i}"))
                     .small()
+                    .rounded(px(CONTROL_RADIUS))
                     .when(active, |b| b.primary())
                     .label(text)
                     .on_click(cx.listener(
@@ -1251,6 +1262,7 @@ impl Render for SettingsView {
             theme_row = theme_row.child(
                 Button::new(format!("theme-{i}"))
                     .small()
+                    .rounded(px(CONTROL_RADIUS))
                     .when(active, |b| b.primary())
                     .icon(THEME_ICONS[i].clone())
                     .tooltip(tip)
@@ -1287,7 +1299,7 @@ impl Render for SettingsView {
                 } else {
                     (hsla(0., 0., 1., 0.72), hsla(0., 0., 0., 0.26))
                 };
-                Some((bg, border, 4.0))
+                Some((bg, border, CONTROL_RADIUS))
             }
             #[cfg(not(windows))]
             {
@@ -1525,8 +1537,11 @@ impl Render for SettingsView {
 
         let prefix_card = settings_card(card_bg, card_border)
             .child(
+                // The 2x2 prefix grid uses spacing rather than a divider
+                // between its two rows (2026-10-26, user request); the other
+                // cards keep their row separators.
                 v_flex()
-                    .when(cfg!(target_os = "macos"), |this| this.gap_3())
+                    .gap_3()
                     .child(
                         h_flex()
                             .gap_4()
@@ -1543,9 +1558,6 @@ impl Render for SettingsView {
                                 control,
                             )),
                     )
-                    .when(cfg!(not(target_os = "macos")), |this| {
-                        this.child(card_divider(dark, scale_factor).my_2())
-                    })
                     .child(
                         h_flex()
                             .gap_4()
