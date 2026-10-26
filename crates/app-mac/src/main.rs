@@ -27,9 +27,9 @@ mod macos {
     use objc2_app_kit::{
         NSAppearanceCustomization, NSApplication, NSApplicationActivationPolicy,
         NSAttributedStringNSStringDrawing, NSButtonCell, NSCellImagePosition, NSCellStyleMask,
-        NSEventMask, NSEventType, NSFont, NSFontAttributeName, NSFontWeightSemibold, NSImage,
-        NSImageScaling, NSMenu, NSMenuItem, NSScreen, NSStatusBar, NSStatusBarButton, NSStatusItem,
-        NSVariableStatusItemLength, NSView,
+        NSEventMask, NSEventModifierFlags, NSEventType, NSFont, NSFontAttributeName,
+        NSFontWeightSemibold, NSImage, NSImageScaling, NSMenu, NSMenuItem, NSScreen, NSStatusBar,
+        NSStatusBarButton, NSStatusItem, NSVariableStatusItemLength, NSView,
     };
     use objc2_foundation::{
         NSAttributedString, NSDictionary, NSObject, NSObjectProtocol, NSPoint, NSRect, NSRunLoop,
@@ -125,6 +125,7 @@ mod macos {
         let _ = std::fs::create_dir_all(&dir);
         let Ok(file) = std::fs::OpenOptions::new()
             .create(true)
+            .truncate(false)
             .write(true)
             .open(dir.join("sysvitals.lock"))
         else {
@@ -149,10 +150,11 @@ mod macos {
         static CONFIG_MTIME: RefCell<u64> = const { RefCell::new(0) };
         static CONFIG_ERROR_MTIME: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
         static MTM: RefCell<Option<MainThreadMarker>> = const { RefCell::new(None) };
-        // History store, lazily opened on the first tick so a missing data
-        // dir never blocks the indicator (mirrors the Windows overlay).
-        static STORE: RefCell<Option<sysvitals_core::Store>> = const { RefCell::new(None) };
-        static STORE_WRITE_ERROR_LOGGED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        // History writes run on a dedicated worker thread. SQLite open /
+        // insert / prune on the main RunLoop (up to the 250 ms busy timeout)
+        // could freeze the menu bar and its menus on a slow disk.
+        static HISTORY_TX: RefCell<Option<std::sync::mpsc::Sender<HistoryMsg>>> =
+            const { RefCell::new(None) };
         static TICK_COUNT: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
         // The repeating sample timer, kept so the interval can be re-applied
         // when the config file changes it (parity with the Windows overlay,
@@ -234,6 +236,20 @@ mod macos {
         MTM.with(|m| m.borrow().expect("MainThreadMarker not set"))
     }
 
+    /// Last-modified time of the config path in nanoseconds, or 0 when the
+    /// file does not exist or cannot be read.
+    fn config_mtime() -> u64 {
+        let Ok(path) = config_path() else {
+            return 0;
+        };
+        std::fs::metadata(&path)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0)
+    }
+
     /// Load or reload the config file. The mtime cache only advances after a
     /// successful parse, so a corrupt file keeps the last good config and is
     /// retried when it changes again.
@@ -241,12 +257,7 @@ mod macos {
         let Ok(path) = config_path() else {
             return;
         };
-        let mtime = std::fs::metadata(&path)
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0);
+        let mtime = config_mtime();
 
         let prev = CONFIG_MTIME.with(|m| *m.borrow());
         if mtime == prev {
@@ -314,9 +325,81 @@ mod macos {
         APPLIED_INTERVAL_MS.set(interval_ms);
     }
 
-    /// Insert the current CPU/MEM sample into the history database and prune
-    /// old rows periodically. Mirrors the Windows overlay: a failed open is
-    /// retried every 300 ticks; write failures are logged once.
+    /// One sample handed to the history writer thread.
+    struct HistoryMsg {
+        tick: u32,
+        now: i64,
+        cpu: f64,
+        mem: f64,
+        retention_days: u32,
+    }
+
+    /// Start the dedicated history writer. The worker owns the SQLite
+    /// connection; the main RunLoop only enqueues samples, so disk latency
+    /// never blocks the menu bar.
+    fn start_history_worker() {
+        HISTORY_TX.with(|slot| {
+            if slot.borrow().is_some() {
+                return;
+            }
+            let (tx, rx) = std::sync::mpsc::channel::<HistoryMsg>();
+            *slot.borrow_mut() = Some(tx);
+            let _ = std::thread::Builder::new()
+                .name("sysvitals-history".to_string())
+                .spawn(move || {
+                    let mut store: Option<sysvitals_core::Store> = None;
+                    let mut error_logged = false;
+                    for msg in rx {
+                        if store.is_none() && (msg.tick == 1 || msg.tick % 300 == 0) {
+                            if let Ok(path) = history_path() {
+                                if let Some(parent) = path.parent() {
+                                    let _ = std::fs::create_dir_all(parent);
+                                }
+                                match sysvitals_core::Store::open(&path) {
+                                    Ok(opened) => {
+                                        log_event(
+                                            "INFO",
+                                            &format!("history store opened: {}", path.display()),
+                                        );
+                                        store = Some(opened);
+                                    }
+                                    Err(e) => {
+                                        log_event(
+                                            "WARN",
+                                            &format!(
+                                                "history store open failed: {} — {e}",
+                                                path.display()
+                                            ),
+                                        );
+                                        store = None;
+                                    }
+                                }
+                            }
+                        }
+                        if let Some(store) = store.as_ref() {
+                            // Non-finite first/wake samples are skipped inside
+                            // `insert`; the returned bool is not acted on.
+                            if let Err(e) = store.insert(msg.now, msg.cpu, msg.mem) {
+                                if !error_logged {
+                                    error_logged = true;
+                                    log_event("WARN", &format!("history insert failed: {e}"));
+                                }
+                            }
+                            if msg.tick % 300 == 0 {
+                                if let Err(e) = store.prune(msg.now, msg.retention_days) {
+                                    if !error_logged {
+                                        error_logged = true;
+                                        log_event("WARN", &format!("history prune failed: {e}"));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                });
+        });
+    }
+
+    /// Enqueue the current CPU/MEM sample for the history worker.
     fn record_history(cfg: &Config, now: i64, snapshot: &sysvitals_core::Snapshot) {
         if !cfg.history.enabled {
             return;
@@ -326,45 +409,16 @@ mod macos {
             c.set(v);
             v
         });
-        STORE.with(|s| {
-            let mut guard = s.borrow_mut();
-            if guard.is_none() && (tick == 1 || tick % 300 == 0) {
-                if let Ok(path) = history_path() {
-                    if let Some(parent) = path.parent() {
-                        let _ = std::fs::create_dir_all(parent);
-                    }
-                    match sysvitals_core::Store::open(&path) {
-                        Ok(store) => {
-                            log_event("INFO", &format!("history store opened: {}", path.display()));
-                            *guard = Some(store);
-                        }
-                        Err(e) => {
-                            log_event(
-                                "WARN",
-                                &format!("history store open failed: {} — {e}", path.display()),
-                            );
-                            *guard = None;
-                        }
-                    }
-                }
-            }
-            if let Some(store) = guard.as_ref() {
-                // Non-finite samples (first/wake ticks) are skipped inside
-                // `insert`; the returned bool is not acted on here.
-                if let Err(e) = store.insert(now, snapshot.cpu_pct, snapshot.mem_pct) {
-                    if !STORE_WRITE_ERROR_LOGGED.replace(true) {
-                        log_event("WARN", &format!("history insert failed: {e}"));
-                    }
-                }
-                if tick % 300 == 0 {
-                    if let Err(e) = store.prune(now, cfg.history.retention_days) {
-                        if !STORE_WRITE_ERROR_LOGGED.replace(true) {
-                            log_event("WARN", &format!("history prune failed: {e}"));
-                        }
-                    }
-                }
-            }
-        });
+        let msg = HistoryMsg {
+            tick,
+            now,
+            cpu: snapshot.cpu_pct,
+            mem: snapshot.mem_pct,
+            retention_days: cfg.history.retention_days,
+        };
+        if let Some(tx) = HISTORY_TX.with(|slot| slot.borrow().clone()) {
+            let _ = tx.send(msg);
+        }
     }
 
     /// One text run baked into the current indicator image: an attributed
@@ -851,7 +905,15 @@ mod macos {
                     *borrow = None;
                     false
                 }
-                _ => true,
+                Ok(None) => true,
+                // A waitpid error means the child can no longer be managed
+                // (typically already reaped). Treating it as alive used to
+                // permanently block the next launch for that panel.
+                Err(e) => {
+                    log_event("WARN", &format!("child wait failed: {e}"));
+                    *borrow = None;
+                    false
+                }
             },
             None => false,
         }
@@ -918,7 +980,7 @@ mod macos {
         // `thread_local!` statics expose a `LocalKey`; reach the cell through
         // `with`, and re-entrancy (`child_alive` borrows it) must not nest, so
         // query liveness first, then spawn, then store.
-        if SETTINGS_CHILD.with(|slot| child_alive(slot)) {
+        if SETTINGS_CHILD.with(child_alive) {
             return;
         }
         let Some(dir) = exe_dir() else {
@@ -933,7 +995,10 @@ mod macos {
             );
             return;
         }
-        match std::process::Command::new(settings).spawn() {
+        let parent_pid = std::process::id().to_string();
+        let mut cmd = std::process::Command::new(settings);
+        cmd.args(["--parent-pid", parent_pid.as_str()]);
+        match cmd.spawn() {
             Ok(child) => {
                 SETTINGS_CHILD.with(|slot| *slot.borrow_mut() = Some(child));
             }
@@ -945,7 +1010,7 @@ mod macos {
     /// the indicator's screen rect so the popup can anchor to it. One live
     /// instance at a time.
     fn launch_history() {
-        if HISTORY_CHILD.with(|slot| child_alive(slot)) {
+        if HISTORY_CHILD.with(child_alive) {
             return;
         }
         let Some(dir) = exe_dir() else {
@@ -960,7 +1025,9 @@ mod macos {
             );
             return;
         }
+        let parent_pid = std::process::id().to_string();
         let mut cmd = std::process::Command::new(history);
+        cmd.args(["--parent-pid", parent_pid.as_str()]);
         if let Some((l, t, r, b)) = anchor_rect() {
             cmd.args([
                 "--anchor",
@@ -1122,20 +1189,21 @@ mod macos {
                 let mtm = mtm();
                 let app = NSApplication::sharedApplication(mtm);
                 let event = app.currentEvent();
-                match event.as_ref().map(|e| e.r#type()) {
-                    Some(NSEventType::RightMouseUp) | Some(NSEventType::RightMouseDown) => {
-                        show_context_menu();
-                    }
-                    // Any non-right click toggles the trend chart: a live
+                let right_or_control = event.as_ref().is_some_and(|e| {
+                    matches!(e.r#type(), NSEventType::RightMouseUp | NSEventType::RightMouseDown)
+                        || e.modifierFlags().contains(NSEventModifierFlags::Control)
+                });
+                if right_or_control {
+                    show_context_menu();
+                } else {
+                    // Any plain left click toggles the trend chart: a live
                     // popup is closed, otherwise a new one opens (matching the
                     // Windows overlay). There is no double-click branch and no
                     // deferral — Activity Monitor lives in the context menu's
                     // first item, so a left click never waits for a possible
                     // second press.
-                    _ => {
-                        if !close_history() {
-                            launch_history();
-                        }
+                    if !close_history() {
+                        launch_history();
                     }
                 }
             }
@@ -1292,10 +1360,13 @@ mod macos {
         // Store the status item for the tick callback.
         STATUS_ITEM.with(|si| *si.borrow_mut() = Some(status_item));
 
-        // Load initial config.
+        // Load initial config and seed the mtime cache with the same read.
+        // Without the seed the first tick reloads the file and logs a
+        // spurious "config reloaded" line on every normal launch.
         if let Ok(path) = config_path() {
             if let Ok((cfg, _)) = Config::load(&path) {
                 CONFIG.with(|c| *c.borrow_mut() = cfg);
+                CONFIG_MTIME.with(|m| *m.borrow_mut() = config_mtime());
             }
         }
 
@@ -1319,6 +1390,10 @@ mod macos {
                 cfg.display.item_spacing,
             ),
         );
+
+        // Start the background SQLite writer before the first sample, so the
+        // main RunLoop never touches the database.
+        start_history_worker();
 
         // Initial tick — also primes the repeating sample timer (see
         // `reschedule_if_interval_changed`).
