@@ -38,8 +38,10 @@ Measured with the release build running normally (all groups on, default 2 s sam
 3. The build is unsigned and not notarized. If macOS blocks it, try right-click → **Open**; otherwise open **System Settings → Privacy & Security → Open Anyway**. If it is still blocked, remove the quarantine flag:
 
    ```sh
-   sudo xattr -d -r com.apple.quarantine /Applications/SysVitals.app
+   xattr -d -r com.apple.quarantine /Applications/SysVitals.app
    ```
+
+   If you get a permission error, run the same command with `sudo`.
 
 4. SysVitals appears in the menu bar; the indicator has no Dock icon (Settings may show one while open).
 
@@ -60,8 +62,10 @@ SysVitals has no built-in auto-update; install a newer release manually.
 3. A newly downloaded app is quarantined again, so the command **must be re-run**:
 
    ```sh
-   sudo xattr -d -r com.apple.quarantine /Applications/SysVitals.app
+   xattr -d -r com.apple.quarantine /Applications/SysVitals.app
    ```
+
+   If you get a permission error, run the same command with `sudo`.
 
 4. Launch the new `SysVitals.app`.
 
@@ -179,8 +183,10 @@ Released under the MIT License. See [LICENSE](LICENSE).
 3. 构建未签名/未公证。如被拦截，先右键→“打开”；否则到“系统设置→隐私与安全性→仍要打开”。如仍被拦截，移除隔离标记：
 
    ```sh
-   sudo xattr -d -r com.apple.quarantine /Applications/SysVitals.app
+   xattr -d -r com.apple.quarantine /Applications/SysVitals.app
    ```
+
+   如遇权限问题，可尝试在命令前加 `sudo` 执行。
 
 4. SysVitals 出现在菜单栏；指示器无 Dock 图标（设置窗打开时可能显示）。
 
@@ -201,8 +207,10 @@ SysVitals 没有内置自动更新；需要手动安装新版。
 3. 新下载的 app 会重新带上隔离标记，**必须重新执行**：
 
    ```sh
-   sudo xattr -d -r com.apple.quarantine /Applications/SysVitals.app
+   xattr -d -r com.apple.quarantine /Applications/SysVitals.app
    ```
+
+   如遇权限问题，可尝试在命令前加 `sudo` 执行。
 
 4. 启动新版 `SysVitals.app`。
 
