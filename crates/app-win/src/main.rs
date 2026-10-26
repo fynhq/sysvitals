@@ -146,12 +146,21 @@ mod win {
     /// Hover-intent delay before pre-warming the history process.
     const PREWARM_DELAY_MS: u32 = 200;
     /// Custom context-menu metrics, in logical pixels (scaled by the owner's
-    /// DPI when the window is created).
+    /// DPI when the window is created). These mirror WinUI 3's
+    /// `MenuFlyoutItem`/`MenuFlyoutSeparator` metrics in window coordinates:
+    /// a 32px item slot with a 4/2px item margin, 11px inner padding, a 1px
+    /// presenter border (DWM draws it over our extended client), and a 3px
+    /// separator slot (a 1-device-pixel line plus 1px padding on each side).
+    /// `MENU_PAD_*` therefore includes that border: text sits 16px from the
+    /// window edge.
     const MENU_ROW_PX: i32 = 32;
-    const MENU_SEPARATOR_PX: i32 = 9;
-    const MENU_PAD_X_PX: i32 = 14;
-    const MENU_PAD_Y_PX: i32 = 5;
-    const MENU_MIN_W_PX: i32 = 168;
+    const MENU_SEPARATOR_PX: i32 = 3;
+    const MENU_PAD_X_PX: i32 = 16;
+    const MENU_PAD_Y_PX: i32 = 3;
+    const MENU_MIN_W_PX: i32 = 96;
+    const MENU_ITEM_MARGIN_X_PX: i32 = 5;
+    const MENU_ITEM_MARGIN_Y_PX: i32 = 2;
+    const MENU_ITEM_RADIUS_PX: i32 = 4;
     /// `WM_MOUSELEAVE` (WinUser.h). The `windows` crate metadata omits this
     /// message, so it is defined locally; `TrackMouseEvent(TME_LEAVE)` posts it.
     const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -2139,6 +2148,14 @@ mod win {
 
         let dark = LIGHT_THEME.load(Ordering::Relaxed) == 0;
         let pad_x = (MENU_PAD_X_PX as f32 * scale).round() as i32;
+        // WinUI draws flyout dividers inside the presenter's 1px border, so
+        // the line stops just short of both window edges. At fractional DPI
+        // the border rounds to the nearest device pixel, matching the rest of
+        // the menu's physical-pixel layout.
+        let separator_inset = (scale.round() as i32).max(1);
+        let item_margin_x = (MENU_ITEM_MARGIN_X_PX as f32 * scale).round() as i32;
+        let item_margin_y = (MENU_ITEM_MARGIN_Y_PX as f32 * scale).round() as i32;
+        let item_radius = (MENU_ITEM_RADIUS_PX as f32 * scale).round() as i32;
 
         // Supersampled glyph coverage surface.
         const SS: i32 = 2;
@@ -2224,8 +2241,15 @@ mod win {
             (249u32, 249u32, 249u32)
         };
         let base_alpha = if material { 1u32 } else { 255 };
-        let hover_alpha = if dark { 26u32 } else { 16 };
-        let separator_alpha = if dark { 30u32 } else { 24 };
+        // WinUI flyouts paint item hover with SubtleFillColorSecondary
+        // (#09000000 light, #0FFFFFFF dark), not a full-strength wash.
+        let hover_alpha = if dark { 0x0Fu32 } else { 0x09 };
+        // WinUI's DividerStrokeColorDefault: #15FFFFFF in dark, #0F000000 in
+        // light. The old 30/24 values were darker than the system flyouts and
+        // read as a hard rule instead of a hairline.
+        let separator_alpha = if dark { 0x15u32 } else { 0x0F };
+        let separator_left = separator_inset.min(w / 2);
+        let separator_right = (w - separator_inset).max(separator_left);
         let separator_lines: Vec<i32> = entries
             .iter()
             .enumerate()
@@ -2237,12 +2261,27 @@ mod win {
                     .map(|row| row.top + (row.bottom - row.top) / 2)
             })
             .collect();
-        let hover_row = hover.and_then(|index| {
-            entries
-                .get(index)
-                .filter(|entry| !entry.separator)
-                .and_then(|_| rows.get(index))
-        });
+        let hover_pill = hover
+            .and_then(|index| {
+                entries
+                    .get(index)
+                    .filter(|entry| !entry.separator)
+                    .and_then(|_| rows.get(index))
+            })
+            .map(|row| {
+                let left = item_margin_x.min(w / 2);
+                let right = (w - item_margin_x).max(left);
+                let top = (row.top + item_margin_y).min(row.bottom);
+                let bottom = (row.bottom - item_margin_y).max(top);
+                let pw = (right - left).max(0);
+                let ph = (bottom - top).max(0);
+                let radius = item_radius.min(pw / 2).min(ph / 2);
+                let hx = (pw - 2 * radius).max(0) as f32 / 2.0;
+                let hy = (ph - 2 * radius).max(0) as f32 / 2.0;
+                let cx = left as f32 + pw as f32 / 2.0;
+                let cy = top as f32 + ph as f32 / 2.0;
+                (radius as f32, hx, hy, cx, cy)
+            });
 
         for y in 0..h {
             for x in 0..w {
@@ -2263,25 +2302,39 @@ mod win {
                     (0u32, 0u32, 0u32)
                 };
 
-                if hover_row.is_some_and(|row| y >= row.top && y < row.bottom) {
-                    r = (ink_r * hover_alpha + r * (255 - hover_alpha)) / 255;
-                    g = (ink_g * hover_alpha + g * (255 - hover_alpha)) / 255;
-                    b = (ink_b * hover_alpha + b * (255 - hover_alpha)) / 255;
-                    a = hover_alpha + a * (255 - hover_alpha) / 255;
+                // Rounded item highlight: WinUI insets the hover fill 4px
+                // horizontally and 2px vertically inside the item slot and
+                // rounds it with ControlCornerRadius (4px).
+                let hover_cov = hover_pill.map_or(0.0, |(radius, hx, hy, cx, cy)| {
+                    let ddx = ((x as f32 + 0.5) - cx).abs() - hx;
+                    let ddy = ((y as f32 + 0.5) - cy).abs() - hy;
+                    let dist = (ddx.max(0.0).powi(2) + ddy.max(0.0).powi(2)).sqrt() - radius;
+                    (1.0 - dist.max(0.0)).clamp(0.0, 1.0)
+                });
+                let hover_a = (hover_alpha as f32 * hover_cov) as u32;
+                if hover_a > 0 {
+                    r = (ink_r * hover_a + r * (255 - hover_a)) / 255;
+                    g = (ink_g * hover_a + g * (255 - hover_a)) / 255;
+                    b = (ink_b * hover_a + b * (255 - hover_a)) / 255;
+                    a = hover_a + a * (255 - hover_a) / 255;
                 }
 
-                if separator_lines.contains(&y) {
+                if separator_lines.contains(&y) && x >= separator_left && x < separator_right {
                     r = (ink_r * separator_alpha + r * (255 - separator_alpha)) / 255;
                     g = (ink_g * separator_alpha + g * (255 - separator_alpha)) / 255;
                     b = (ink_b * separator_alpha + b * (255 - separator_alpha)) / 255;
                     a = separator_alpha + a * (255 - separator_alpha) / 255;
                 }
 
-                if cov > 0 {
-                    r = (ink_r * cov + r * (255 - cov)) / 255;
-                    g = (ink_g * cov + g * (255 - cov)) / 255;
-                    b = (ink_b * cov + b * (255 - cov)) / 255;
-                    a = cov + a * (255 - cov) / 255;
+                // WinUI's TextFillColorPrimary is #E4000000 in light (89.4%
+                // black), not pure black. Keep the glyph ink black and fold
+                // the opacity into the coverage so the text weight matches.
+                let text_cov = if dark { cov } else { cov * 0xE4 / 255 };
+                if text_cov > 0 {
+                    r = (ink_r * text_cov + r * (255 - text_cov)) / 255;
+                    g = (ink_g * text_cov + g * (255 - text_cov)) / 255;
+                    b = (ink_b * text_cov + b * (255 - text_cov)) / 255;
+                    a = text_cov + a * (255 - text_cov) / 255;
                 }
 
                 *px.add((y * w + x) as usize) =
