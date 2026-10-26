@@ -40,7 +40,13 @@ impl Default for CpuSampler {
 impl CpuSampler {
     pub fn new(alpha: f64) -> Self {
         CpuSampler {
-            alpha: alpha.clamp(0.0, 1.0),
+            // `clamp` keeps NaN; callers load this from a hand-editable
+            // config, so treat a non-finite factor as the default.
+            alpha: if alpha.is_finite() {
+                alpha.clamp(0.0, 1.0)
+            } else {
+                0.3
+            },
             last: None,
         }
     }
@@ -129,6 +135,14 @@ mod tests {
         let mut s = CpuSampler::new(0.0);
         assert_eq!(s.update(140.0, None), 100.0);
         assert_eq!(s.update(-10.0, Some(Duration::from_millis(1000))), 0.0);
+    }
+
+    #[test]
+    fn non_finite_alpha_falls_back_to_default() {
+        let mut s = CpuSampler::new(f64::NAN);
+        s.update(50.0, None);
+        let v = s.update(100.0, Some(Duration::from_millis(2000)));
+        assert!((v - 85.0).abs() < 1e-9, "NaN alpha poisoned the EMA: {v}");
     }
 
     #[test]

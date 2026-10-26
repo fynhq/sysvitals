@@ -220,7 +220,17 @@ impl Config {
             });
         }
 
-        if !(0.0..=1.0).contains(&self.sample.cpu_smoothing) {
+        if !self.sample.cpu_smoothing.is_finite() {
+            // `f64::clamp` keeps NaN, and a NaN smoothing factor poisons the
+            // CPU EMA forever (the display would stay at "--%"). TOML accepts
+            // `nan`, so this is reachable from a hand-edited config.
+            let old = self.sample.cpu_smoothing;
+            self.sample.cpu_smoothing = 0.3;
+            issues.push(SanitizeIssue {
+                field: "sample.cpu_smoothing",
+                message: format!("reset to the default 0.3 (was {old})"),
+            });
+        } else if !(0.0..=1.0).contains(&self.sample.cpu_smoothing) {
             let old = self.sample.cpu_smoothing;
             self.sample.cpu_smoothing = old.clamp(0.0, 1.0);
             issues.push(SanitizeIssue {
@@ -518,6 +528,18 @@ mod tests {
     }
 
     #[test]
+    fn cpu_smoothing_nan_resets_to_default() {
+        // `clamp` keeps NaN; a sanitized config must never carry a poison
+        // smoothing factor into the sampler.
+        let mut c = Config::default();
+        c.sample.cpu_smoothing = f64::NAN;
+        let issues = c.sanitize();
+        assert_eq!(c.sample.cpu_smoothing, 0.3);
+        assert!(issues.iter().any(|i| i.field == "sample.cpu_smoothing"));
+        assert!(c.sanitize().is_empty(), "sanitize must be idempotent");
+    }
+
+    #[test]
     fn item_spacing_snaps_to_allowed_set() {
         // Allowed values pass through untouched.
         for v in ALLOWED_ITEM_SPACING_PX {
@@ -615,9 +637,10 @@ mod tests {
         c.save(&path).unwrap();
         let (back, _) = Config::load(&path).unwrap();
         assert_eq!(back.display.prefix.cpu, "负载");
-        // No leftover temp file next to the config.
-        let mut tmp = path.clone();
-        tmp.set_file_name("config.toml.tmp");
+        // No leftover temp file next to the config. `save` names the temp
+        // file with the process id, so the old assertion against
+        // `config.toml.tmp` never checked the real file.
+        let tmp = path.with_file_name(format!("config.toml.{}.tmp", std::process::id()));
         assert!(!tmp.exists());
     }
 

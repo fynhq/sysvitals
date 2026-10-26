@@ -39,6 +39,11 @@ pub fn format_percent(value: f64) -> String {
 ///   12.5 K/s   (>=10  -> 1 decimal)
 ///   1.20 M/s   (<10   -> 2 decimals)
 /// ```
+///
+/// The numeric field is capped at four characters. Values that round up
+/// across a decimal boundary (`9.996 K/s`, `99.96 K/s`) would otherwise
+/// produce a five-character `10.00`/`100.0`; one decimal is dropped in that
+/// case so a fixed-width display slot never has to grow for a sample.
 pub fn format_rate(bps: f64) -> String {
     format_rate_with(bps, true)
 }
@@ -66,14 +71,21 @@ fn format_rate_with(bps: f64, with_per_sec: bool) -> String {
     } else {
         (bps / GB, "G")
     };
-    let decimals = if scaled >= 100.0 {
+    let mut decimals = if scaled >= 100.0 {
         0
     } else if scaled >= 10.0 {
         1
     } else {
         2
     };
-    let value = format!("{scaled:.decimals$}");
+    let mut value = format!("{scaled:.decimals$}");
+    // Rounding can cross the next power of ten (`9.996 -> 10.00`). Drop a
+    // decimal in that case: the fixed-width slots reserve four characters
+    // and must never see a fifth one for a live sample.
+    while decimals > 0 && value.len() > 4 {
+        decimals -= 1;
+        value = format!("{scaled:.decimals$}");
+    }
     if with_per_sec {
         format!("{value} {letter}/s")
     } else {
@@ -420,6 +432,38 @@ mod tests {
         assert_eq!(format_rate(1.5 * GB), "1.50 G/s");
         assert_eq!(format_rate(1024.0 * MB), "1.00 G/s");
         assert_eq!(format_rate(120.0 * GB), "120 G/s");
+    }
+
+    #[test]
+    fn rate_numeric_field_never_exceeds_four_chars() {
+        // Values just below a decimal boundary used to round to "10.00" /
+        // "100.0" (five characters), which overflowed the fixed-width slot
+        // reserved by the macOS status item.
+        for bps in [
+            9.996 * KB,
+            99.96 * KB,
+            999.6 * KB,
+            1023.9 * KB,
+            9.996 * MB,
+            99.96 * MB,
+            999.6 * MB,
+            1023.9 * MB,
+            1023.9 * GB,
+        ] {
+            let rendered = format_rate(bps);
+            let numeric = rendered.split(' ').next().unwrap_or_default();
+            assert!(
+                numeric.len() <= 4,
+                "{rendered} has a {} character numeric field",
+                numeric.len()
+            );
+            let compact = format_rate_compact(bps);
+            let numeric = compact.split(' ').next().unwrap_or_default();
+            assert!(numeric.len() <= 4, "{compact}");
+        }
+        assert_eq!(format_rate(9.996 * KB), "10.0 K/s");
+        assert_eq!(format_rate(99.96 * KB), "100 K/s");
+        assert_eq!(format_rate(1023.9 * KB), "1024 K/s");
     }
 
     #[test]

@@ -64,10 +64,6 @@ impl Snapshot {
             Metric::Down => self.down_bps,
         }
     }
-
-    pub fn is_valid(value: f64) -> bool {
-        !value.is_nan()
-    }
 }
 
 #[cfg(test)]
@@ -87,12 +83,6 @@ mod tests {
         assert_eq!(s.value(Metric::Mem), 34.0);
         assert_eq!(s.value(Metric::Up), 5.0);
         assert_eq!(s.value(Metric::Down), 6.0);
-    }
-
-    #[test]
-    fn no_data_is_nan_and_invalid() {
-        assert!(!Snapshot::is_valid(f64::NAN));
-        assert!(Snapshot::is_valid(0.0));
     }
 
     #[test]

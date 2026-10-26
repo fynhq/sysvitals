@@ -118,9 +118,9 @@ pub fn material_tint_alpha(dark: bool) -> f32 {
     }
 }
 
-/// Pick the tint alpha for the settings panel. Both appearances expose the
-/// material fully; the opaque cards provide the contrast. macOS keeps its own
-/// (stronger) native-popover tint.
+/// Tint alpha for the settings panel. Both appearances expose the material
+/// fully; the opaque cards provide the contrast. The appearance argument is
+/// kept for symmetry with the other tint helpers (the value is mode-neutral).
 pub fn material_tint_alpha_settings(_dark: bool) -> f32 {
     MATERIAL_TINT_ALPHA_SETTINGS
 }
