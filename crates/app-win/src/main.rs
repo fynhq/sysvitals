@@ -41,7 +41,7 @@
 mod win {
     use std::cell::RefCell;
     use std::sync::atomic::{
-        AtomicBool, AtomicI32, AtomicIsize, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering,
+        AtomicBool, AtomicI32, AtomicIsize, AtomicU32, AtomicU64, AtomicUsize, Ordering,
     };
     use std::sync::{Mutex, OnceLock, RwLock};
     use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -61,8 +61,8 @@ mod win {
     use windows::Win32::Graphics::Gdi::{
         BeginPaint, CreateCompatibleDC, CreateDIBSection, CreateFontW, DeleteDC, DeleteObject,
         DrawTextW, EndPaint, GetDC, GetMonitorInfoW, GetTextExtentPoint32W, MonitorFromPoint,
-        ReleaseDC, SelectObject, SetBkMode, SetTextColor, AC_SRC_ALPHA, AC_SRC_OVER,
-        ANTIALIASED_QUALITY, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION,
+        MonitorFromWindow, ReleaseDC, SelectObject, SetBkMode, SetTextColor, AC_SRC_ALPHA,
+        AC_SRC_OVER, ANTIALIASED_QUALITY, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION,
         CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH, DIB_RGB_COLORS, DT_CALCRECT,
         DT_CENTER, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, FF_SWISS, FW_REGULAR,
         FW_SEMIBOLD, HFONT, MONITORINFO, MONITOR_DEFAULTTONEAREST, OUT_DEFAULT_PRECIS, PAINTSTRUCT,
@@ -73,6 +73,11 @@ mod win {
     };
     use windows::Win32::System::Diagnostics::Debug::{
         SetUnhandledExceptionFilter, EXCEPTION_POINTERS,
+    };
+    use windows::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     };
     use windows::Win32::System::LibraryLoader::{
         GetModuleFileNameW, GetModuleHandleExW, GetModuleHandleW,
@@ -112,19 +117,18 @@ mod win {
         RegisterWindowMessageW, SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowPos,
         ShowWindow, SystemParametersInfoW, TrackPopupMenu, TranslateMessage, UpdateLayeredWindow,
         WindowFromPoint, CS_HREDRAW, CS_VREDRAW, GWLP_HWNDPARENT, GWL_EXSTYLE, HWND_TOPMOST,
-        MF_SEPARATOR, MF_STRING, MSG, NONCLIENTMETRICSW, SM_CXSCREEN, SM_CYSCREEN,
+        MF_SEPARATOR, MF_STRING, MSG, NONCLIENTMETRICSW, SM_CXSCREEN, SM_CXVIRTUALSCREEN,
+        SM_CYSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
         SPI_GETNONCLIENTMETRICS, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE,
         SW_SHOWNOACTIVATE, SW_SHOWNORMAL, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, ULW_ALPHA,
-        WM_ACTIVATE, WM_CAPTURECHANGED, WM_DESTROY, WM_DISPLAYCHANGE, WM_KEYDOWN, WM_LBUTTONDOWN,
-        WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NULL, WM_RBUTTONUP, WM_SETTINGCHANGE,
-        WM_TIMER, WNDCLASSEXW, WS_CHILD, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-        WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+        WM_ACTIVATE, WM_CAPTURECHANGED, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_KEYDOWN,
+        WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NULL, WM_RBUTTONUP,
+        WM_SETTINGCHANGE, WM_TIMER, WNDCLASSEXW, WS_CHILD, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+        WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
     };
 
     // ------------------------------------------------------------------ consts
 
-    /// Gap between the widget's edge and its anchor (tray left / taskbar left).
-    const TRAY_GAP_PX: i32 = 0;
     const TIMER_SAMPLE: usize = 0x515;
     const TIMER_MOVE: usize = 0x516;
     /// Timer id for the config-file change poller.
@@ -224,9 +228,11 @@ mod win {
     /// Track whether the taskbar is currently vertical so we can reset the
     /// grow-only width when orientation flips.
     static TASKBAR_VERTICAL: AtomicBool = AtomicBool::new(false);
-    /// Per-target launch guards. Bit 0 = Settings: a launch in flight for one
-    /// child must not suppress starting the other.
-    static LAUNCHING: AtomicU8 = AtomicU8::new(0);
+    /// Job object owning every panel child. Created once at startup with
+    /// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`; the handle is deliberately kept
+    /// for the process lifetime, so a crash or a quit during a slow
+    /// `CreateProcessW` cannot leave an orphan child behind.
+    static CHILD_JOB: AtomicIsize = AtomicIsize::new(0);
     /// Resident history process handle, stored as a raw `isize` because the
     /// launch happens on a worker thread (`HANDLE` is not `Send`). The UI
     /// thread reaps and closes it.
@@ -258,6 +264,10 @@ mod win {
     thread_local! {
         static SAMPLER: RefCell<Option<Sampler>> = const { RefCell::new(None) };
         static LAST_ROW: RefCell<Option<FormattedRow>> = const { RefCell::new(None) };
+        /// Raw sample paired with `LAST_ROW`, so a config/DPI/theme change
+        /// can rebuild the layout without taking another reading (which used
+        /// to inject a millisecond-scale network spike on every save).
+        static LAST_SNAPSHOT: RefCell<Option<sysvitals_core::Snapshot>> = const { RefCell::new(None) };
         // History store. Lazily opened on the first sample so a missing
         // data dir never blocks the indicator itself.
         static STORE: RefCell<Option<sysvitals_core::Store>> = const { RefCell::new(None) };
@@ -443,15 +453,21 @@ mod win {
 
     // ------------------------------------------------------------------- fonts
 
-    /// System UI face + pixel height, cached on first use. Read from
-    /// `NONCLIENTMETRICS.lfMessageFont` so the indicator's font follows the
-    /// system setting (face and size) instead of a hardcoded Segoe UI 12px.
-    /// Font changes only take effect after re-login anyway, so caching is fine.
-    static UI_FONT: OnceLock<(i32, Vec<u16>)> = OnceLock::new();
+    /// System UI face + pixel height, cached on the message thread. Read
+    /// from `NONCLIENTMETRICS.lfMessageFont` so the indicator's font follows
+    /// the system setting (face and size). `WM_SETTINGCHANGE` and
+    /// `WM_DPICHANGED` invalidate this cache: text-size and per-monitor DPI
+    /// changes must not require a restart.
+    thread_local! {
+        static UI_FONT: RefCell<Option<(i32, Vec<u16>)>> = const { RefCell::new(None) };
+    }
 
     fn ui_font() -> (i32, Vec<u16>) {
-        UI_FONT
-            .get_or_init(|| unsafe {
+        UI_FONT.with(|slot| {
+            if let Some(font) = slot.borrow().as_ref() {
+                return font.clone();
+            }
+            let font = unsafe {
                 let fallback = || (-(12 * GetDpiForSystem() as i32 / 96), utf16("Segoe UI"));
                 let mut nc: NONCLIENTMETRICSW = std::mem::zeroed();
                 nc.cbSize = std::mem::size_of::<NONCLIENTMETRICSW>() as u32;
@@ -486,16 +502,37 @@ mod win {
                     face.push(0);
                 }
                 (height, face)
-            })
-            .clone()
+            };
+            *slot.borrow_mut() = Some(font.clone());
+            font
+        })
     }
 
-    /// Effective glyph height in pixels for the current taskbar orientation:
-    /// the system UI size on a horizontal bar, reduced by
-    /// `VERTICAL_FONT_HUNDREDTHS` on a vertical (left/right) bar where the
-    /// bar's thickness — not its length — is the width budget.
+    fn invalidate_ui_font() {
+        UI_FONT.with(|slot| *slot.borrow_mut() = None);
+    }
+
+    /// DPI of the monitor currently hosting the overlay. `GetDpiForSystem`
+    /// is only a fallback for the pre-window startup path.
+    fn current_dpi() -> u32 {
+        let raw = OVERLAY_HWND.load(Ordering::Relaxed);
+        let dpi = if raw == 0 {
+            unsafe { GetDpiForSystem() }
+        } else {
+            unsafe { GetDpiForWindow(HWND(raw as *mut std::ffi::c_void)) }
+        };
+        dpi.max(96)
+    }
+
+    /// Effective glyph height in physical pixels for the current taskbar
+    /// orientation. The cached system font height is expressed at the system
+    /// DPI; scale it to the overlay's monitor and then apply the vertical
+    /// reduction, so mixed-DPI setups and live text-size changes both work.
     fn effective_font_height() -> i32 {
         let (height, _) = ui_font();
+        let system_dpi = (unsafe { GetDpiForSystem() }).max(96) as i32;
+        let window_dpi = current_dpi() as i32;
+        let height = height * window_dpi / system_dpi;
         if TASKBAR_VERTICAL.load(Ordering::Relaxed) {
             // `height` is a negative character height; clamp the reduction so a
             // tiny system font can never produce 0 (which CreateFontW would
@@ -603,10 +640,15 @@ mod win {
                 return None;
             }
         }
-        let screen_h = GetSystemMetrics(SM_CYSCREEN);
-        let screen_w = GetSystemMetrics(SM_CXSCREEN);
-        // An auto-hidden taskbar can still report a rect parked off-screen.
-        let on_screen = r.bottom > 0 && r.top < screen_h && r.right > 0 && r.left < screen_w;
+        // The main taskbar can live on a secondary monitor (Windows 10 lets
+        // the user drag it there), where its rect may be entirely outside the
+        // primary screen or use negative virtual coordinates. Validate against
+        // the virtual screen, never `SM_CXSCREEN`/`SM_CYSCREEN` (primary only).
+        let virtual_rect = virtual_screen_rect();
+        let on_screen = r.bottom > virtual_rect.top
+            && r.top < virtual_rect.bottom
+            && r.right > virtual_rect.left
+            && r.left < virtual_rect.right;
         if !on_screen {
             return None;
         }
@@ -616,6 +658,49 @@ mod win {
             vertical,
             left_edge: abd.uEdge == ABE_LEFT,
         })
+    }
+
+    /// Bounding rectangle of the whole virtual desktop (all monitors), in
+    /// physical pixels. Used for on-screen validation and for monitor-local
+    /// clamping that must work with negative coordinates.
+    unsafe fn virtual_screen_rect() -> RECT {
+        let left = GetSystemMetrics(SM_XVIRTUALSCREEN);
+        let top = GetSystemMetrics(SM_YVIRTUALSCREEN);
+        let width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+        let height = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+        let (fallback_w, fallback_h) =
+            (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN));
+        let width = if width > 0 { width } else { fallback_w };
+        let height = if height > 0 { height } else { fallback_h };
+        RECT {
+            left,
+            top,
+            right: left + width.max(1),
+            bottom: top + height.max(1),
+        }
+    }
+
+    /// Monitor that hosts the main taskbar, or the virtual desktop when the
+    /// shell window cannot be resolved. The indicator must be clamped to this
+    /// monitor, not the primary one, for secondary/negative-coordinate bars.
+    unsafe fn taskbar_monitor_rect() -> RECT {
+        let fallback = virtual_screen_rect();
+        let Some(tray) = find_taskbar() else {
+            return fallback;
+        };
+        let monitor = MonitorFromWindow(tray, MONITOR_DEFAULTTONEAREST);
+        if monitor.is_invalid() {
+            return fallback;
+        }
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if GetMonitorInfoW(monitor, &mut info).as_bool() {
+            info.rcMonitor
+        } else {
+            fallback
+        }
     }
 
     /// How many times the topmost band was found lost between two ticks.
@@ -859,7 +944,7 @@ mod win {
                 &format!("taskbar orientation changed: vertical={}", info.vertical),
             );
             WIN_W.store(0, Ordering::Relaxed);
-            sample_now(hwnd);
+            rerender_from_last(hwnd);
             return;
         }
         apply_position_with_info(hwnd, info);
@@ -904,11 +989,11 @@ mod win {
             // desktop instead: keep the left edge on-screen for a left-docked
             // bar, the right edge on-screen for a right-docked bar.
             let center_x = bar.left + (bar.right - bar.left - w) / 2;
-            let screen_w = GetSystemMetrics(SM_CXSCREEN);
+            let monitor = taskbar_monitor_rect();
             let x = if info.left_edge {
-                center_x.max(0)
+                center_x.max(monitor.left)
             } else {
-                center_x.min(screen_w - w).max(0)
+                center_x.min(monitor.right - w).max(monitor.left)
             };
             // On a vertical bar `left_margin_px` measures from the bar's TOP
             // edge. The far-left anchor concept does not exist here, so the
@@ -944,18 +1029,28 @@ mod win {
                         nr.left
                     }
                 };
-                anchor_x - w - TRAY_GAP_PX
+                anchor_x - w
             };
             let y = bar.top + (bar.bottom - bar.top - h) / 2;
             (x, y)
         };
 
         if info.vertical {
-            if y < 0 || y + h > bar.bottom {
+            if y < bar.top || y + h > bar.bottom {
                 return;
             }
-        } else if x < 0 || y < 0 || x + w > bar.right {
-            return; // would leave the taskbar; keep last position
+        } else {
+            // Negative virtual coordinates are legitimate on a monitor placed
+            // left of/above the primary one; clamp to that monitor instead of
+            // treating every negative number as off-screen.
+            let monitor = taskbar_monitor_rect();
+            if x < monitor.left
+                || y < monitor.top
+                || x + w > monitor.right
+                || y + h > monitor.bottom
+            {
+                return; // would leave the monitor; keep last position
+            }
         }
         let _ = MoveWindow(hwnd, x, y, w, h, true);
         // Only re-show when actually hidden (e.g. returning from auto-hide).
@@ -1130,7 +1225,22 @@ mod win {
                 .get_or_insert_with(|| Sampler::new(NetSelection::Auto, cfg.sample.cpu_smoothing));
             sampler.sample(now)
         });
+        LAST_SNAPSHOT.with(|s| *s.borrow_mut() = Some(snapshot));
         record_history(&cfg, now, &snapshot);
+        rerender_from_last(hwnd);
+    }
+
+    /// Rebuild the frame from the last sample with the current config,
+    /// orientation and font. Config hot-reload, DPI/text-size changes and
+    /// theme flips all use this: taking a fresh sample for an unrelated
+    /// setting change used to compute network rates over a few milliseconds
+    /// and paint a bogus spike. Only the periodic timer (and startup) samples.
+    unsafe fn rerender_from_last(hwnd: HWND) {
+        let Some(snapshot) = LAST_SNAPSHOT.with(|s| *s.borrow()) else {
+            sample_now(hwnd);
+            return;
+        };
+        let cfg = config();
         let row = if TASKBAR_VERTICAL.load(Ordering::Relaxed) {
             format_frame_vertical(&snapshot, &cfg)
         } else {
@@ -1615,58 +1725,50 @@ mod win {
         });
     }
 
-    /// A guard for the per-target launch bit: clearing it in `Drop` keeps a
-    /// panic in the launch path from permanently blocking the next launch.
-    struct LaunchingGuard(u8);
-
-    impl Drop for LaunchingGuard {
-        fn drop(&mut self) {
-            LAUNCHING.fetch_and(!self.0, Ordering::SeqCst);
+    /// Create the kill-on-close job that owns every panel child. Keeping the
+    /// job handle for the process lifetime means an indicator crash, a quit
+    /// during a slow `CreateProcessW`, or an explorer restart can never leave
+    /// an orphan Settings/History process behind.
+    unsafe fn init_child_job() {
+        if CHILD_JOB.load(Ordering::Relaxed) != 0 {
+            return;
         }
+        let job = match CreateJobObjectW(None, windows::core::PCWSTR::null()) {
+            Ok(job) => job,
+            Err(e) => {
+                log_event("WARN", &format!("child job creation failed: {e}"));
+                return;
+            }
+        };
+        let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let configured = SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            &info as *const _ as *const std::ffi::c_void,
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        );
+        if let Err(e) = configured {
+            log_event("WARN", &format!("child job configuration failed: {e}"));
+            let _ = CloseHandle(job);
+            return;
+        }
+        CHILD_JOB.store(job.0 as isize, Ordering::Relaxed);
     }
 
-    fn launch_bit(exe_name: &str) -> u8 {
-        if exe_name.contains("Settings") {
-            1
-        } else {
-            2
+    /// Put a freshly spawned panel into the kill-on-close job. Failure is
+    /// non-fatal: the explicit slot termination still covers the normal
+    /// quit/restart paths, and the child's `--parent-pid` covers mac-style
+    /// crash cleanup where it applies.
+    unsafe fn assign_to_child_job(process: HANDLE) {
+        let raw = CHILD_JOB.load(Ordering::Relaxed);
+        if raw == 0 {
+            return;
         }
-    }
-
-    /// Launch a sibling executable from the current exe directory, keeping one
-    /// live instance per target: if a previously spawned process is still
-    /// running, this is a no-op. Extra argv (e.g. the `--anchor` geometry) is
-    /// passed through verbatim.
-    ///
-    /// The liveness check reads the process handle slot, but that slot is only
-    /// written *after* `ShellExecuteExW` returns — and Shell execute can pump
-    /// messages on its own thread-reentrant path, so a second click landing
-    /// mid-launch would see an empty slot and spawn a duplicate. A per-target
-    /// bit spans the whole launch (checked + set before, cleared after) so an
-    /// overlapping launch of the same target no-ops while the other child can
-    /// still start.
-    fn launch_child(
-        exe_name: &str,
-        args: Option<&str>,
-        slot: &std::cell::RefCell<Option<HANDLE>>,
-    ) -> bool {
-        if child_alive(slot) {
-            log_event(
-                "INFO",
-                &format!("launch_child {exe_name}: already running, skipped"),
-            );
-            return false;
+        let job = HANDLE(raw as *mut std::ffi::c_void);
+        if let Err(e) = AssignProcessToJobObject(job, process) {
+            log_event("WARN", &format!("child job assignment failed: {e}"));
         }
-        let bit = launch_bit(exe_name);
-        if LAUNCHING.fetch_or(bit, Ordering::SeqCst) & bit != 0 {
-            log_event(
-                "INFO",
-                &format!("launch_child {exe_name}: launch already in flight, skipped"),
-            );
-            return false;
-        }
-        let _guard = LaunchingGuard(bit);
-        launch_child_inner(exe_name, args, slot)
     }
 
     /// Spawn `exe_path` with the given argv tail. Returns the process handle
@@ -1738,6 +1840,7 @@ mod win {
         let started = Instant::now();
         match spawn_process(&exe_path, &dir, args) {
             Ok(handle) => {
+                unsafe { assign_to_child_job(handle) };
                 *slot.borrow_mut() = Some(handle);
                 log_event(
                     "INFO",
@@ -1755,11 +1858,20 @@ mod win {
         }
     }
 
-    /// Launch the external settings process (`SysVitalsSettings.exe`).
+    /// Launch the external settings process (`SysVitalsSettings.exe`). The
+    /// launch is synchronous (`CreateProcessW` does not pump messages), so
+    /// the slot liveness check alone is enough; there is no in-flight window
+    /// to guard. Pass the parent pid so the panel can close itself if the
+    /// indicator dies without running its quit path.
     fn launch_settings() {
-        // `thread_local!` statics expose a `LocalKey`; the cell itself is
-        // reached through `with`, not by borrowing the static.
-        SETTINGS_PROCESS.with(|slot| launch_child("SysVitalsSettings.exe", None, slot));
+        let args = format!("--parent-pid {}", unsafe { GetCurrentProcessId() });
+        SETTINGS_PROCESS.with(|slot| {
+            if child_alive(slot) {
+                log_event("INFO", "settings launch skipped: already running");
+                return;
+            }
+            let _ = launch_child_inner("SysVitalsSettings.exe", Some(&args), slot);
+        });
     }
 
     /// Whether the resident history framework is running or being launched.
@@ -1826,35 +1938,39 @@ mod win {
 
     fn history_snapshot() -> Option<sysvitals_core::HistoryState> {
         let ptr = history_state_ptr()?;
-        Some(unsafe { std::ptr::read_volatile(ptr) })
+        Some(unsafe { sysvitals_core::HistoryState::read_consistent(ptr) })
     }
 
-    fn history_set_desired(open: bool) {
+    /// Ask the resident child to close. The generation moves with the
+    /// request, so the resident loop can tell this close apart from the
+    /// generation that opened the window and will not reopen it while a
+    /// newer click is pending.
+    fn history_close_request() {
         let Some(ptr) = history_state_ptr() else {
             return;
         };
         unsafe {
-            std::ptr::write_volatile(std::ptr::addr_of_mut!((*ptr).desired_open), u32::from(open));
+            sysvitals_core::HistoryState::write_request(ptr, false, None);
         }
     }
 
-    /// Clear both flags after a resident-child death so the next click is not
-    /// treated as a toggle-close of a popup that no longer exists.
+    /// Clear both flags after a resident-child death (or before starting a
+    /// fresh frame) so a stale request/visibility cannot make the next click
+    /// a no-op toggle-close or auto-open a window nobody asked for.
     fn history_mark_stopped() {
         let Some(ptr) = history_state_ptr() else {
             return;
         };
         unsafe {
-            std::ptr::write_volatile(std::ptr::addr_of_mut!((*ptr).desired_open), 0);
-            std::ptr::write_volatile(std::ptr::addr_of_mut!((*ptr).visible), 0);
+            sysvitals_core::HistoryState::clear(ptr);
         }
     }
 
-    /// Write the indicator's screen rect into the shared block. `GetWindowRect`
-    /// reports physical pixels; the child lays its window out in GPUI's global
-    /// logical pixel space (top-left origin, y down), so scale by the window's
-    /// own monitor DPI (same conversion the old `--anchor` argv used).
-    fn history_write_anchor(hwnd: HWND) -> bool {
+    /// Publish an open request: the indicator's rect plus `desired_open=1`
+    /// under one generation write. `GetWindowRect` reports physical pixels;
+    /// the child lays its window out in GPUI's global logical pixel space
+    /// (top-left origin, y down), so scale by the window's own monitor DPI.
+    fn history_open_request(hwnd: HWND) -> bool {
         let Some(ptr) = history_state_ptr() else {
             return false;
         };
@@ -1871,15 +1987,7 @@ mod win {
             rect.bottom as f32 / scale,
         ];
         unsafe {
-            std::ptr::write_volatile(std::ptr::addr_of_mut!((*ptr).anchor[0]), anchor[0]);
-            std::ptr::write_volatile(std::ptr::addr_of_mut!((*ptr).anchor[1]), anchor[1]);
-            std::ptr::write_volatile(std::ptr::addr_of_mut!((*ptr).anchor[2]), anchor[2]);
-            std::ptr::write_volatile(std::ptr::addr_of_mut!((*ptr).anchor[3]), anchor[3]);
-            let generation = std::ptr::read_volatile(std::ptr::addr_of!((*ptr).generation));
-            std::ptr::write_volatile(
-                std::ptr::addr_of_mut!((*ptr).generation),
-                generation.wrapping_add(1),
-            );
+            sysvitals_core::HistoryState::write_request(ptr, true, Some(anchor));
         }
         true
     }
@@ -1896,6 +2004,12 @@ mod win {
             log_event("WARN", "history resident unavailable: state mapping failed");
             return;
         }
+        // A fresh resident starts with no window. Clear any request left by a
+        // previous child (for example a self-dismissed popup whose
+        // `desired_open` stays 1 by design) so merely starting the framework
+        // never opens a chart no click asked for. A click immediately
+        // publishes a new request after this call.
+        history_mark_stopped();
         let Some(dir) = current_exe_dir() else {
             log_event("WARN", "history launch: cannot determine exe directory");
             return;
@@ -1914,15 +2028,26 @@ mod win {
             let started = Instant::now();
             match spawn_process(&exe_path, &dir, Some(&args)) {
                 Ok(handle) => {
-                    *HISTORY_PROCESS.lock().unwrap_or_else(|e| e.into_inner()) =
-                        Some(handle.0 as isize);
-                    log_event(
-                        "INFO",
-                        &format!(
-                            "launched SysVitalsHistory.exe in {}ms",
-                            started.elapsed().as_millis()
-                        ),
-                    );
+                    unsafe { assign_to_child_job(handle) };
+                    if QUITTING.load(Ordering::Relaxed) {
+                        // The indicator began quitting while CreateProcessW
+                        // was in flight. The job object would reap it on
+                        // process exit, but terminating here also avoids
+                        // briefly showing a panel that no click asked for.
+                        let _ = unsafe { TerminateProcess(handle, 0) };
+                        let _ = unsafe { CloseHandle(handle) };
+                        log_event("INFO", "history launch cancelled by quit");
+                    } else {
+                        *HISTORY_PROCESS.lock().unwrap_or_else(|e| e.into_inner()) =
+                            Some(handle.0 as isize);
+                        log_event(
+                            "INFO",
+                            &format!(
+                                "launched SysVitalsHistory.exe in {}ms",
+                                started.elapsed().as_millis()
+                            ),
+                        );
+                    }
                 }
                 Err(e) => {
                     log_event("WARN", &format!("history launch failed: {e}"));
@@ -1946,7 +2071,14 @@ mod win {
     /// next click is not mistaken for a toggle-close of a popup that is gone.
     fn sync_history_state() {
         let alive = history_child_alive();
-        if !alive && !HISTORY_LAUNCHING.load(Ordering::SeqCst) {
+        if alive || HISTORY_LAUNCHING.load(Ordering::SeqCst) {
+            return;
+        }
+        // Do not bump the generation four times a second while idle; only
+        // clear a state that a dead child actually left behind.
+        let stale =
+            history_snapshot().is_some_and(|state| state.desired_open != 0 || state.visible != 0);
+        if stale {
             history_mark_stopped();
         }
     }
@@ -2910,32 +3042,54 @@ mod win {
                 LRESULT(0)
             }
             WM_APP_APPLY => {
-                // Config changed (from the file watcher): reposition and redraw
-                // at top level. Reset grow-only width so spacing/metric changes
-                // to a narrower layout take effect.
+                // Config changed (from the file watcher): rebuild the frame
+                // from the last sample. Sampling again here produced a
+                // network rate over a millisecond-scale gap (a visible
+                // spike) on every settings click. Reset grow-only width so a
+                // narrower layout takes effect.
                 log_event(
                     "INFO",
-                    "WM_APP_APPLY received: repositioning and re-rendering",
+                    "WM_APP_APPLY received: re-laying out from the last sample",
                 );
                 WIN_W.store(0, Ordering::Relaxed);
-                reposition(hwnd);
-                sample_now(hwnd);
+                rerender_from_last(hwnd);
                 LRESULT(0)
             }
             WM_SETTINGCHANGE => {
-                // Theme flips arrive here; re-read the flag and repaint.
+                // Theme, text-size and font changes arrive here. Re-read the
+                // theme, drop the cached font metrics and re-measure: the
+                // previous code repainted with the old width, clipping the
+                // new weight/size until the next sample tick.
                 let old_light = LIGHT_THEME.load(Ordering::Relaxed);
                 refresh_theme();
                 let new_light = LIGHT_THEME.load(Ordering::Relaxed);
                 if old_light != new_light {
                     log_event("INFO", &format!("theme changed: light={}", new_light == 1));
                 }
-                render_layered(hwnd);
+                invalidate_ui_font();
+                WIN_W.store(0, Ordering::Relaxed);
+                rerender_from_last(hwnd);
+                LRESULT(0)
+            }
+            WM_DPICHANGED => {
+                log_event(
+                    "INFO",
+                    &format!(
+                        "WM_DPICHANGED: dpi={} (was {})",
+                        GetDpiForWindow(hwnd),
+                        unsafe { GetDpiForSystem() }
+                    ),
+                );
+                invalidate_ui_font();
+                WIN_W.store(0, Ordering::Relaxed);
+                rerender_from_last(hwnd);
                 LRESULT(0)
             }
             WM_DISPLAYCHANGE => {
                 log_event("INFO", "WM_DISPLAYCHANGE: display configuration changed");
-                reposition(hwnd);
+                invalidate_ui_font();
+                WIN_W.store(0, Ordering::Relaxed);
+                rerender_from_last(hwnd);
                 LRESULT(0)
             }
             WM_LBUTTONUP => {
@@ -2944,16 +3098,21 @@ mod win {
                 // `WM_LBUTTONDBLCLK`, and Task Manager lives in the
                 // right-click menu. Any left click is a left click. A press
                 // paints nothing: the indicator has no pressed/hover backdrop.
-                let request_open = history_snapshot()
-                    .map_or(false, |state| state.desired_open != 0 || state.visible != 0);
+                //
+                // `visible` (owned by the child) is the actual open state.
+                // `desired_open` alone is not: after a blur/Esc dismissal it
+                // stays 1 while no window exists, so the next click must
+                // reopen instead of being treated as a close. Reap a dead
+                // child first so a stale `visible` cannot swallow the click.
+                if !history_child_alive() {
+                    history_mark_stopped();
+                }
+                let request_open = history_snapshot().is_some_and(|state| state.visible != 0);
                 if request_open {
-                    // The child removes its window and clears both flags.
-                    history_set_desired(false);
+                    history_close_request();
                 } else {
                     ensure_history_resident(hwnd);
-                    if history_write_anchor(hwnd) {
-                        history_set_desired(true);
-                    }
+                    let _ = history_open_request(hwnd);
                 }
                 LRESULT(0)
             }
@@ -3120,6 +3279,10 @@ mod win {
         WIN_H.store(0, Ordering::Relaxed);
         TASKBAR_VERTICAL.store(false, Ordering::Relaxed);
         LAST_ROW.with(|slot| *slot.borrow_mut() = None);
+        LAST_SNAPSHOT.with(|slot| *slot.borrow_mut() = None);
+        // The taskbar (and therefore the overlay) may have moved to a
+        // different-DPI monitor while explorer was restarting.
+        invalidate_ui_font();
         VISIBILITY_ANOMALY.store(false, Ordering::Relaxed);
         OVERLAY_SHOWN_ONCE.store(false, Ordering::Relaxed);
         CLOAK_LOGGED.store(false, Ordering::Relaxed);
@@ -3238,6 +3401,9 @@ mod win {
             };
 
             let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+            // Every panel child is owned by this job; closing the handle on
+            // process exit kills the children even after a crash.
+            init_child_job();
             // Needed only when the indicator is found cloaked on another
             // virtual desktop; the apartment is never otherwise used.
             let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
