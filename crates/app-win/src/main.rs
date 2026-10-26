@@ -1873,9 +1873,10 @@ mod win {
         HISTORY_PROCESS.with(|slot| launch_child("SysVitalsHistory.exe", args.as_deref(), slot))
     }
 
-    /// Pre-start the history process while the pointer is over the indicator.
-    /// It initializes GPUI and loads the first chart data hidden; a click only
-    /// has to signal the event and show the already-painted window.
+    /// Pre-start the history process ahead of a click: after the hover-intent
+    /// delay, or immediately on a left-button press. It initializes GPUI and
+    /// loads the first chart data hidden; the click only has to signal the
+    /// event and show the already-painted window.
     fn prewarm_history(hwnd: HWND) {
         if HISTORY_PREWARMED.load(Ordering::Relaxed) {
             if history_busy() {
@@ -2887,7 +2888,19 @@ mod win {
             }
             WM_LBUTTONDOWN => {
                 PRESSED.store(true, Ordering::Relaxed);
+                // Paint the pressed pill before the launch: starting the
+                // pre-warm can block this thread inside `CreateProcessW` for
+                // a noticeable while, and the indicator must not look stuck.
                 render_layered(hwnd);
+                // A press is a deliberate click, not a pointer crossing the
+                // indicator: start the hidden history process now. Its
+                // process/GPUI startup then overlaps the press-to-release
+                // interval, and the release only has to signal the reveal of
+                // an already-painted window. When a popup is already open
+                // this click may be closing it, so `prewarm_history` is a
+                // no-op then (`history_busy`).
+                let _ = KillTimer(Some(hwnd), TIMER_PREWARM);
+                prewarm_history(hwnd);
                 LRESULT(0)
             }
             WM_LBUTTONUP => {
@@ -2961,7 +2974,8 @@ mod win {
                     // Paint the hover state now; the pre-warm is deliberately
                     // deferred behind a short hover-intent timer so a pointer
                     // merely crossing the indicator does not spawn and
-                    // immediately kill a GPUI process.
+                    // immediately kill a GPUI process. A left-button press
+                    // skips this timer and warms immediately (`WM_LBUTTONDOWN`).
                     render_layered(hwnd);
                     if armed {
                         let _ = SetTimer(Some(hwnd), TIMER_PREWARM, PREWARM_DELAY_MS, None);

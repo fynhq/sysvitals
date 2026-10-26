@@ -14,9 +14,9 @@
 
 use std::collections::HashSet;
 use std::env;
-#[cfg(windows)]
-use std::time::Instant;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(windows)]
 use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
@@ -28,6 +28,7 @@ use windows::Win32::UI::HiDpi::{
 };
 
 use chrono::{DateTime, Local};
+use gpui_kit::base::plot::label::{PlotLabel, Text as PlotText};
 use gpui_kit::component::button::*;
 use gpui_kit::component::chart::AreaChart;
 use gpui_kit::component::theme::Theme as UiTheme;
@@ -284,10 +285,35 @@ struct ChartPoint {
 /// seconds makes the chart follow the indicator in near real time.
 const REFRESH_INTERVAL: Duration = Duration::from_secs(3);
 
-/// How many x-axis tick labels the chart shows, spread evenly across the fine
-/// data points (the value given to the chart's `x_tick_count`, and mirrored
-/// by [`spread_label_indices`] when deciding which points carry label text).
+/// How many x-axis tick labels the panel draws, spread evenly across the fine
+/// data points (mirrored by [`spread_label_indices`] when deciding which
+/// points carry label text).
 const X_TICK_COUNT: usize = 6;
+
+/// Axis label size. The chart library paints its tick labels at a fixed
+/// 10 px (`gpui_base::plot::label::TEXT_SIZE`) with no public size knob, so
+/// this panel asks the chart for no labels (`x_tick_count(0)` and empty
+/// `y_tick_format` keep both axis lines and their space) and paints them
+/// itself at this size.
+const AXIS_LABEL_SIZE: f32 = 12.0;
+
+/// The strip the chart reserves under its axis line for x labels: the
+/// library's 10 px label size plus four 2 px gaps (`AXIS_GAP`).
+const X_AXIS_STRIP_H: f32 = 18.0;
+
+/// The value-axis gutter the chart keeps left of the plot (`VALUE_AXIS_GAP`,
+/// never narrower than 32 px for the 0..=100 labels at its 10 px font). The
+/// x scale starts this far inside the chart and runs to its right edge, so
+/// the custom labels use the same origin to stay under their data points.
+const X_AXIS_GUTTER: f32 = 32.0;
+
+/// Y-axis domain and tick count. The library's y labels are suppressed the
+/// same way as the x labels (empty tick text keeps the gutter and axis
+/// line), so the overlay below reproduces these ticks at the same size as
+/// the x labels.
+const Y_AXIS_MIN: f64 = 0.0;
+const Y_AXIS_MAX: f64 = 100.0;
+const Y_TICK_COUNT: usize = 6;
 
 /// Chart stroke colors shared by the series, their fills, and the legend.
 const CPU_HUE: f32 = 210.0;
@@ -311,7 +337,6 @@ struct HistoryView {
     lang: Language,
     /// Created hidden by the hover pre-warm; do not claim activation on the
     /// first (offscreen) frame. The show signal activates it later.
-    #[cfg_attr(not(windows), allow(dead_code))]
     prewarm: bool,
     range: TimeRange,
     buckets: Vec<Bucket>,
@@ -539,6 +564,16 @@ impl HistoryView {
                 .update(cx, |view: &mut HistoryView, cx| {
                     view.reload_config();
                     view.load_data();
+                    log_event(
+                        "INFO",
+                        &format!(
+                            "history: window created in {}ms, first data in {}ms ({} points, prewarm={})",
+                            WINDOW_CREATED_MS.load(Ordering::Relaxed),
+                            elapsed_ms(),
+                            view.buckets.len(),
+                            view.prewarm,
+                        ),
+                    );
                     cx.notify();
                 })
                 .is_err()
@@ -603,7 +638,7 @@ impl HistoryView {
 
     fn points(&self) -> Vec<ChartPoint> {
         // One point per fine bucket: the curve keeps its full resolution.
-        // Only the indices the axis paints labels at (`spread_label_indices`,
+        // Only the indices the panel paints labels at (`spread_label_indices`,
         // mirroring the library's selection rule) carry label text, floored to
         // the range's clean grid (60/600/7200/432000 s) so every visible tick
         // reads as a round time. A labeled point's pixel position may sit up
@@ -801,10 +836,57 @@ fn format_ts_full(ts: i64) -> String {
         .unwrap_or_default()
 }
 
+// --------------------------------------------------------------- diagnostics
+
+/// Process-start instant for the popup's startup milestones. The launcher
+/// already logs how long `CreateProcessW` took; these milestones cover the
+/// other half of the wait — from process start to window creation, first
+/// chart data, and (for a pre-warmed window) the reveal.
+static START: OnceLock<Instant> = OnceLock::new();
+
+/// Elapsed time at the moment the window was created, stored so the first
+/// data-load log (which runs after the first frame, off the startup path)
+/// can report it without writing to disk during startup.
+static WINDOW_CREATED_MS: AtomicU64 = AtomicU64::new(0);
+
+fn elapsed_ms() -> u128 {
+    START
+        .get()
+        .map(|start| start.elapsed().as_millis())
+        .unwrap_or(0)
+}
+
+/// Append one milestone line to the shared daily log. The log path never
+/// fails the popup: errors are swallowed inside `logger::log_line`.
+fn log_event(level: &str, message: &str) {
+    let Ok(dir) = sysvitals_core::config::data_dir() else {
+        return;
+    };
+    let now = Local::now();
+    sysvitals_core::logger::log_line(
+        &dir,
+        &now.format("%Y-%m-%d").to_string(),
+        &now.format("%H:%M:%S").to_string(),
+        level,
+        message,
+    );
+}
+
 impl Render for HistoryView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let lang = self.lang;
         let points = self.points();
+        let point_count = points.len();
+        // The chart itself paints no x labels (`x_tick_count(0)` below); this
+        // panel draws them at a readable size instead. Each entry is a data
+        // index plus its clean-time label text; only the six indices the
+        // chart would label carry one.
+        let axis_labels: Vec<(usize, String)> = points
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| !p.label.is_empty())
+            .map(|(i, p)| (i, p.label.clone()))
+            .collect();
         let copied = self.copied;
         let copy_failed = self.copy_failed;
         let current_range = self.range;
@@ -896,18 +978,92 @@ impl Render for HistoryView {
         // positions (e.g. 20.8 / 41.6 / ... instead of 20 / 40 / ...). With
         // zero padding the tick grid and the domain grid coincide and the
         // six labels land exactly on 0 / 20 / 40 / 60 / 80 / 100; the series
-        // clips at the domain edges as before (pinned-plot mask).
+        // clips at the domain edges as before (pinned-plot mask). Its tick
+        // labels are also painted by the overlay: `y_tick_format` returns
+        // empty text, which keeps the axis line and the 32 px value-axis
+        // gutter (the minimum gutter is fixed) while hiding the library's
+        // 10 px labels.
         //
-        // X axis: `x_tick_count(X_TICK_COUNT)` picks that many data indices
-        // evenly spread first→last; only those indices carry label text, each
-        // its own bucket time floored to the range's clean grid (see
-        // `points` and `spread_label_indices`), so every visible label reads as a
-        // round time while the curve keeps the fine per-bucket shape.
+        // X axis: `x_tick_count(0)` keeps the axis line and the space the
+        // library reserves for tick labels, but suppresses the labels: it
+        // paints them at a fixed 10 px with no public size knob, so the
+        // labels are drawn at `AXIS_LABEL_SIZE` by the overlay added below.
+        // `points()` still labels the same six evenly spread indices
+        // (mirroring the library's selection rule) with clean-time text, so
+        // the overlay reads exactly like the axis the chart would have drawn,
+        // only larger.
         //
         // `tooltip_title` overrides the axis label with the full
         // `YYYY-MM-DD HH:MM:SS` (with seconds), because the axis labels are
         // deliberately terse and a hover should give exact timing.
-        let merged_chart = div().flex_1().child(
+        //
+        // Both label sets are painted by one canvas over the chart. The
+        // canvas receives the chart's final bounds at paint time, so the
+        // labels reproduce the library's plot geometry (the 32 px value-axis
+        // gutter and the 18 px strip under the x axis) without re-deriving
+        // the layout. The canvas paints before the chart, keeping a hover
+        // tooltip above the labels.
+        let y_labels: Vec<String> = (0..Y_TICK_COUNT)
+            .map(|k| {
+                let value =
+                    Y_AXIS_MAX - (Y_AXIS_MAX - Y_AXIS_MIN) * k as f64 / (Y_TICK_COUNT - 1) as f64;
+                format!("{value:.0}")
+            })
+            .collect();
+        let label_color = cx.theme().muted_foreground;
+        let axis_overlay = canvas(
+            |_bounds, _window, _cx| {},
+            move |bounds, _, window, cx| {
+                let plot_left = X_AXIS_GUTTER;
+                let plot_h = (f32::from(bounds.size.height) - X_AXIS_STRIP_H).max(0.0);
+                let plot_w = (f32::from(bounds.size.width) - plot_left).max(0.0);
+                let mut texts = Vec::with_capacity(axis_labels.len() + y_labels.len());
+                for (i, text) in &axis_labels {
+                    let frac = if point_count > 1 {
+                        *i as f32 / (point_count - 1) as f32
+                    } else {
+                        0.5
+                    };
+                    let first = point_count > 1 && *i == 0;
+                    let last = point_count > 1 && *i == point_count - 1;
+                    let align = if first {
+                        TextAlign::Left
+                    } else if last {
+                        TextAlign::Right
+                    } else {
+                        TextAlign::Center
+                    };
+                    texts.push(
+                        PlotText::new(
+                            text.clone(),
+                            point(px(plot_left + plot_w * frac), px(plot_h + 3.0)),
+                            label_color,
+                        )
+                        .font_size(px(AXIS_LABEL_SIZE))
+                        .align(align),
+                    );
+                }
+                let last_tick = (y_labels.len() - 1).max(1) as f32;
+                for (k, text) in y_labels.iter().enumerate() {
+                    let tick_y = plot_h * k as f32 / last_tick;
+                    let top = (tick_y - AXIS_LABEL_SIZE * 0.5)
+                        .clamp(0.0, (plot_h - AXIS_LABEL_SIZE).max(0.0));
+                    texts.push(
+                        PlotText::new(
+                            text.clone(),
+                            point(px(plot_left - 4.0), px(top)),
+                            label_color,
+                        )
+                        .font_size(px(AXIS_LABEL_SIZE))
+                        .align(TextAlign::Right),
+                    );
+                }
+                PlotLabel::new(texts).paint(&bounds, window, cx);
+            },
+        )
+        .absolute()
+        .size_full();
+        let merged_chart = div().flex_1().relative().child(axis_overlay).child(
             AreaChart::new(points)
                 .x(|p: &ChartPoint| p.label.clone())
                 .y(|p: &ChartPoint| p.cpu)
@@ -918,12 +1074,13 @@ impl Render for HistoryView {
                 .stroke(mem_color())
                 .fill(transparent_color())
                 .name(t(lang, "chart.mem").to_string())
-                .y_domain(0.0, 100.0)
+                .y_domain(Y_AXIS_MIN, Y_AXIS_MAX)
                 .y_padding(0.0, 0.0)
                 .x_axis(true)
-                .x_tick_count(X_TICK_COUNT)
+                .x_tick_count(0)
                 .y_axis(true)
-                .y_tick_count(6)
+                .y_tick_format(|_| "")
+                .y_tick_count(Y_TICK_COUNT)
                 .grid(true)
                 .appear(false)
                 .tooltip_title(|p: &ChartPoint| format_ts_full(p.ts).into())
@@ -1282,6 +1439,8 @@ fn apply_theme_and_accent(cx: &mut App) {
 }
 
 fn main() {
+    let _ = START.set(Instant::now());
+
     // GPUI does not declare DPI awareness itself. Without this the process
     // is treated as DPI-unaware and Windows bitmap-stretches the whole window
     // on a scaled display, which is what makes the text look soft.
@@ -1424,6 +1583,7 @@ fn main() {
                 cx.new(|cx| HistoryView::new(lang, csv_scope, prewarm, cx))
             })
             .expect("Failed to open history window");
+        WINDOW_CREATED_MS.store(elapsed_ms() as u64, Ordering::Relaxed);
 
         #[cfg(windows)]
         if prewarm {
@@ -1458,6 +1618,10 @@ fn main() {
                                 window.activate_window();
                             })
                         });
+                        log_event(
+                            "INFO",
+                            &format!("history: popup shown in {}ms", elapsed_ms()),
+                        );
                         break;
                     }
                     if started.elapsed() > Duration::from_secs(20) {
