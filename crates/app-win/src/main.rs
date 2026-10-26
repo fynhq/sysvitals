@@ -3148,7 +3148,7 @@ mod win {
     unsafe fn rebuild_overlay() {
         let current = OVERLAY_HWND.load(Ordering::Relaxed);
         let old = HWND(current as *mut std::ffi::c_void);
-        if current != 0 && IsWindow(old).as_bool() {
+        if current != 0 && IsWindow(Some(old)).as_bool() {
             if let Some(tray) = find_taskbar() {
                 let _ = SetWindowLongPtrW(old, GWLP_HWNDPARENT, tray.0 as isize);
             }
@@ -3203,8 +3203,8 @@ mod win {
         if msg == WM_TIMER && wparam.0 == TIMER_WATCH {
             if !QUITTING.load(Ordering::Relaxed) {
                 let current = OVERLAY_HWND.load(Ordering::Relaxed);
-                let alive =
-                    current != 0 && IsWindow(HWND(current as *mut std::ffi::c_void)).as_bool();
+                let alive = current != 0
+                    && IsWindow(Some(HWND(current as *mut std::ffi::c_void))).as_bool();
                 if !alive && find_taskbar().is_some() {
                     log_event("WARN", "overlay missing; watchdog recreating it");
                     rebuild_overlay();
