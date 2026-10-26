@@ -18,7 +18,14 @@ TARGETS = [
     "x86_64-apple-darwin",
 ]
 ROOTS = ["app-win", "app-settings", "app-history", "app-mac"]
-OWN = {"app-win", "app-settings", "app-history", "app-mac", "sysvitals-core"}
+OWN = {
+    "app-win",
+    "app-settings",
+    "app-history",
+    "app-mac",
+    "sysvitals-core",
+    "sysvitals-panel",
+}
 FINGERPRINT_RE = re.compile(r"Dependency-set fingerprint:\s*([0-9a-f]{64})")
 
 

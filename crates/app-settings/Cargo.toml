@@ -14,6 +14,7 @@ publish.workspace = true
 
 [dependencies]
 sysvitals-core = { workspace = true }
+sysvitals-panel = { path = "../panel-support" }
 gpui-kit = { workspace = true }
 
 # Windows-only: the settings window reads the same registry flag as the
@@ -34,6 +35,7 @@ windows = { workspace = true }
 # is a plain `f64` alias on the supported 64-bit targets, so no type import is
 # needed to pass the out-params.
 [target.'cfg(target_os = "macos")'.dependencies]
+libc = "=0.2.191"
 objc2 = "=0.6.5"
 objc2-app-kit = { version = "=0.3.2", default-features = false, features = [
     "NSAppearance",

@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/core",
+    "crates/panel-support",
     "crates/app-win",
     "crates/app-mac",
     "crates/app-settings",
@@ -40,6 +41,7 @@ windows = { version = "=0.62.2", default-features = false, features = [
     "Win32_Graphics_Gdi",
     "Win32_System_Com",
     "Win32_System_Diagnostics_Debug",
+    "Win32_System_JobObjects",
     "Win32_System_LibraryLoader",
     "Win32_System_Memory",
     "Win32_System_Registry",

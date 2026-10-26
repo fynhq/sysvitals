@@ -194,9 +194,11 @@ dependencies = [
  "arboard",
  "chrono",
  "gpui-kit",
+ "libc",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
  "sysvitals-core",
+ "sysvitals-panel",
  "windows 0.62.2",
  "winres",
 ]
@@ -219,10 +221,12 @@ name = "app-settings"
 version = "0.1.0-rc.9"
 dependencies = [
  "gpui-kit",
+ "libc",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
  "sysvitals-core",
+ "sysvitals-panel",
  "windows 0.62.2",
  "winres",
 ]
@@ -6305,6 +6309,17 @@ dependencies = [
  "sysinfo 0.39.6",
  "thiserror 2.0.21",
  "toml 1.1.8+spec-1.1.0",
+]
+
+[[package]]
+name = "sysvitals-panel"
+version = "0.1.0-rc.9"
+dependencies = [
+ "gpui-kit",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "sysvitals-core",
+ "windows 0.62.2",
 ]
 
 [[package]]
