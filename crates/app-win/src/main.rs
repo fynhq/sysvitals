@@ -43,7 +43,7 @@ mod win {
     use std::sync::atomic::{
         AtomicBool, AtomicI32, AtomicIsize, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering,
     };
-    use std::sync::{OnceLock, RwLock};
+    use std::sync::{Mutex, OnceLock, RwLock};
     use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
     use sysvitals_core::format::FormattedRow;
@@ -51,7 +51,7 @@ mod win {
         format_frame, format_frame_vertical, t, Config, Language, NetSelection, Sampler, Theme,
     };
     use windows::Wdk::System::SystemServices::RtlGetVersion;
-    use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_TIMEOUT};
+    use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE, WAIT_TIMEOUT};
     use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
     use windows::Win32::Graphics::Dwm::{
         DwmExtendFrameIntoClientArea, DwmGetWindowAttribute, DwmSetWindowAttribute,
@@ -78,14 +78,17 @@ mod win {
         GetModuleFileNameW, GetModuleHandleExW, GetModuleHandleW,
         GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
     };
+    use windows::Win32::System::Memory::{
+        CreateFileMappingW, MapViewOfFile, FILE_MAP_ALL_ACCESS, PAGE_READWRITE,
+    };
     use windows::Win32::System::Registry::{
         RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, KEY_READ,
         REG_VALUE_TYPE,
     };
     use windows::Win32::System::SystemInformation::{GetLocalTime, OSVERSIONINFOW};
     use windows::Win32::System::Threading::{
-        CreateEventW, CreateMutexW, CreateProcessW, ResetEvent, SetEvent, TerminateProcess,
-        WaitForSingleObject, PROCESS_INFORMATION, STARTUPINFOW,
+        CreateMutexW, CreateProcessW, GetCurrentProcessId, TerminateProcess, WaitForSingleObject,
+        PROCESS_INFORMATION, STARTUPINFOW,
     };
     use windows::Win32::UI::Controls::MARGINS;
     use windows::Win32::UI::HiDpi::{
@@ -93,8 +96,8 @@ mod win {
         DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
     };
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        GetAsyncKeyState, ReleaseCapture, SetCapture, SetFocus, TrackMouseEvent, TME_LEAVE,
-        TRACKMOUSEEVENT, VK_DOWN, VK_ESCAPE, VK_RETURN, VK_UP,
+        GetAsyncKeyState, ReleaseCapture, SetCapture, SetFocus, VK_DOWN, VK_ESCAPE, VK_RETURN,
+        VK_UP,
     };
     use windows::Win32::UI::Shell::{
         IVirtualDesktopManager, SHAppBarMessage, ShellExecuteW, VirtualDesktopManager, ABE_LEFT,
@@ -106,15 +109,16 @@ mod win {
         GetForegroundWindow, GetMessageW, GetShellWindow, GetSystemMetrics, GetWindowLongPtrW,
         GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow,
         IsWindowVisible, KillTimer, MoveWindow, PostMessageW, PostQuitMessage, RegisterClassExW,
-        SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow, SystemParametersInfoW,
-        TrackPopupMenu, TranslateMessage, UpdateLayeredWindow, WindowFromPoint, CS_HREDRAW,
-        CS_VREDRAW, GWL_EXSTYLE, HWND_TOPMOST, MF_SEPARATOR, MF_STRING, MSG, NONCLIENTMETRICSW,
-        SM_CXSCREEN, SM_CYSCREEN, SPI_GETNONCLIENTMETRICS, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-        SW_HIDE, SW_SHOWNOACTIVATE, SW_SHOWNORMAL, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON,
-        ULW_ALPHA, WM_ACTIVATE, WM_CAPTURECHANGED, WM_DESTROY, WM_DISPLAYCHANGE, WM_KEYDOWN,
-        WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NULL, WM_RBUTTONUP,
-        WM_SETTINGCHANGE, WM_TIMER, WNDCLASSEXW, WS_CHILD, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-        WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+        RegisterWindowMessageW, SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowPos,
+        ShowWindow, SystemParametersInfoW, TrackPopupMenu, TranslateMessage, UpdateLayeredWindow,
+        WindowFromPoint, CS_HREDRAW, CS_VREDRAW, GWLP_HWNDPARENT, GWL_EXSTYLE, HWND_TOPMOST,
+        MF_SEPARATOR, MF_STRING, MSG, NONCLIENTMETRICSW, SM_CXSCREEN, SM_CYSCREEN,
+        SPI_GETNONCLIENTMETRICS, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE,
+        SW_SHOWNOACTIVATE, SW_SHOWNORMAL, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, ULW_ALPHA,
+        WM_ACTIVATE, WM_CAPTURECHANGED, WM_DESTROY, WM_DISPLAYCHANGE, WM_KEYDOWN, WM_LBUTTONDOWN,
+        WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NULL, WM_RBUTTONUP, WM_SETTINGCHANGE,
+        WM_TIMER, WNDCLASSEXW, WS_CHILD, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+        WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
     };
 
     // ------------------------------------------------------------------ consts
@@ -135,16 +139,24 @@ mod win {
     /// Posted to the overlay when a custom menu's modal loop is done. It only
     /// has to break that loop; the main message loop would ignore it too.
     const WM_APP_MENU_DONE: u32 = 0x8000 + 2;
+    /// Posted by the background history-launch thread once the resident
+    /// process handle is stored (or the launch failed).
+    const WM_APP_HISTORY_READY: u32 = 0x8000 + 3;
     /// Timer used by the custom menu to catch Esc even if the menu never
     /// received keyboard focus.
     const TIMER_MENU_ESC: usize = 0x518;
-    /// One-shot timer that defers the history pre-warm until the pointer has
-    /// stayed on the indicator for [`PREWARM_DELAY_MS`]. Without the delay a
-    /// pointer merely crossing the indicator would spawn and immediately kill
-    /// a full GPUI process.
-    const TIMER_PREWARM: usize = 0x519;
-    /// Hover-intent delay before pre-warming the history process.
-    const PREWARM_DELAY_MS: u32 = 200;
+    /// Polls the resident history process so a crash is reaped and a stale
+    /// request cleared without waiting for the next click.
+    const TIMER_HISTORY: usize = 0x519;
+    const HISTORY_SYNC_MS: u32 = 250;
+    /// Retry cadence for re-finding `Shell_TrayWnd` after explorer restarts.
+    const TIMER_REBIND: usize = 0x51A;
+    const REBIND_RETRY_MS: u32 = 500;
+    /// Sentinel watchdog: recreates the overlay if it ever vanishes without a
+    /// `TaskbarCreated` broadcast (defensive; the broadcast covers the normal
+    /// explorer-restart path).
+    const TIMER_WATCH: usize = 0x51B;
+    const WATCHDOG_MS: u32 = 5_000;
     /// Custom context-menu metrics, in logical pixels (scaled by the owner's
     /// DPI when the window is created). These mirror WinUI 3's
     /// `MenuFlyoutItem`/`MenuFlyoutSeparator` metrics in window coordinates:
@@ -161,9 +173,6 @@ mod win {
     const MENU_ITEM_MARGIN_X_PX: i32 = 5;
     const MENU_ITEM_MARGIN_Y_PX: i32 = 2;
     const MENU_ITEM_RADIUS_PX: i32 = 4;
-    /// `WM_MOUSELEAVE` (WinUser.h). The `windows` crate metadata omits this
-    /// message, so it is defined locally; `TrackMouseEvent(TME_LEAVE)` posts it.
-    const WM_MOUSELEAVE: u32 = 0x02A3;
     /// Horizontal padding around the measured text.
     const PAD_PX: i32 = 6;
     /// Extra width slack added when sizing the overlay. Sizing measures text at
@@ -215,16 +224,25 @@ mod win {
     /// Track whether the taskbar is currently vertical so we can reset the
     /// grow-only width when orientation flips.
     static TASKBAR_VERTICAL: AtomicBool = AtomicBool::new(false);
-    /// Mouse hover over the indicator rectangle (requirement: a tray-like
-    /// focus background). Set on the first `WM_MOUSEMOVE` after a leave,
-    /// cleared on `WM_MOUSELEAVE`; drives the pill in `render_layered`.
-    static HOVER: AtomicBool = AtomicBool::new(false);
-    /// Left button currently pressed on the indicator (the "clicked" tint).
-    /// Set on `WM_LBUTTONDOWN`, cleared on `WM_LBUTTONUP` / `WM_RBUTTONUP`.
-    static PRESSED: AtomicBool = AtomicBool::new(false);
-    /// Per-target launch guards. Bit 0 = Settings, bit 1 = History: a launch
-    /// in flight for one child must not suppress starting the other.
+    /// Per-target launch guards. Bit 0 = Settings: a launch in flight for one
+    /// child must not suppress starting the other.
     static LAUNCHING: AtomicU8 = AtomicU8::new(0);
+    /// Resident history process handle, stored as a raw `isize` because the
+    /// launch happens on a worker thread (`HANDLE` is not `Send`). The UI
+    /// thread reaps and closes it.
+    static HISTORY_PROCESS: Mutex<Option<isize>> = Mutex::new(None);
+    /// True from the moment the background launch is requested until the
+    /// worker finishes; a click during startup must not spawn a second child.
+    static HISTORY_LAUNCHING: AtomicBool = AtomicBool::new(false);
+    /// The process is shutting down intentionally: the overlay's `WM_DESTROY`
+    /// must quit rather than wait for a shell-driven rebind.
+    static QUITTING: AtomicBool = AtomicBool::new(false);
+    /// Current overlay window, needed by the hidden sentinel that receives
+    /// `TaskbarCreated` broadcasts (the overlay itself is owned by the
+    /// taskbar and is destroyed with it).
+    static OVERLAY_HWND: AtomicIsize = AtomicIsize::new(0);
+    /// `RegisterWindowMessageW("TaskbarCreated")`; 0 until registered.
+    static TASKBAR_CREATED: OnceLock<u32> = OnceLock::new();
     /// Last observed config mtime in nanoseconds since UNIX_EPOCH. Nanosecond
     /// precision is required: the settings window saves on every click, and
     /// two saves inside one second would otherwise be invisible to the poller.
@@ -247,15 +265,16 @@ mod win {
         // Child process handles, kept so we can detect a still-running
         // instance and avoid stacking duplicate windows.
         static SETTINGS_PROCESS: RefCell<Option<HANDLE>> = const { RefCell::new(None) };
-        static HISTORY_PROCESS: RefCell<Option<HANDLE>> = const { RefCell::new(None) };
+        /// Shared command/status block between this overlay and the resident
+        /// history process. The mapping handle is kept alive for the process
+        /// lifetime.
+        static HISTORY_STATE: RefCell<Option<(*mut sysvitals_core::HistoryState, HANDLE)>> = const { RefCell::new(None) };
         // COM virtual-desktop manager, created on demand the first time the
         // indicator is found cloaked. All access is on the message thread.
         static VD_MANAGER: RefCell<Option<IVirtualDesktopManager>> = const { RefCell::new(None) };
         // State of the custom context menu currently on screen; `None` when
         // no menu is open.
         static MENU_STATE: RefCell<Option<MenuState>> = const { RefCell::new(None) };
-        /// Auto-reset event that reveals a pre-warmed history process.
-        static HISTORY_EVENT: RefCell<Option<HANDLE>> = const { RefCell::new(None) };
     }
 
     // ------------------------------------------------------------ config access
@@ -623,9 +642,6 @@ mod win {
     static CLOAK_MOVE_FAIL_LOGGED: AtomicBool = AtomicBool::new(false);
     static LAYERED_FAIL_LOGGED: AtomicBool = AtomicBool::new(false);
     static MENU_RENDER_FAIL_LOGGED: AtomicBool = AtomicBool::new(false);
-    /// True while the history process exists only as a hidden pre-warm. It
-    /// must not suppress topmost maintenance or draw the "popup open" pill.
-    static HISTORY_PREWARMED: AtomicBool = AtomicBool::new(false);
 
     /// The Windows virtual-desktop manager, created on demand. The overlay is
     /// a top-level window, so Windows cloaks it when the user switches to
@@ -774,57 +790,33 @@ mod win {
         );
     }
 
-    /// Keep the overlay at the very top of the topmost band, every tick.
+    /// Re-assert the topmost style only when Windows has actually dropped it.
     ///
-    /// Why: the topmost band is not an exclusive seat — shell flyouts (Start
-    /// Menu, Task View, Action Center and the tray popups) and third-party
-    /// always-on-top overlays are topmost too, and asserting their own band
-    /// position re-sorts everyone else inside it. Field diagnosis on a live
-    /// install caught the indicator with its `WS_EX_TOPMOST` style bit gone
-    /// entirely and the window re-banded below a dozen ordinary windows; even
-    /// when the bit survives, a flyout that asserts after us sits on top. A
-    /// single startup assertion cannot hold, so the tick re-asserts the band
-    /// position. `HWND_TOPMOST` with `SWP_NOMOVE | SWP_NOSIZE |
-    /// SWP_NOACTIVATE` only re-inserts the window at the top of the band: no
-    /// repaint, no move, no focus steal.
-    ///
-    /// Diagnostic: count how often the bit was found lost before re-assertion
-    /// (first loss, then every 60th, so a hostile z-order partner cannot spam
-    /// the log).
-    ///
-    /// Skip while the History popup is alive: the trend chart is anchored
-    /// directly above the indicator and is meant to sit there, so lifting
-    /// the band position mid-flight would fight it. The tick immediately
-    /// after the popup exits (its process handle reaped by `child_alive`)
-    /// re-asserts, so closing the popup also brings the indicator back
-    /// without needing a click elsewhere — the recovery the user asked for.
-    /// The Settings window is not anchored to the indicator (it is a centered
-    /// normal window), so it is deliberately *not* an exemption: keeping the
-    /// band assertion running while Settings is open is what prevents a
-    /// shell flyout from stealing the indicator's band for the whole session.
+    /// The overlay is owned by `Shell_TrayWnd`; owned windows stay above their
+    /// owner and follow the taskbar's z-band, which is what keeps the
+    /// indicator visible while Start / Task View push the taskbar into its
+    /// higher band. Re-inserting the window at the top of the topmost band
+    /// every tick cannot cross bands and only fights the shell's animations,
+    /// so the unconditional assertion was removed. A lost style bit (seen on
+    /// live installs after some z-order reshuffles) is still repaired once.
     ///
     /// Skip while the context menu is tracking: the menu lives in the
-    /// topmost band — re-asserting now would lift the indicator above the
-    /// menu the user is reading.
+    /// topmost band — re-raising now would lift the indicator above the menu
+    /// the user is reading. This branch runs only on the rare lost-bit path.
     unsafe fn maintain_topmost(hwnd: HWND) {
         if MENU_TRACKING.load(Ordering::Relaxed) {
             return;
         }
-        let child_running = HISTORY_PROCESS.with(|slot| child_alive(slot));
-        // A hidden pre-warm is not on screen; it must not stop the indicator
-        // from re-asserting its band while the pointer merely hovers.
-        if child_running && !HISTORY_PREWARMED.load(Ordering::Relaxed) {
+        let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        if (ex & WS_EX_TOPMOST.0 as isize) != 0 {
             return;
         }
-        let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-        if (ex & WS_EX_TOPMOST.0 as isize) == 0 {
-            let n = TOPMOST_LOST_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-            if n == 1 || n % 60 == 0 {
-                log_event(
-                    "INFO",
-                    &format!("topmost band lost before re-assertion (count={n})"),
-                );
-            }
+        let n = TOPMOST_LOST_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+        if n == 1 || n % 60 == 0 {
+            log_event(
+                "INFO",
+                &format!("topmost band lost; re-asserting (count={n})"),
+            );
         }
         let _ = SetWindowPos(
             hwnd,
@@ -1399,54 +1391,11 @@ mod win {
             (255u32, 255u32, 255u32)
         };
         let px = bits as *mut u32;
-        // Tray-style focus pill (hover / pressed background): while the
-        // pointer is over the indicator, or a button is held down on it, a
-        // rounded rect paints under the text, imitating the shell's own
-        // tray/clock highlight. The tint follows the taskbar appearance:
-        // a dark wash on the light taskbar, a light wash on the dark one.
-        // Idle (`pill_a == 0`) the composition is byte-for-byte the previous
-        // output: no pill pixels, glyphs as before.
-        let pill_a: u32 = {
-            // Pressed and "popup open" share the stronger tint; hover gets
-            // the lighter one; idle (0) composites exactly as before. The
-            // alphas are deliberately lower than the first white-pill pass:
-            // at 40/72 the highlight read brighter than the shell's own
-            // buttons on both taskbar themes.
-            let (hover_alpha, pressed_alpha): (u32, u32) =
-                if light_theme { (14, 28) } else { (22, 40) };
-            let popup_open = !HISTORY_PREWARMED.load(Ordering::Relaxed)
-                && HISTORY_PROCESS.with(|slot| {
-                    slot.borrow().as_ref().is_some_and(|h| {
-                        !h.is_invalid() && {
-                            // Read-only liveness probe: no handle close, no slot
-                            // clear. `close_history` and the launch path keep owning
-                            // the reaping; a popup that closed itself simply leaves a
-                            // signaled handle, which reads as "not alive" here.
-                            unsafe { WaitForSingleObject(*h, 0) == WAIT_TIMEOUT }
-                        }
-                    })
-                });
-            if PRESSED.load(Ordering::Relaxed) || popup_open {
-                pressed_alpha
-            } else if HOVER.load(Ordering::Relaxed) {
-                hover_alpha
-            } else {
-                0
-            }
-        };
-        // The tray focuses the whole clock/button area, not just the glyphs:
-        // use the full window minus a small inset. The pill reuses the glyph
-        // color, which is also the correct wash for the host taskbar theme.
-        let inset = 2i32.min(w / 4).min(h / 4).max(0);
-        let pw = (w - 2 * inset).max(0);
-        let ph = (h - 2 * inset).max(0);
-        let radius = (pw.min(ph) / 2).min(8);
-        // Half-extents of the pill's straight-sided core; the rounded-rect
-        // SDF below measures distance against them plus `radius`.
-        let hx = (pw - 2 * radius).max(0) as f32 / 2.0;
-        let hy = (ph - 2 * radius).max(0) as f32 / 2.0;
-        let pcx = inset as f32 + pw as f32 / 2.0;
-        let pcy = inset as f32 + ph as f32 / 2.0;
+        // Glyph-only composition. The indicator draws no hover/pressed/open
+        // background at all: the whole rectangle keeps a minimal (but
+        // non-zero) alpha so it stays hit-testable over the taskbar, and the
+        // supersampled glyph coverage is written premultiplied for
+        // `AC_SRC_ALPHA`.
         for y in 0..h {
             for x in 0..w {
                 let mut acc = 0u32;
@@ -1458,27 +1407,12 @@ mod win {
                     }
                 }
                 let cov = acc / (SS * SS) as u32;
-                // Signed distance to the rounded rect (<0 inside), feathered
-                // over one pixel so the pill edge is anti-aliased even
-                // though this pass runs at 1x.
-                let ddx = (((x as f32 + 0.5) - pcx).abs() - hx).max(0.0);
-                let ddy = (((y as f32 + 0.5) - pcy).abs() - hy).max(0.0);
-                let dist = (ddx * ddx + ddy * ddy).sqrt() - radius as f32;
-                let inside = (1.0 - dist.max(0.0)).clamp(0.0, 1.0);
-                let pa = (pill_a as f32 * inside) as u32;
-                if cov == 0 && pa == 0 {
-                    // Background: minimal (but non-zero) alpha so the whole
-                    // rectangle stays hit-testable yet invisible over the
-                    // taskbar.
+                if cov == 0 {
                     *px.add((y * w + x) as usize) = 0x0100_0000;
                 } else {
-                    // Source-over with the glyph on top of the white pill;
-                    // channels stay premultiplied for `AC_SRC_ALPHA`.
-                    let a = cov + pa * (255 - cov) / 255;
-                    let mix =
-                        |glyph: u32| (glyph * cov / 255) + (255 * pa / 255) * (255 - cov) / 255;
+                    let mix = |glyph: u32| glyph * cov / 255;
                     *px.add((y * w + x) as usize) =
-                        (a << 24) | (mix(tr) << 16) | (mix(tg) << 8) | mix(tb);
+                        (cov << 24) | (mix(tr) << 16) | (mix(tg) << 8) | mix(tb);
                 }
             }
         }
@@ -1649,28 +1583,33 @@ mod win {
         true
     }
 
-    /// Terminate the history popup's process if it is still running: the
-    /// click-to-toggle half of `WM_LBUTTONUP`. Returns `true` only when a live
-    /// popup was terminated — `false` means nothing was running and the caller
-    /// should open a new one.
-    ///
-    /// This is a hard process kill rather than a polite "please close": with
-    /// the overlay's `WS_EX_NOACTIVATE`, a click on the indicator leaves the
-    /// popup foreground and alive, so `close_history` is the only exit path
-    /// for the toggle click (blur-close still owns every other click-away).
-    /// Terminating the handle is deterministic and idempotent (already-dead
-    /// handles are reaped).
-    fn close_history() -> bool {
-        HISTORY_PREWARMED.store(false, Ordering::Relaxed);
-        HISTORY_PROCESS.with(|slot| terminate_child(slot, "history popup"))
+    /// Terminate the resident history process. Called only on restart/quit:
+    /// a normal popup close is a shared-state request that only removes the
+    /// window, leaving the framework warm.
+    fn history_terminate() -> bool {
+        let mut slot = HISTORY_PROCESS.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(raw) = slot.take() else {
+            return false;
+        };
+        let handle = HANDLE(raw as *mut std::ffi::c_void);
+        if handle.is_invalid() {
+            return false;
+        }
+        if unsafe { WaitForSingleObject(handle, 0) } != WAIT_TIMEOUT {
+            let _ = unsafe { CloseHandle(handle) };
+            return false;
+        }
+        let _ = unsafe { TerminateProcess(handle, 0) };
+        let _ = unsafe { CloseHandle(handle) };
+        log_event("INFO", "history process closed by indicator");
+        true
     }
 
-    /// Close both child panels on restart/quit. Their processes are owned by
-    /// this indicator; leaving them alive makes a restarted instance open a
-    /// second History window (its slot starts empty) and leaves Settings
-    /// orphaned after Quit.
+    /// Close both child panels on restart/quit. Leaving them alive makes a
+    /// restarted instance open a second History window (its slot starts
+    /// empty) and leaves Settings orphaned after Quit.
     fn close_children() {
-        let _ = close_history();
+        let _ = history_terminate();
         SETTINGS_PROCESS.with(|slot| {
             let _ = terminate_child(slot, "settings window");
         });
@@ -1730,6 +1669,48 @@ mod win {
         launch_child_inner(exe_name, args, slot)
     }
 
+    /// Spawn `exe_path` with the given argv tail. Returns the process handle
+    /// (the thread handle is closed here). Used both by the synchronous
+    /// Settings launch and by the background resident-history launcher.
+    fn spawn_process(exe_path: &str, dir: &str, args: Option<&str>) -> Result<HANDLE, String> {
+        let exe_w = utf16(exe_path);
+        let dir_w = utf16(dir);
+        let mut cmdline = utf16(&match args {
+            Some(a) => format!("\"{exe_path}\" {a}"),
+            None => format!("\"{exe_path}\""),
+        });
+        let si = STARTUPINFOW {
+            cb: std::mem::size_of::<STARTUPINFOW>() as u32,
+            ..Default::default()
+        };
+        let mut pi = PROCESS_INFORMATION::default();
+        // CreateProcessW launches the sibling directly: the Shell execute path
+        // used before can pump messages and adds shell lookup overhead. The
+        // child is a GUI-subsystem binary, so no console/STARTUPINFO window
+        // fields are needed.
+        let result = unsafe {
+            CreateProcessW(
+                windows::core::PCWSTR(exe_w.as_ptr()),
+                Some(windows::core::PWSTR(cmdline.as_mut_ptr())),
+                None,
+                None,
+                false,
+                Default::default(),
+                None,
+                windows::core::PCWSTR(dir_w.as_ptr()),
+                &si,
+                &mut pi,
+            )
+        };
+        match result {
+            Ok(()) => {
+                let _ = unsafe { CloseHandle(pi.hThread) };
+                Ok(pi.hProcess)
+            }
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
     fn launch_child_inner(
         exe_name: &str,
         args: Option<&str>,
@@ -1754,40 +1735,10 @@ mod win {
                 args.map(|a| format!(" {a}")).unwrap_or_default()
             ),
         );
-        let exe_w = utf16(&exe_path);
-        let dir_w = utf16(&dir);
-        let mut cmdline = utf16(&match args {
-            Some(a) => format!("\"{exe_path}\" {a}"),
-            None => format!("\"{exe_path}\""),
-        });
-        let si = STARTUPINFOW {
-            cb: std::mem::size_of::<STARTUPINFOW>() as u32,
-            ..Default::default()
-        };
-        let mut pi = PROCESS_INFORMATION::default();
         let started = Instant::now();
-        // CreateProcessW launches the sibling directly: the Shell execute path
-        // used before can pump messages and adds shell lookup overhead. The
-        // child is a GUI-subsystem binary, so no console/STARTUPINFO window
-        // fields are needed.
-        let result = unsafe {
-            CreateProcessW(
-                windows::core::PCWSTR(exe_w.as_ptr()),
-                Some(windows::core::PWSTR(cmdline.as_mut_ptr())),
-                None,
-                None,
-                false,
-                Default::default(),
-                None,
-                windows::core::PCWSTR(dir_w.as_ptr()),
-                &si,
-                &mut pi,
-            )
-        };
-        match result {
-            Ok(()) => {
-                let _ = unsafe { CloseHandle(pi.hThread) };
-                *slot.borrow_mut() = Some(pi.hProcess);
+        match spawn_process(&exe_path, &dir, args) {
+            Ok(handle) => {
+                *slot.borrow_mut() = Some(handle);
                 log_event(
                     "INFO",
                     &format!("launched {exe_name} in {}ms", started.elapsed().as_millis()),
@@ -1811,91 +1762,192 @@ mod win {
         SETTINGS_PROCESS.with(|slot| launch_child("SysVitalsSettings.exe", None, slot));
     }
 
-    /// Auto-reset event used to reveal a hidden, pre-warmed history process.
-    /// Created before the pre-warm launch so a click that lands while the
-    /// child is still starting leaves the event signaled for it to consume.
-    fn history_event() -> Option<HANDLE> {
-        unsafe {
-            HISTORY_EVENT.with(|slot| {
-                if slot.borrow().is_none() {
-                    let name = utf16(sysvitals_core::HISTORY_PREWARM_EVENT);
-                    match CreateEventW(None, false, false, windows::core::PCWSTR(name.as_ptr())) {
-                        Ok(event) => *slot.borrow_mut() = Some(event),
-                        Err(e) => {
-                            log_event("WARN", &format!("history prewarm event create failed: {e}"));
-                            return None;
-                        }
-                    }
-                }
-                *slot.borrow()
-            })
-        }
-    }
-
-    /// Whether a history window is already visible or a launch is in flight.
+    /// Whether the resident history framework is running or being launched.
     fn history_busy() -> bool {
-        HISTORY_PROCESS.with(|slot| child_alive(slot))
-            || LAUNCHING.load(Ordering::SeqCst) & launch_bit("SysVitalsHistory.exe") != 0
+        history_child_alive() || HISTORY_LAUNCHING.load(Ordering::SeqCst)
     }
 
-    /// Launch the external history chart process (`SysVitalsHistory.exe`),
-    /// passing the indicator's screen rectangle so the popup can anchor to it.
-    /// With `prewarm`, the child creates its window hidden and waits for the
-    /// named event instead of showing immediately. Returns true when the
-    /// process was actually created.
-    fn launch_history(hwnd: HWND, prewarm: bool) -> bool {
-        let mut rect = RECT::default();
-        let mut args = match unsafe { GetWindowRect(hwnd, &mut rect) } {
-            Ok(()) => {
-                // `GetWindowRect` reports physical pixels; the child process
-                // lays its window out in GPUI's global logical pixel space
-                // (top-left origin, y down) — the same units app-mac emits.
-                // Scale by this window's own monitor DPI.
-                let dpi = unsafe { GetDpiForWindow(hwnd) };
-                let scale = if dpi == 0 { 1.0 } else { dpi as f32 / 96.0 };
-                format!(
-                    "--anchor {:.1} {:.1} {:.1} {:.1}",
-                    rect.left as f32 / scale,
-                    rect.top as f32 / scale,
-                    rect.right as f32 / scale,
-                    rect.bottom as f32 / scale
-                )
-            }
-            Err(_) => String::new(),
+    /// Reap the resident history process if it exited (crash, manual kill).
+    fn history_child_alive() -> bool {
+        let mut slot = HISTORY_PROCESS.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(raw) = *slot else {
+            return false;
         };
-        if prewarm {
-            if !args.is_empty() {
-                args.push(' ');
-            }
-            args.push_str("--prewarm");
+        let handle = HANDLE(raw as *mut std::ffi::c_void);
+        if handle.is_invalid() {
+            *slot = None;
+            return false;
         }
-        let args = (!args.is_empty()).then_some(args);
-        HISTORY_PROCESS.with(|slot| launch_child("SysVitalsHistory.exe", args.as_deref(), slot))
+        if unsafe { WaitForSingleObject(handle, 0) } == WAIT_TIMEOUT {
+            true
+        } else {
+            let _ = unsafe { CloseHandle(handle) };
+            *slot = None;
+            false
+        }
     }
 
-    /// Pre-start the history process ahead of a click: after the hover-intent
-    /// delay, or immediately on a left-button press. It initializes GPUI and
-    /// loads the first chart data hidden; the click only has to signal the
-    /// event and show the already-painted window.
-    fn prewarm_history(hwnd: HWND) {
-        if HISTORY_PREWARMED.load(Ordering::Relaxed) {
-            if history_busy() {
-                return;
+    /// Create (or reopen) the shared history state block. Kept alive for the
+    /// process lifetime; the resident child maps it by name.
+    fn history_state_ptr() -> Option<*mut sysvitals_core::HistoryState> {
+        HISTORY_STATE.with(|slot| {
+            if slot.borrow().is_none() {
+                let name = utf16(sysvitals_core::HISTORY_STATE_MAP);
+                let size = std::mem::size_of::<sysvitals_core::HistoryState>();
+                let mapping = match unsafe {
+                    CreateFileMappingW(
+                        INVALID_HANDLE_VALUE,
+                        None,
+                        PAGE_READWRITE,
+                        0,
+                        size as u32,
+                        windows::core::PCWSTR(name.as_ptr()),
+                    )
+                } {
+                    Ok(mapping) => mapping,
+                    Err(e) => {
+                        log_event("WARN", &format!("history state mapping failed: {e}"));
+                        return None;
+                    }
+                };
+                let view = unsafe { MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, size) };
+                if view.Value.is_null() {
+                    let _ = unsafe { CloseHandle(mapping) };
+                    log_event("WARN", "history state map view failed");
+                    return None;
+                }
+                let ptr = view.Value as *mut sysvitals_core::HistoryState;
+                unsafe { std::ptr::write_volatile(ptr, sysvitals_core::HistoryState::new()) };
+                *slot.borrow_mut() = Some((ptr, mapping));
             }
-            // The hidden process timed out; allow a fresh pre-warm.
-            HISTORY_PREWARMED.store(false, Ordering::Relaxed);
+            slot.borrow().as_ref().map(|(ptr, _)| *ptr)
+        })
+    }
+
+    fn history_snapshot() -> Option<sysvitals_core::HistoryState> {
+        let ptr = history_state_ptr()?;
+        Some(unsafe { std::ptr::read_volatile(ptr) })
+    }
+
+    fn history_set_desired(open: bool) {
+        let Some(ptr) = history_state_ptr() else {
+            return;
+        };
+        unsafe {
+            std::ptr::write_volatile(std::ptr::addr_of_mut!((*ptr).desired_open), u32::from(open));
         }
+    }
+
+    /// Clear both flags after a resident-child death so the next click is not
+    /// treated as a toggle-close of a popup that no longer exists.
+    fn history_mark_stopped() {
+        let Some(ptr) = history_state_ptr() else {
+            return;
+        };
+        unsafe {
+            std::ptr::write_volatile(std::ptr::addr_of_mut!((*ptr).desired_open), 0);
+            std::ptr::write_volatile(std::ptr::addr_of_mut!((*ptr).visible), 0);
+        }
+    }
+
+    /// Write the indicator's screen rect into the shared block. `GetWindowRect`
+    /// reports physical pixels; the child lays its window out in GPUI's global
+    /// logical pixel space (top-left origin, y down), so scale by the window's
+    /// own monitor DPI (same conversion the old `--anchor` argv used).
+    fn history_write_anchor(hwnd: HWND) -> bool {
+        let Some(ptr) = history_state_ptr() else {
+            return false;
+        };
+        let mut rect = RECT::default();
+        if unsafe { GetWindowRect(hwnd, &mut rect) }.is_err() {
+            return false;
+        }
+        let dpi = unsafe { GetDpiForWindow(hwnd) };
+        let scale = if dpi == 0 { 1.0 } else { dpi as f32 / 96.0 };
+        let anchor = [
+            rect.left as f32 / scale,
+            rect.top as f32 / scale,
+            rect.right as f32 / scale,
+            rect.bottom as f32 / scale,
+        ];
+        unsafe {
+            std::ptr::write_volatile(std::ptr::addr_of_mut!((*ptr).anchor[0]), anchor[0]);
+            std::ptr::write_volatile(std::ptr::addr_of_mut!((*ptr).anchor[1]), anchor[1]);
+            std::ptr::write_volatile(std::ptr::addr_of_mut!((*ptr).anchor[2]), anchor[2]);
+            std::ptr::write_volatile(std::ptr::addr_of_mut!((*ptr).anchor[3]), anchor[3]);
+            let generation = std::ptr::read_volatile(std::ptr::addr_of!((*ptr).generation));
+            std::ptr::write_volatile(
+                std::ptr::addr_of_mut!((*ptr).generation),
+                generation.wrapping_add(1),
+            );
+        }
+        true
+    }
+
+    /// Start the resident history framework on a worker thread. `CreateProcessW`
+    /// has been measured at 190 ms – 5.4 s on loaded hosts; doing it here keeps
+    /// the indicator's message loop responsive. The child has no window until
+    /// the user opens the chart, so this only pays the GPUI/DirectX warm-up.
+    fn ensure_history_resident(hwnd: HWND) {
         if history_busy() {
             return;
         }
-        let Some(event) = history_event() else {
+        if history_state_ptr().is_none() {
+            log_event("WARN", "history resident unavailable: state mapping failed");
+            return;
+        }
+        let Some(dir) = current_exe_dir() else {
+            log_event("WARN", "history launch: cannot determine exe directory");
             return;
         };
-        // Clear a signal left over from a pre-warm that exited unclaimed.
-        let _ = unsafe { ResetEvent(event) };
-        HISTORY_PREWARMED.store(true, Ordering::Relaxed);
-        if !launch_history(hwnd, true) {
-            HISTORY_PREWARMED.store(false, Ordering::Relaxed);
+        let exe_path = format!("{dir}\\SysVitalsHistory.exe");
+        if !std::path::Path::new(&exe_path).exists() {
+            log_event("WARN", &format!("history launch: not found: {exe_path}"));
+            return;
+        }
+        let parent_pid = unsafe { GetCurrentProcessId() };
+        let args = format!("--resident --parent-pid {parent_pid}");
+        log_event("INFO", &format!("launching SysVitalsHistory.exe {args}"));
+        HISTORY_LAUNCHING.store(true, Ordering::SeqCst);
+        let hwnd_raw = hwnd.0 as isize;
+        std::thread::spawn(move || {
+            let started = Instant::now();
+            match spawn_process(&exe_path, &dir, Some(&args)) {
+                Ok(handle) => {
+                    *HISTORY_PROCESS.lock().unwrap_or_else(|e| e.into_inner()) =
+                        Some(handle.0 as isize);
+                    log_event(
+                        "INFO",
+                        &format!(
+                            "launched SysVitalsHistory.exe in {}ms",
+                            started.elapsed().as_millis()
+                        ),
+                    );
+                }
+                Err(e) => {
+                    log_event("WARN", &format!("history launch failed: {e}"));
+                }
+            }
+            HISTORY_LAUNCHING.store(false, Ordering::SeqCst);
+            // Wake the UI so the launch handle converges without waiting for
+            // the 250 ms sync timer. A destroyed hwnd makes this a no-op.
+            let _ = unsafe {
+                PostMessageW(
+                    Some(HWND(hwnd_raw as *mut std::ffi::c_void)),
+                    WM_APP_HISTORY_READY,
+                    WPARAM(0),
+                    LPARAM(0),
+                )
+            };
+        });
+    }
+
+    /// Reap a dead resident process and clear a request it left behind, so the
+    /// next click is not mistaken for a toggle-close of a popup that is gone.
+    fn sync_history_state() {
+        let alive = history_child_alive();
+        if !alive && !HISTORY_LAUNCHING.load(Ordering::SeqCst) {
+            history_mark_stopped();
         }
     }
 
@@ -1941,10 +1993,12 @@ mod win {
             );
         }
         // Exit the current instance.
+        QUITTING.store(true, Ordering::Relaxed);
         unsafe {
             let _ = KillTimer(Some(hwnd), TIMER_SAMPLE);
             let _ = KillTimer(Some(hwnd), TIMER_MOVE);
             let _ = KillTimer(Some(hwnd), TIMER_CONFIG);
+            let _ = KillTimer(Some(hwnd), TIMER_HISTORY);
             let _ = DestroyWindow(hwnd);
         }
     }
@@ -2807,10 +2861,12 @@ mod win {
             id if id == IDM_SETTINGS => launch_settings(),
             id if id == IDM_RESTART => restart_self(hwnd),
             id if id == IDM_QUIT => {
+                QUITTING.store(true, Ordering::Relaxed);
                 close_children();
                 let _ = KillTimer(Some(hwnd), TIMER_SAMPLE);
                 let _ = KillTimer(Some(hwnd), TIMER_MOVE);
                 let _ = KillTimer(Some(hwnd), TIMER_CONFIG);
+                let _ = KillTimer(Some(hwnd), TIMER_HISTORY);
                 let _ = DestroyWindow(hwnd);
             }
             _ => {}
@@ -2844,17 +2900,13 @@ mod win {
                     id if id == TIMER_SAMPLE => sample_now(hwnd),
                     id if id == TIMER_MOVE => reposition(hwnd),
                     id if id == TIMER_CONFIG => poll_config_change(hwnd),
-                    id if id == TIMER_PREWARM => {
-                        let _ = KillTimer(Some(hwnd), TIMER_PREWARM);
-                        // The pointer may have left between the timer request
-                        // and this tick (the leave path also kills the timer,
-                        // but a queued tick can still race it).
-                        if HOVER.load(Ordering::Relaxed) {
-                            prewarm_history(hwnd);
-                        }
-                    }
+                    id if id == TIMER_HISTORY => sync_history_state(),
                     _ => {}
                 }
+                LRESULT(0)
+            }
+            WM_APP_HISTORY_READY => {
+                sync_history_state();
                 LRESULT(0)
             }
             WM_APP_APPLY => {
@@ -2886,125 +2938,44 @@ mod win {
                 reposition(hwnd);
                 LRESULT(0)
             }
-            WM_LBUTTONDOWN => {
-                PRESSED.store(true, Ordering::Relaxed);
-                // Paint the pressed pill before the launch: starting the
-                // pre-warm can block this thread inside `CreateProcessW` for
-                // a noticeable while, and the indicator must not look stuck.
-                render_layered(hwnd);
-                // A press is a deliberate click, not a pointer crossing the
-                // indicator: start the hidden history process now. Its
-                // process/GPUI startup then overlaps the press-to-release
-                // interval, and the release only has to signal the reveal of
-                // an already-painted window. When a popup is already open
-                // this click may be closing it, so `prewarm_history` is a
-                // no-op then (`history_busy`).
-                let _ = KillTimer(Some(hwnd), TIMER_PREWARM);
-                prewarm_history(hwnd);
-                LRESULT(0)
-            }
             WM_LBUTTONUP => {
-                // Toggle the trend chart. A live popup (child still running)
-                // is closed; otherwise a new one opens immediately. There is
-                // no deferral: the class style dropped `CS_DBLCLKS`, so
-                // Windows does not synthesize a `WM_LBUTTONDBLCLK`, and Task
-                // Manager lives in the right-click menu. Any left click is a
-                // left click.
-                // A click ends the hover-intent window: never start a
-                // pre-warm behind the popup that this click is opening.
-                let _ = KillTimer(Some(hwnd), TIMER_PREWARM);
-                let was_pressed = PRESSED.swap(false, Ordering::Relaxed);
-                let was_prewarm = HISTORY_PREWARMED.swap(false, Ordering::Relaxed);
-                if was_prewarm && history_busy() {
-                    let signaled = match history_event() {
-                        Some(event) => unsafe { SetEvent(event).is_ok() },
-                        None => false,
-                    };
-                    if signaled {
-                        if was_pressed {
-                            render_layered(hwnd);
-                        }
-                        return LRESULT(0);
+                // Toggle the trend chart. There is no deferral: the class
+                // style dropped `CS_DBLCLKS`, so Windows does not synthesize a
+                // `WM_LBUTTONDBLCLK`, and Task Manager lives in the
+                // right-click menu. Any left click is a left click. A press
+                // paints nothing: the indicator has no pressed/hover backdrop.
+                let request_open = history_snapshot()
+                    .map_or(false, |state| state.desired_open != 0 || state.visible != 0);
+                if request_open {
+                    // The child removes its window and clears both flags.
+                    history_set_desired(false);
+                } else {
+                    ensure_history_resident(hwnd);
+                    if history_write_anchor(hwnd) {
+                        history_set_desired(true);
                     }
-                    // The hidden process could not be revealed; replace it
-                    // with a normally launched popup so the click still works.
-                    let _ = close_history();
-                    launch_history(hwnd, false);
-                } else if was_prewarm {
-                    // The pre-warm timed out between ticks; open normally.
-                    launch_history(hwnd, false);
-                } else if !close_history() {
-                    launch_history(hwnd, false);
-                }
-                // Paint off the pressed pill even when the popup just opened
-                // (the overlay stays click-responsive, so this tick is ours).
-                if was_pressed {
-                    render_layered(hwnd);
                 }
                 LRESULT(0)
             }
             WM_RBUTTONUP => {
-                PRESSED.store(false, Ordering::Relaxed);
-                // The menu is about to take over the pointer; a pre-warm
-                // started now would only live behind the menu.
-                let _ = KillTimer(Some(hwnd), TIMER_PREWARM);
                 show_context_menu(hwnd);
                 LRESULT(0)
             }
-            WM_MOUSEMOVE => {
-                // First move after a leave: arm one-shot leave tracking and
-                // paint the hover pill. If tracking cannot be armed, clear the
-                // hover state so the next move retries instead of leaving the
-                // pill stuck on forever.
-                if !HOVER.swap(true, Ordering::Relaxed) {
-                    // SAFETY: the hwnd is live; TME_LEAVE only requests the
-                    // one-shot WM_MOUSELEAVE.
-                    let armed = unsafe {
-                        TrackMouseEvent(&mut TRACKMOUSEEVENT {
-                            cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
-                            dwFlags: TME_LEAVE,
-                            hwndTrack: hwnd,
-                            dwHoverTime: 0,
-                        })
-                    }
-                    .is_ok();
-                    if !armed {
-                        HOVER.store(false, Ordering::Relaxed);
-                    }
-                    // Paint the hover state now; the pre-warm is deliberately
-                    // deferred behind a short hover-intent timer so a pointer
-                    // merely crossing the indicator does not spawn and
-                    // immediately kill a GPUI process. A left-button press
-                    // skips this timer and warms immediately (`WM_LBUTTONDOWN`).
-                    render_layered(hwnd);
-                    if armed {
-                        let _ = SetTimer(Some(hwnd), TIMER_PREWARM, PREWARM_DELAY_MS, None);
-                    }
-                }
-                LRESULT(0)
-            }
-            WM_MOUSELEAVE => {
-                PRESSED.store(false, Ordering::Relaxed);
-                // A pending hover-intent timer is canceled before it can
-                // spawn a process the user never asked for; an already
-                // launched pre-warm is released below.
-                let _ = KillTimer(Some(hwnd), TIMER_PREWARM);
-                // Leaving before the click means the user is not opening the
-                // chart; release the hidden pre-warm instead of keeping a
-                // process alive while the pointer is elsewhere.
-                if HISTORY_PREWARMED.swap(false, Ordering::Relaxed) {
-                    let _ = close_history();
-                    log_event("INFO", "history prewarm canceled on leave");
-                }
-                if HOVER.swap(false, Ordering::Relaxed) {
-                    render_layered(hwnd);
-                }
-                LRESULT(0)
-            }
             WM_DESTROY => {
-                close_children();
-                log_event("INFO", "SysVitals exiting");
-                PostQuitMessage(0);
+                if QUITTING.load(Ordering::Relaxed) {
+                    close_children();
+                    log_event("INFO", "SysVitals exiting");
+                    PostQuitMessage(0);
+                } else {
+                    // The taskbar owns this window; explorer restarted and
+                    // destroyed us. The resident History process is independent;
+                    // the sentinel will recreate the overlay on TaskbarCreated.
+                    OVERLAY_HWND.store(0, Ordering::Relaxed);
+                    log_event(
+                        "INFO",
+                        "overlay destroyed with the taskbar; waiting for TaskbarCreated",
+                    );
+                }
                 LRESULT(0)
             }
             _ => DefWindowProcW(hwnd, msg, wparam, lparam),
@@ -3079,6 +3050,171 @@ mod win {
             .to_string()
     }
 
+    /// Primary taskbar window. Re-queried after every explorer restart; the
+    /// overlay uses it as its owner so the two share a z-band.
+    unsafe fn find_taskbar() -> Option<HWND> {
+        let cls = utf16("Shell_TrayWnd");
+        FindWindowW(windows::core::PCWSTR(cls.as_ptr()), None).ok()
+    }
+
+    /// Create the layered overlay, optionally owned by the taskbar.
+    ///
+    /// Owner (not parent) is what makes Start menu / Task View safe: those
+    /// shell surfaces promote `Shell_TrayWnd` from z-band 1 to band 6, and an
+    /// owned window follows its owner's band automatically. `HWND_TOPMOST`
+    /// alone cannot cross bands, which is why the previous per-tick assertion
+    /// only produced a one-second flicker.
+    unsafe fn create_overlay(owner: Option<HWND>) -> Option<HWND> {
+        let hmodule = GetModuleHandleW(None).ok()?;
+        let class_name = utf16("SysVitalsOverlay");
+        let title = utf16("SysVitals");
+        let hwnd = CreateWindowExW(
+            // `WS_EX_NOACTIVATE` keeps a click from pulling foreground away
+            // from the History popup; the popup activates itself on reveal.
+            WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+            windows::core::PCWSTR(class_name.as_ptr()),
+            windows::core::PCWSTR(title.as_ptr()),
+            WS_POPUP,
+            -32_000,
+            -32_000,
+            200,
+            24,
+            owner,
+            None,
+            Some(hmodule.into()),
+            None,
+        )
+        .ok()?;
+        // Topmost so the overlay sits above the taskbar's own content.
+        let _ = SetWindowPos(
+            hwnd,
+            Some(HWND_TOPMOST),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+        Some(hwnd)
+    }
+
+    /// Finish a freshly created (or rebound) overlay: bind the taskbar owner,
+    /// reset per-window state, place it, show it and start every timer.
+    unsafe fn install_overlay(hwnd: HWND) {
+        OVERLAY_HWND.store(hwnd.0 as isize, Ordering::Relaxed);
+        if let Some(tray) = find_taskbar() {
+            let _ = SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, tray.0 as isize);
+        }
+        // Re-assert the topmost style after the owner change: the owner
+        // relationship controls the band, topmost controls the seat inside it.
+        let _ = SetWindowPos(
+            hwnd,
+            Some(HWND_TOPMOST),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+        WIN_W.store(0, Ordering::Relaxed);
+        WIN_H.store(0, Ordering::Relaxed);
+        TASKBAR_VERTICAL.store(false, Ordering::Relaxed);
+        LAST_ROW.with(|slot| *slot.borrow_mut() = None);
+        VISIBILITY_ANOMALY.store(false, Ordering::Relaxed);
+        OVERLAY_SHOWN_ONCE.store(false, Ordering::Relaxed);
+        CLOAK_LOGGED.store(false, Ordering::Relaxed);
+        CLOAK_MOVE_FAIL_LOGGED.store(false, Ordering::Relaxed);
+        MENU_TRACKING.store(false, Ordering::Relaxed);
+
+        let cfg = config();
+        let interval_ms = cfg.sample.interval_ms.clamp(500, 5000) as u32;
+        reposition(hwnd);
+        if LAST_ROW.with(|l| l.borrow().is_none()) {
+            sample_now(hwnd);
+        }
+        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        SetTimer(Some(hwnd), TIMER_SAMPLE, interval_ms, None);
+        SetTimer(Some(hwnd), TIMER_MOVE, MOVE_MS, None);
+        SetTimer(Some(hwnd), TIMER_CONFIG, CONFIG_POLL_MS, None);
+        SetTimer(Some(hwnd), TIMER_HISTORY, HISTORY_SYNC_MS, None);
+        // The History framework is independent of the overlay window; after
+        // an explorer restart this is a no-op when it is still alive.
+        ensure_history_resident(hwnd);
+    }
+
+    /// Explorer restart path: revive the overlay against the new taskbar.
+    /// If the old window somehow survived, only rebind it; otherwise create a
+    /// new one and reinstall every timer/state hook.
+    unsafe fn rebuild_overlay() {
+        let current = OVERLAY_HWND.load(Ordering::Relaxed);
+        let old = HWND(current as *mut std::ffi::c_void);
+        if current != 0 && IsWindow(old).as_bool() {
+            if let Some(tray) = find_taskbar() {
+                let _ = SetWindowLongPtrW(old, GWLP_HWNDPARENT, tray.0 as isize);
+            }
+            let _ = SetWindowPos(
+                old,
+                Some(HWND_TOPMOST),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
+            let _ = ShowWindow(old, SW_SHOWNOACTIVATE);
+            reposition(old);
+            log_event("INFO", "overlay rebound to the recreated taskbar");
+            return;
+        }
+        let Some(hwnd) = create_overlay(find_taskbar()) else {
+            log_event("WARN", "overlay recreation after taskbar restart failed");
+            return;
+        };
+        log_event("INFO", "overlay recreated after taskbar restart");
+        install_overlay(hwnd);
+    }
+
+    /// Hidden top-level window that survives explorer restarts. The overlay
+    /// itself is owned by the taskbar and dies with it, so it cannot be the
+    /// one listening for `TaskbarCreated`.
+    unsafe extern "system" fn sentinel_wndproc(
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        if TASKBAR_CREATED.get().is_some_and(|created| *created == msg) {
+            log_event("INFO", "TaskbarCreated received; rebinding indicator");
+            let _ = KillTimer(Some(hwnd), TIMER_REBIND);
+            if find_taskbar().is_some() {
+                rebuild_overlay();
+            } else {
+                let _ = SetTimer(Some(hwnd), TIMER_REBIND, REBIND_RETRY_MS, None);
+            }
+            return LRESULT(0);
+        }
+        if msg == WM_TIMER && wparam.0 == TIMER_REBIND {
+            if find_taskbar().is_some() {
+                let _ = KillTimer(Some(hwnd), TIMER_REBIND);
+                rebuild_overlay();
+            }
+            return LRESULT(0);
+        }
+        if msg == WM_TIMER && wparam.0 == TIMER_WATCH {
+            if !QUITTING.load(Ordering::Relaxed) {
+                let current = OVERLAY_HWND.load(Ordering::Relaxed);
+                let alive =
+                    current != 0 && IsWindow(HWND(current as *mut std::ffi::c_void)).as_bool();
+                if !alive && find_taskbar().is_some() {
+                    log_event("WARN", "overlay missing; watchdog recreating it");
+                    rebuild_overlay();
+                }
+            }
+            return LRESULT(0);
+        }
+        DefWindowProcW(hwnd, msg, wparam, lparam)
+    }
+
     // --------------------------------------------------------------------- run
 
     pub fn run() {
@@ -3107,7 +3243,6 @@ mod win {
             let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
             refresh_theme();
             let cfg = config();
-            let interval_ms = cfg.sample.interval_ms.clamp(500, 5000) as u32;
 
             // Seed the config mtime so the first poll does not false-trigger.
             CONFIG_MTIME.store(config_mtime(), Ordering::Relaxed);
@@ -3192,60 +3327,58 @@ mod win {
                 log_event("WARN", "menu content class registration failed");
             }
 
-            let title = utf16("SysVitals");
-            // `WS_EX_NOACTIVATE` — the toggle race fix. A left click on the
-            // overlay used to pull foreground away from the trend-chart
-            // child; the child's blur observer then began closing itself,
-            // and the overlay's `close_history` liveness check could catch
-            // it mid-exit, see "already dead", and launch a fresh popup
-            // instead — the "closes then re-opens" symptom. Not activating
-            // on click keeps the child foreground and alive, so
-            // `close_history` deterministically terminates it. This is safe
-            // because `app-history` claims activation itself on its first
-            // frame (`activate_window`, Windows-gated) when it did not
-            // inherit foreground from the launcher, so the popup still
-            // arms its blur-close for genuine click-aways. Right-click
-            // menus keep their click-away dismissal through the standard
-            // tray pattern in `show_context_menu`
-            // (`SetForegroundWindow` before, `WM_NULL` post after).
-            // Behavior on target OSes needs verification on real devices.
-            let hwnd = CreateWindowExW(
-                WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
-                windows::core::PCWSTR(class_name.as_ptr()),
-                windows::core::PCWSTR(title.as_ptr()),
+            // The sentinel is a hidden top-level window that is deliberately
+            // *not* owned by the taskbar: it must outlive explorer restarts to
+            // receive the `TaskbarCreated` broadcast and rebuild the overlay.
+            let taskbar_created =
+                RegisterWindowMessageW(windows::core::PCWSTR(utf16("TaskbarCreated").as_ptr()));
+            if taskbar_created != 0 {
+                let _ = TASKBAR_CREATED.set(taskbar_created);
+            } else {
+                log_event("WARN", "TaskbarCreated registration failed");
+            }
+            let sentinel_class = utf16("SysVitalsSentinel");
+            let sentinel_wc = WNDCLASSEXW {
+                cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+                style: CS_HREDRAW | CS_VREDRAW,
+                lpfnWndProc: Some(sentinel_wndproc),
+                hInstance: hmodule.into(),
+                lpszClassName: windows::core::PCWSTR(sentinel_class.as_ptr()),
+                ..Default::default()
+            };
+            if RegisterClassExW(&sentinel_wc) == 0 {
+                log_event("WARN", "sentinel class registration failed");
+            }
+            let sentinel_title = utf16("SysVitalsSentinel");
+            let _sentinel = CreateWindowExW(
+                WS_EX_TOOLWINDOW,
+                windows::core::PCWSTR(sentinel_class.as_ptr()),
+                windows::core::PCWSTR(sentinel_title.as_ptr()),
                 WS_POPUP,
-                -32_000,
-                -32_000,
-                200,
-                24,
+                0,
+                0,
+                0,
+                0,
                 None,
                 None,
                 Some(hmodule.into()),
                 None,
-            )
-            .expect("CreateWindowExW");
-
-            // Topmost so the overlay sits above the taskbar's own content.
-            let _ = SetWindowPos(
-                hwnd,
-                Some(HWND_TOPMOST),
-                0,
-                0,
-                0,
-                0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
             );
-            // Detect taskbar orientation first, then seed one frame. The
-            // orientation-change path inside `reposition` already samples when
-            // the bar is vertical, so only sample here if it did not.
-            reposition(hwnd);
-            if LAST_ROW.with(|l| l.borrow().is_none()) {
-                sample_now(hwnd);
+            match _sentinel {
+                Ok(sentinel) => {
+                    let _ = SetTimer(Some(sentinel), TIMER_WATCH, WATCHDOG_MS, None);
+                }
+                Err(_) => log_event("WARN", "sentinel window creation failed"),
             }
-            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-            SetTimer(Some(hwnd), TIMER_SAMPLE, interval_ms, None);
-            SetTimer(Some(hwnd), TIMER_MOVE, MOVE_MS, None);
-            SetTimer(Some(hwnd), TIMER_CONFIG, CONFIG_POLL_MS, None);
+
+            // Create the overlay owned by the current taskbar and install every
+            // timer. `install_overlay` also starts the resident History
+            // framework on a worker thread.
+            let Some(hwnd) = create_overlay(find_taskbar()) else {
+                log_event("WARN", "overlay creation failed");
+                return;
+            };
+            install_overlay(hwnd);
 
             let mut msg = MSG::default();
             while GetMessageW(&mut msg, None, 0, 0).0 > 0 {
