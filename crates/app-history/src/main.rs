@@ -43,10 +43,12 @@ use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use sysvitals_core::backdrop::Material;
 use sysvitals_core::config::{config_path, history_path, Config, CsvScope};
 use sysvitals_core::i18n::{t, Language};
 use sysvitals_core::store::{floor_to_grid, spread_label_indices, Bucket, Store};
+#[cfg(windows)]
+use sysvitals_panel::panel_font_family;
+use sysvitals_panel::{backdrop_for, detect_material, system_accent_hex, PanelSurface};
 
 /// Screen rectangle of the indicator, passed by the overlay in GPUI's
 /// global logical pixel space (top-left origin, y growing downward).
@@ -292,6 +294,15 @@ struct ChartPoint {
 /// seconds makes the chart follow the indicator in near real time.
 const REFRESH_INTERVAL: Duration = Duration::from_secs(3);
 
+/// Shared-state poll cadence. A visible popup needs tight polling so the
+/// indicator's close request and blur dismissal feel immediate; the resident
+/// process without a window is idle and can wake 10 times, not 25 times, per
+/// second. Only Windows has the resident loop.
+#[cfg(windows)]
+const ACTIVE_POLL_MS: u64 = 40;
+#[cfg(windows)]
+const IDLE_POLL_MS: u64 = 100;
+
 /// How many x-axis tick labels the panel draws, spread evenly across the fine
 /// data points (mirrored by [`spread_label_indices`] when deciding which
 /// points carry label text).
@@ -358,49 +369,19 @@ struct HistoryShared {
 #[cfg(windows)]
 impl HistoryShared {
     fn snapshot(&self) -> sysvitals_core::HistoryState {
-        unsafe {
-            let p = self.state;
-            use std::ptr::{addr_of, read_volatile};
-            sysvitals_core::HistoryState {
-                magic: read_volatile(addr_of!((*p).magic)),
-                version: read_volatile(addr_of!((*p).version)),
-                desired_open: read_volatile(addr_of!((*p).desired_open)),
-                visible: read_volatile(addr_of!((*p).visible)),
-                generation: read_volatile(addr_of!((*p).generation)),
-                _reserved: 0,
-                anchor: [
-                    read_volatile(addr_of!((*p).anchor[0])),
-                    read_volatile(addr_of!((*p).anchor[1])),
-                    read_volatile(addr_of!((*p).anchor[2])),
-                    read_volatile(addr_of!((*p).anchor[3])),
-                ],
-            }
-        }
-    }
-
-    fn set_desired(&self, open: bool) {
-        unsafe {
-            std::ptr::write_volatile(
-                std::ptr::addr_of_mut!((*self.state).desired_open),
-                u32::from(open),
-            );
-        }
+        unsafe { sysvitals_core::HistoryState::read_consistent(self.state) }
     }
 
     fn set_visible(&self, visible: bool) {
-        unsafe {
-            std::ptr::write_volatile(
-                std::ptr::addr_of_mut!((*self.state).visible),
-                u32::from(visible),
-            );
-        }
+        unsafe { sysvitals_core::HistoryState::write_visible(self.state, visible) }
     }
 
     /// Called by the popup's own dismissal paths (blur/Esc) and by the
-    /// resident loop after it takes the window down. Clearing the request as
-    /// well as visibility is what lets the indicator's next click reopen.
+    /// resident loop after it takes the window down. Only the child-owned
+    /// `visible` flag is cleared: `desired_open` belongs to the indicator,
+    /// and writing it here used to race a fresh click and swallow it. The
+    /// resident loop records the dismissed generation locally instead.
     fn mark_hidden(&self) {
-        self.set_desired(false);
         self.set_visible(false);
     }
 }
@@ -438,9 +419,8 @@ fn open_history_state() -> Option<*mut sysvitals_core::HistoryState> {
     }
 }
 
-/// `--parent-pid <pid>`: the resident process exits when the indicator does,
-/// even if the launcher never gets a chance to terminate it.
-#[cfg(windows)]
+/// `--parent-pid <pid>`: the process exits when the indicator does, even if
+/// the launcher never gets a chance to terminate it.
 fn parse_parent_pid() -> Option<u32> {
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -449,6 +429,26 @@ fn parse_parent_pid() -> Option<u32> {
         }
     }
     None
+}
+
+/// macOS one-shot popup: quit when the menu-bar indicator goes away instead
+/// of lingering as an orphan window. Windows resident mode has the stronger
+/// process-handle check in `run_resident`.
+#[cfg(target_os = "macos")]
+fn watch_parent(cx: &mut App) {
+    let Some(pid) = parse_parent_pid() else {
+        return;
+    };
+    cx.spawn(async move |cx| loop {
+        cx.background_executor().timer(Duration::from_secs(1)).await;
+        if unsafe { libc::kill(pid as i32, 0) } != 0
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+        {
+            cx.update(|app| app.quit());
+            break;
+        }
+    })
+    .detach();
 }
 
 #[cfg(windows)]
@@ -463,14 +463,22 @@ fn trim_working_set() {
 
 struct HistoryView {
     lang: Language,
-    /// Created hidden by the hover pre-warm; do not claim activation on the
-    /// first (offscreen) frame. The show signal activates it later.
-    prewarm: bool,
+    /// Created hidden by the resident launcher; do not claim activation on
+    /// the first (offscreen) frame. The loop activates it after the first
+    /// data load.
+    hidden_start: bool,
     range: TimeRange,
     buckets: Vec<Bucket>,
+    /// One connection kept for the window's lifetime. Reopening SQLite every
+    /// three seconds re-ran WAL/schema setup and contended with the
+    /// indicator's writer for no benefit.
+    store: Option<Store>,
     csv_scope: CsvScope,
     copied: bool,
     copy_failed: bool,
+    /// Monotonic ticket for the copy confirmation timer. An older timer must
+    /// not clear a newer copy's message.
+    copy_feedback_seq: u64,
     /// Last config mtime applied, in nanoseconds; the popup keeps language and
     /// CSV-scope settings live instead of freezing them at launch.
     config_mtime: u64,
@@ -514,19 +522,21 @@ impl HistoryView {
     fn new(
         lang: Language,
         csv_scope: CsvScope,
-        prewarm: bool,
+        hidden_start: bool,
         first_load: Arc<AtomicBool>,
         shared: Option<Arc<HistoryShared>>,
         cx: &mut Context<Self>,
     ) -> Self {
         let mut view = Self {
             lang,
-            prewarm,
+            hidden_start,
             range: TimeRange::Hour1,
             buckets: Vec::new(),
+            store: None,
             csv_scope,
             copied: false,
             copy_failed: false,
+            copy_feedback_seq: 0,
             config_mtime: 0,
             ever_active: false,
             _activation: None,
@@ -572,7 +582,7 @@ impl HistoryView {
                     }
                     view.last_accent = current;
                     if current.is_some() {
-                        apply_accent(cx);
+                        sysvitals_panel::apply_accent(cx);
                     } else {
                         // The OS moved back to "multicolor": reload the palette
                         // so the old accent override is removed.
@@ -652,7 +662,7 @@ impl HistoryView {
         // key-window lifecycle, unverified at runtime, and the bug was only
         // ever reproduced on Windows.
         #[cfg(windows)]
-        if !self.ever_active && !self.prewarm {
+        if !self.ever_active && !self.hidden_start {
             window.activate_window();
             // If activation completed synchronously, the observer below will
             // not see an edge; seed the guard from the post-activation state.
@@ -677,10 +687,11 @@ impl HistoryView {
     /// when the window closes.
     /// Reload language and CSV scope when the config file changes while the
     /// popup is open. The theme is system-owned; only these two settings are
-    /// consumed by this panel.
-    fn reload_config(&mut self) {
+    /// consumed by this panel. Returns whether anything visible changed so
+    /// the static 1 d / 1 mo views can skip their three-second repaint.
+    fn reload_config(&mut self) -> bool {
         let Ok(path) = config_path() else {
-            return;
+            return false;
         };
         let mtime = std::fs::metadata(&path)
             .and_then(|m| m.modified())
@@ -689,19 +700,23 @@ impl HistoryView {
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(0);
         if mtime == self.config_mtime {
-            return;
+            return false;
         }
         match Config::load(&path) {
             Ok((cfg, _)) => {
                 self.config_mtime = mtime;
+                let changed =
+                    self.lang != cfg.display.language || self.csv_scope != cfg.history.csv_scope;
                 self.lang = cfg.display.language;
                 self.csv_scope = cfg.history.csv_scope;
+                changed
             }
             Err(e) => {
                 // Retry only when the file changes again, and keep the last
                 // good values in the meantime.
                 self.config_mtime = mtime;
                 eprintln!("app-history: config reload failed: {e}");
+                false
             }
         }
     }
@@ -726,7 +741,7 @@ impl HistoryView {
                             WINDOW_CREATED_MS.load(Ordering::Relaxed),
                             elapsed_ms().saturating_sub(WINDOW_CREATED_MS.load(Ordering::Relaxed) as u128),
                             view.buckets.len(),
-                            view.prewarm,
+                            view.hidden_start,
                         ),
                     );
                     cx.notify();
@@ -739,14 +754,19 @@ impl HistoryView {
                 cx.background_executor().timer(REFRESH_INTERVAL).await;
                 if this
                     .update(cx, |view: &mut HistoryView, cx| {
-                        view.reload_config();
+                        let config_changed = view.reload_config();
                         // 1 d / 1 mo scan the whole retention window; keep
                         // them static while open. The range button loads them
                         // on switch (and re-clicking the active range reloads).
-                        if view.range.auto_refresh() {
+                        // Their static view also skips the repaint unless the
+                        // config changed something visible.
+                        let live = view.range.auto_refresh();
+                        if live {
                             view.load_data();
                         }
-                        cx.notify();
+                        if live || config_changed {
+                            cx.notify();
+                        }
                     })
                     .is_err()
                 {
@@ -769,6 +789,28 @@ impl HistoryView {
         (from, now, self.range.bucket_secs(), offset)
     }
 
+    /// Keep one SQLite connection for the window. Reopening every refresh
+    /// re-ran WAL/schema setup and could fail with `SQLITE_BUSY` while the
+    /// indicator was writing, leaving the chart empty.
+    fn ensure_store(&mut self) -> bool {
+        if self.store.is_some() {
+            return true;
+        }
+        let Ok(path) = history_path() else {
+            return false;
+        };
+        match Store::open(&path) {
+            Ok(store) => {
+                self.store = Some(store);
+                true
+            }
+            Err(e) => {
+                eprintln!("app-history: history store open failed: {e}");
+                false
+            }
+        }
+    }
+
     fn load_data(&mut self) {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -778,14 +820,23 @@ impl HistoryView {
         // Clear on failure: otherwise a range switch would keep showing the
         // previous range's points under the new axis.
         let mut buckets = Vec::new();
-        if let Ok(path) = history_path() {
-            if let Ok(store) = Store::open(&path) {
-                // The curve draws at the fine CSV bucket width; axis labels
-                // floor each point's timestamp to the clean grid (see
-                // `points`). One query serves both — no coarse pass anymore.
-                buckets = store
-                    .buckets_offset(from, to, bucket, offset)
-                    .unwrap_or_default();
+        if self.ensure_store() {
+            // The curve draws at the fine CSV bucket width; axis labels
+            // floor each point's timestamp to the clean grid (see
+            // `points`). One query serves both — no coarse pass anymore.
+            let result = self
+                .store
+                .as_ref()
+                .map(|store| store.buckets_offset(from, to, bucket, offset));
+            match result {
+                Some(Ok(loaded)) => buckets = loaded,
+                Some(Err(e)) => {
+                    eprintln!("app-history: history query failed: {e}");
+                    // A broken connection should be retried on the next
+                    // refresh rather than kept forever.
+                    self.store = None;
+                }
+                None => {}
             }
         }
         self.buckets = buckets;
@@ -821,7 +872,7 @@ impl HistoryView {
             if labeled.contains(&i) {
                 let clean = floor_to_grid(b.ts, step, offset);
                 let day = day_of(clean);
-                let crosses = prev_day.as_ref().map_or(true, |p| *p != day);
+                let crosses = prev_day.as_ref().is_none_or(|p| *p != day);
                 prev_day = Some(day);
                 label = if month_view {
                     fmt_date(clean)
@@ -846,10 +897,59 @@ impl HistoryView {
         points
     }
 
-    fn copy_csv(&mut self) {
-        let lang = self.lang;
+    fn copy_csv(&mut self, cx: &mut Context<Self>) {
         self.copy_failed = false;
+        let lang = self.lang;
 
+        if self.csv_scope == CsvScope::Visible {
+            // Exactly the points currently drawn, including the grid-aligned
+            // window start and the local-time bucket phase.
+            self.finish_copy(self.buckets.clone(), lang, cx);
+            return;
+        }
+
+        // The longer scopes scan the whole retention window; a month of raw
+        // samples on the UI thread visibly froze the popup. Query in the
+        // background and only build the clipboard text back on the UI thread.
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let (seconds, bucket_secs) = match self.csv_scope {
+            CsvScope::Visible => unreachable!(),
+            CsvScope::Last24h => (86_400, 120),
+            CsvScope::Last7d => (604_800, 600),
+            CsvScope::Last30d => (2_592_000, 3600),
+        };
+        let offset = Local::now().offset().local_minus_utc() as i64;
+        let from = floor_to_grid(now - seconds, bucket_secs, offset);
+        let executor = cx.background_executor().clone();
+        cx.spawn(async move |this, cx| {
+            let loaded = executor
+                .spawn(async move {
+                    let path = history_path().map_err(|e| e.to_string())?;
+                    let store = Store::open(&path).map_err(|e| e.to_string())?;
+                    store
+                        .buckets_offset(from, now, bucket_secs, offset)
+                        .map_err(|e| e.to_string())
+                })
+                .await;
+            let _ = this.update(cx, |view: &mut HistoryView, cx| match loaded {
+                Ok(buckets) => view.finish_copy(buckets, lang, cx),
+                Err(e) => {
+                    eprintln!("app-history: CSV query failed: {e}");
+                    view.copied = false;
+                    view.copy_failed = true;
+                    view.schedule_copied_reset(cx);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Build the clipboard text, write it, and arm the confirmation reset.
+    fn finish_copy(&mut self, buckets: Vec<Bucket>, lang: Language, cx: &mut Context<Self>) {
         // Tab-separated rows paste straight into spreadsheet cells (WPS /
         // Excel split on tabs on paste), and unlike a space separator they
         // do not collide with the internal space of the "YYYY-MM-DD HH:MM:SS"
@@ -866,39 +966,6 @@ impl HistoryView {
         );
         csv.push_str(&header);
         csv.push('\n');
-
-        let buckets = if self.csv_scope == CsvScope::Visible {
-            // Exactly the points currently drawn, including the grid-aligned
-            // window start and the local-time bucket phase.
-            Some(self.buckets.clone())
-        } else {
-            let now = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
-            let (seconds, bucket_secs) = match self.csv_scope {
-                CsvScope::Visible => unreachable!(),
-                CsvScope::Last24h => (86_400, 120),
-                CsvScope::Last7d => (604_800, 600),
-                CsvScope::Last30d => (2_592_000, 3600),
-            };
-            let offset = Local::now().offset().local_minus_utc() as i64;
-            let from = floor_to_grid(now - seconds, bucket_secs, offset);
-            let mut loaded = None;
-            if let Ok(path) = history_path() {
-                if let Ok(store) = Store::open(&path) {
-                    loaded = store.buckets_offset(from, now, bucket_secs, offset).ok();
-                }
-            }
-            loaded
-        };
-
-        let Some(buckets) = buckets else {
-            self.copied = false;
-            self.copy_failed = true;
-            eprintln!("app-history: CSV query failed");
-            return;
-        };
         for b in &buckets {
             let ts_str = format_ts_full(b.ts);
             csv.push_str(&format!("{ts_str}\t{:.1}\t{:.1}\n", b.cpu, b.mem));
@@ -922,21 +989,26 @@ impl HistoryView {
                 eprintln!("app-history: clipboard unavailable: {e}");
             }
         }
+        self.schedule_copied_reset(cx);
+        cx.notify();
     }
 
-    /// Clear the "copied" confirmation once the history window has enough
-    /// time to show it. Spawning instead of storing the task lets a new copy
-    /// arm a fresh reset while an older timer simply clears an already-cleared
-    /// flag.
-    fn schedule_copied_reset(&self, cx: &mut Context<Self>) {
+    /// Clear the "copied" confirmation once the history window has had time
+    /// to show it. Each copy takes a new ticket; an older timer that fires
+    /// later must not clear a newer confirmation.
+    fn schedule_copied_reset(&mut self, cx: &mut Context<Self>) {
+        self.copy_feedback_seq = self.copy_feedback_seq.wrapping_add(1);
+        let seq = self.copy_feedback_seq;
         cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(Duration::from_millis(1200))
                 .await;
             let _ = this.update(cx, |view: &mut HistoryView, cx| {
-                view.copied = false;
-                view.copy_failed = false;
-                cx.notify();
+                if view.copy_feedback_seq == seq {
+                    view.copied = false;
+                    view.copy_failed = false;
+                    cx.notify();
+                }
             });
         })
         .detach();
@@ -1092,9 +1164,7 @@ impl Render for HistoryView {
             .when(!copied, |b| b.icon(IconName::Copy))
             .when(copy_failed, |b| b.text_color(hsla(0.0, 0.7, 0.5, 1.0)))
             .on_click(cx.listener(|this: &mut Self, _: &ClickEvent, _, cx| {
-                this.copy_csv();
-                this.schedule_copied_reset(cx);
-                cx.notify();
+                this.copy_csv(cx);
             }));
 
         let header = h_flex()
@@ -1284,298 +1354,13 @@ impl Render for HistoryView {
 }
 
 // ---------------------------------------------------------------------------
-// System accent + backdrop material (mirrors app-settings; see there for the
-// full rationale on each helper)
+// Shared theme, accent and backdrop helpers
 // ---------------------------------------------------------------------------
 
-/// The system accent color packed as `0x00RRGGBB`, or `None` when it should
-/// not be used at all. Windows reads the Explorer `AccentColorMenu` value
-/// (ABGR) — the accent the Settings app itself paints with, updated as soon
-/// as the picker is confirmed — and only falls back to
-/// `DwmGetColorizationColor` when that value is absent. The DWM colorization
-/// blend can lag and can be darkened by the transparency/color-prevalence
-/// mix, so it does not always match the system accent. macOS always follows
-/// `NSColor.controlAccentColor`, which resolves both an explicit pick and
-/// the default multicolor / wallpaper-derived accent; `controlAccentColor`
-/// reflects the current system accent without any light/dark resolution. See
-/// app-settings for the same shape.
-#[cfg(windows)]
-fn system_accent_hex() -> Option<u32> {
-    const ACCENT_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Accent";
-    if let Some(abgr) = hkcu_dword(ACCENT_KEY, "AccentColorMenu") {
-        return Some(sysvitals_core::color::abgr_to_rgb(abgr));
-    }
-    use windows::Win32::Graphics::Dwm::DwmGetColorizationColor;
-    let mut argb = 0u32;
-    // `Default::default()` avoids naming the `BOOL` type: in windows-core
-    // 0.62 that is a plain `pub type BOOL = i32` alias, so writing
-    // `BOOL(0)` would compile as a tuple-struct constructor (E0423). The
-    // opaque-blend flag is not read — the accent color is meaningful either
-    // way. See the same fix in app-settings.
-    if unsafe { DwmGetColorizationColor(&mut argb, &mut Default::default()) }.is_err() {
-        return None;
-    }
-    Some(argb & 0x00FF_FFFF)
-}
-
-#[cfg(target_os = "macos")]
-fn system_accent_hex() -> Option<u32> {
-    use objc2::rc::Retained;
-    use objc2_app_kit::{NSColor, NSColorSpace};
-    let color = NSColor::controlAccentColor();
-    let srgb = NSColorSpace::sRGBColorSpace();
-    let converted: Retained<NSColor> = color.colorUsingColorSpace(&srgb)?;
-    let (mut r, mut g, mut b, mut a) = (0f64, 0f64, 0f64, 0f64);
-    unsafe { converted.getRed_green_blue_alpha(&mut r, &mut g, &mut b, &mut a) };
-    let to8 = |x: f64| ((x.clamp(0.0, 1.0) * 255.0).round() as u32) & 0xFF;
-    Some((to8(r) << 16) | (to8(g) << 8) | to8(b))
-}
-
-#[cfg(not(any(windows, target_os = "macos")))]
-fn system_accent_hex() -> Option<u32> {
-    None
-}
-
-/// Push the OS accent into the theme so the primary button style (the active
-/// range tile, focus rings) matches the OS picker, writing both the legacy
-/// `primary` and `button_primary` fields plus the lightness-shifted
-/// hover/active variants and `ring` (see app-settings).
-///
-/// The chart line colors are deliberately *not* overridden here: they encode
-/// which series is which and must stay stable so the two lines remain
-/// distinguishable after a user changes their accent.
-fn apply_accent(cx: &mut App) {
-    let Some(hex) = system_accent_hex() else {
-        return;
-    };
-    let base = rgb_hex_to_hsla(hex);
-    // Windows uses WCAG relative luminance (not HSL lightness: a saturated
-    // yellow has an HSL lightness near 0.5 but is far brighter than a
-    // mid-blue). macOS is fixed to white so the active range tile keeps a
-    // light label in both appearances, matching the settings panel.
-    #[cfg(target_os = "macos")]
-    let foreground = hsla(0.0, 0.0, 1.0, 1.0);
-    #[cfg(not(target_os = "macos"))]
-    let foreground = if sysvitals_core::color::prefers_dark_foreground(hex) {
-        hsla(0.0, 0.0, 0.08, 1.0)
-    } else {
-        hsla(0.0, 0.0, 0.97, 1.0)
-    };
-    UiTheme::update(cx, |theme| {
-        let shift = |dl: f32| Hsla {
-            l: (base.l + dl).clamp(0.05, 0.95),
-            ..base
-        };
-        theme.colors.primary = base;
-        theme.colors.button_primary = base;
-        theme.colors.primary_hover = shift(0.06);
-        theme.colors.button_primary_hover = shift(0.06);
-        theme.colors.primary_active = shift(-0.06);
-        theme.colors.button_primary_active = shift(-0.06);
-        theme.colors.primary_foreground = foreground;
-        theme.colors.button_primary_foreground = foreground;
-        theme.colors.ring = base;
-        // Match the accent used by the active dropdown row / text selection
-        // instead of the palette's fixed blue.
-        theme.colors.list_active = Hsla {
-            a: if theme.mode.is_dark() { 0.26 } else { 0.16 },
-            ..base
-        };
-        theme.colors.list_active_border = base;
-        theme.colors.selection = Hsla { a: 0.30, ..base };
-        theme.colors.caret = base;
-    });
-}
-
-// ---------------------------------------------------------------------------
-// Window backdrop material (Win11 Mica / macOS blur, with fallbacks)
-// ---------------------------------------------------------------------------
-
-/// Read a HKCU registry DWORD (same pattern as app-settings, which reads the
-/// layout flag; the windows feature set in the workspace manifest covers the
-/// registry API).
-#[cfg(windows)]
-fn hkcu_dword(key: &str, value: &str) -> Option<u32> {
-    use windows::Win32::System::Registry::{
-        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, KEY_READ,
-        REG_VALUE_TYPE,
-    };
-    let utf16 = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
-    let key_w = utf16(key);
-    let value_w = utf16(value);
-    let mut hkey = HKEY::default();
-    if unsafe {
-        RegOpenKeyExW(
-            HKEY_CURRENT_USER,
-            windows::core::PCWSTR(key_w.as_ptr()),
-            None,
-            KEY_READ,
-            &mut hkey,
-        )
-    }
-    .is_err()
-    {
-        return None;
-    }
-    let mut data = [0u8; 4];
-    let mut size = 4u32;
-    let mut kind = REG_VALUE_TYPE::default();
-    let queried = unsafe {
-        RegQueryValueExW(
-            hkey,
-            windows::core::PCWSTR(value_w.as_ptr()),
-            None,
-            Some(&mut kind),
-            Some(data.as_mut_ptr()),
-            Some(&mut size),
-        )
-    };
-    let _ = unsafe { RegCloseKey(hkey) };
-    if queried.is_ok() && size >= 4 {
-        Some(u32::from_le_bytes(data))
-    } else {
-        None
-    }
-}
-
-/// The Windows OS build number via `RtlGetVersion` (see app-settings for why
-/// the classic API lies); `None` when the probe fails.
-#[cfg(windows)]
-fn os_build_number() -> Option<u32> {
-    use windows::Wdk::System::SystemServices::RtlGetVersion;
-    use windows::Win32::System::SystemInformation::OSVERSIONINFOW;
-    let mut info = OSVERSIONINFOW::default();
-    info.dwOSVersionInfoSize = std::mem::size_of::<OSVERSIONINFOW>() as u32;
-    if unsafe { RtlGetVersion(&mut info) }.is_err() {
-        return None;
-    }
-    Some(info.dwBuildNumber)
-}
-
-/// Windows 11 ships Segoe UI Variable, whose default optical size is tuned
-/// for UI text and renders small sizes more crisply than the legacy Segoe UI.
-/// Older builds keep the system-resolved font; an unavailable family falls
-/// back through GPUI's default stack.
-///
-/// The typeface is the system one, but glyph antialiasing stays grayscale:
-/// GPUI enables ClearType only for opaque windows, and this popup keeps its
-/// Mica/acrylic backdrop. If the material is dropped (transparency disabled,
-/// older host), the window becomes opaque and GPUI switches to ClearType on
-/// its own.
-#[cfg(windows)]
-fn panel_font_family() -> Option<&'static str> {
-    os_build_number()
-        .filter(|build| *build >= 22000)
-        .map(|_| "Segoe UI Variable")
-}
-
-/// The backdrop this Windows host supports, honoring the transparency-effects
-/// preference. Same rule as app-settings, fed by the same probes; the pure
-/// threshold decision lives in core.
-#[cfg(windows)]
-fn detect_material() -> Material {
-    const PERSONALIZE_KEY: &str =
-        "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize";
-    let transparency = hkcu_dword(PERSONALIZE_KEY, "EnableTransparency")
-        .map(|v| v != 0)
-        .unwrap_or(true);
-    sysvitals_core::backdrop::choose_windows_material(os_build_number(), transparency)
-}
-
-/// macOS always requests the blur material: the window blur exists on every
-/// supported host, and AppKit flattens it automatically when the user turns
-/// on "reduce transparency", so the accessibility fallback is the system's
-/// own — see app-settings for the same reasoning.
-#[cfg(target_os = "macos")]
-fn detect_material() -> Material {
-    sysvitals_core::backdrop::choose_macos_material(true)
-}
-
-#[cfg(not(any(windows, target_os = "macos")))]
-fn detect_material() -> Material {
-    Material::Opaque
-}
-
-/// Map the material onto GPUI's window-background request (see app-settings).
-fn backdrop_for(material: Material) -> WindowBackgroundAppearance {
-    match material {
-        Material::Mica => WindowBackgroundAppearance::MicaBackdrop,
-        Material::Blur => WindowBackgroundAppearance::Blurred,
-        Material::Opaque => WindowBackgroundAppearance::Opaque,
-    }
-}
-
-/// Tint the popup's root surface so the backdrop reads through, with the
-/// opaque fallback as a no-op. Same replay-after-theme-change contract as the
-/// accent; see the matching function in app-settings.
-fn apply_material(cx: &mut App) {
-    use sysvitals_core::backdrop::{material_tint_alpha, material_tint_alpha_macos, should_tint};
-    let material = detect_material();
-    if !should_tint(material) {
-        return;
-    }
-    UiTheme::update(cx, |theme| {
-        let dark = theme.mode.is_dark();
-        // macOS blur needs a much stronger tint to match the native
-        // volume/Wi-Fi/battery popovers; Windows keeps its Mica tuning.
-        let alpha = if cfg!(target_os = "macos") {
-            material_tint_alpha_macos(dark)
-        } else {
-            material_tint_alpha(dark)
-        };
-        let opaque = |c: Hsla| Hsla { a: 1.0, ..c };
-        theme.colors.background = opaque(theme.colors.background).opacity(alpha);
-    });
-}
-
-/// Convert a packed 24-bit RGB hex to GPUI's `Hsla` (h/s/l/a in 0..1).
-/// Hand-rolled so the accent path does not depend on which color helpers the
-/// current gpui-kit prelude happens to re-export; only `hsla` and `Hsla` are
-/// required, both already used by the chart series colors.
-fn rgb_hex_to_hsla(hex: u32) -> Hsla {
-    let r = ((hex >> 16) & 0xFF) as f32 / 255.0;
-    let g = ((hex >> 8) & 0xFF) as f32 / 255.0;
-    let b = (hex & 0xFF) as f32 / 255.0;
-    let max = r.max(g).max(b);
-    let min = r.min(g).min(b);
-    let l = (max + min) * 0.5;
-    if (max - min).abs() < 1e-6 {
-        return hsla(0.0, 0.0, l, 1.0);
-    }
-    let d = max - min;
-    let s = if l > 0.5 {
-        d / (2.0 - max - min)
-    } else {
-        d / (max + min)
-    };
-    let h = if (max - r).abs() < 1e-6 {
-        ((g - b) / d + if g < b { 6.0 } else { 0.0 }) / 6.0
-    } else if (max - g).abs() < 1e-6 {
-        ((b - r) / d + 2.0) / 6.0
-    } else {
-        ((r - g) / d + 4.0) / 6.0
-    };
-    hsla(h, s, l, 1.0)
-}
-
-/// Sync the popup's palette to the OS light/dark appearance. The user's
-/// `display.theme` setting is deliberately not consulted here: the trend
-/// chart panel always follows the system, and only the resident indicator
-/// honors the "light/dark override" side of that config. `Theme::change`
-/// (which `sync_system_appearance` calls under the hood) reloads the whole
-/// palette, so this must be followed by [`apply_accent`] whenever the
-/// Windows primary-color override is wanted — see [`apply_theme_and_accent`].
-fn apply_system_theme(cx: &mut App) {
-    UiTheme::sync_system_appearance(None, cx);
-}
-
-/// Theme sync, accent override, and material tint applied together, in that
-/// order. The palette reload wipes every runtime patch, so both follow every
-/// theme change (see the matching rule in app-settings).
+/// Re-apply the shared theme/accent/material stack, then the history-only
+/// chart-grid and font overrides.
 fn apply_theme_and_accent(cx: &mut App) {
-    apply_system_theme(cx);
-    apply_accent(cx);
-    apply_material(cx);
+    sysvitals_panel::apply_theme_and_accent(cx, PanelSurface::History);
     // The library's `chart_grid` falls back to `border.opacity(0.6)`, and
     // the dark palette's border is a near-black neutral, so the grid read as
     // black lines on the dark panel. Derive it from the foreground instead:
@@ -1747,12 +1532,23 @@ fn run_resident(cx: &mut App) {
         let mut first_load: Option<Arc<AtomicBool>> = None;
         let mut activated = false;
         let mut opened_at: Option<Instant> = None;
+        let mut last_activation_attempt: Option<Instant> = None;
         let mut idle_since: Option<Instant> = Some(Instant::now());
         let mut trimmed = false;
+        // Request generation that opened the current window. A blur/Esc
+        // dismissal records it as dismissed so the same request is not
+        // reopened while a newer click still gets through.
+        let mut open_generation = 0u32;
+        let mut dismissed_generation: Option<u32> = None;
 
         loop {
+            let poll_ms = if window.is_some() {
+                ACTIVE_POLL_MS
+            } else {
+                IDLE_POLL_MS
+            };
             cx.background_executor()
-                .timer(Duration::from_millis(40))
+                .timer(Duration::from_millis(poll_ms))
                 .await;
 
             let snapshot = cx.update(|_app| unsafe { shared.snapshot() });
@@ -1767,10 +1563,12 @@ fn run_resident(cx: &mut App) {
                 // Blur/Esc and external closes remove the window behind the
                 // loop's back; the request flag normally arrives first.
                 if !windows.contains(&handle) {
+                    dismissed_generation = Some(open_generation);
                     window = None;
                     first_load = None;
                     activated = false;
                     opened_at = None;
+                    last_activation_attempt = None;
                     idle_since = Some(Instant::now());
                     trimmed = false;
                     unsafe { shared.mark_hidden() };
@@ -1782,6 +1580,7 @@ fn run_resident(cx: &mut App) {
                     // (blur/Esc) and its removal is in flight; calling
                     // `remove_window` again could double-remove it. A still
                     // visible window was asked to close by the indicator.
+                    dismissed_generation = Some(snapshot.generation);
                     if snapshot.visible != 0 {
                         let _ = cx.update(|app| {
                             let _ = handle.update(app, |_, window, _| window.remove_window());
@@ -1792,6 +1591,7 @@ fn run_resident(cx: &mut App) {
                     first_load = None;
                     activated = false;
                     opened_at = None;
+                    last_activation_attempt = None;
                     idle_since = Some(Instant::now());
                     trimmed = false;
                     trim_working_set();
@@ -1804,24 +1604,53 @@ fn run_resident(cx: &mut App) {
                     let timed_out = opened_at.map_or(true, |opened| {
                         opened.elapsed() > Duration::from_millis(1500)
                     });
-                    if ready || timed_out {
-                        let _ = cx.update(|app| {
-                            let _ = handle.update(app, |_view, window, _| {
-                                window.activate_window();
-                            });
-                        });
-                        activated = true;
-                        unsafe { shared.set_visible(true) };
-                        log_event(
-                            "INFO",
-                            &format!("history: popup shown in {}ms", elapsed_ms()),
-                        );
+                    let retry_due = last_activation_attempt
+                        .is_none_or(|last| last.elapsed() > Duration::from_millis(100));
+                    if (ready || timed_out) && retry_due {
+                        let active = cx
+                            .update(|app| {
+                                handle
+                                    .update(app, |_view, window, _| {
+                                        window.activate_window();
+                                        window.is_window_active()
+                                    })
+                                    .unwrap_or(false)
+                            })
+                            .unwrap_or(false);
+                        last_activation_attempt = Some(Instant::now());
+                        if active {
+                            activated = true;
+                            unsafe { shared.set_visible(true) };
+                            log_event(
+                                "INFO",
+                                &format!("history: popup shown in {}ms", elapsed_ms()),
+                            );
+                        } else if opened_at
+                            .is_some_and(|opened| opened.elapsed() > Duration::from_secs(3))
+                        {
+                            // The foreground lock kept refusing activation.
+                            // Show anyway so the chart is usable; Esc or an
+                            // indicator click still closes it, but click-away
+                            // cannot be armed. Log once for diagnosis.
+                            activated = true;
+                            unsafe { shared.set_visible(true) };
+                            log_event(
+                                "WARN",
+                                &format!(
+                                    "history: popup shown without activation after {}ms",
+                                    elapsed_ms()
+                                ),
+                            );
+                        }
                     }
                 }
                 continue;
             }
 
-            if snapshot.desired_open != 0 && windows.is_empty() {
+            if snapshot.desired_open != 0
+                && windows.is_empty()
+                && Some(snapshot.generation) != dismissed_generation
+            {
                 let anchor = snapshot.anchor_is_valid().then(|| AnchorRect {
                     left: snapshot.anchor[0],
                     top: snapshot.anchor[1],
@@ -1840,11 +1669,17 @@ fn run_resident(cx: &mut App) {
                         first_load = Some(ready);
                         activated = false;
                         opened_at = Some(Instant::now());
+                        last_activation_attempt = None;
+                        open_generation = snapshot.generation;
+                        dismissed_generation = None;
                         idle_since = None;
                         trimmed = false;
                         unsafe { shared.set_visible(true) };
                     }
                     None => {
+                        // Do not retry this request every poll: the next click
+                        // advances the generation and re-arms the open path.
+                        dismissed_generation = Some(snapshot.generation);
                         unsafe { shared.mark_hidden() };
                         log_event("WARN", "history: resident window open failed");
                     }
@@ -1937,6 +1772,9 @@ fn main() {
             run_resident(cx);
             return;
         }
+
+        #[cfg(target_os = "macos")]
+        watch_parent(cx);
 
         let anchor = parse_anchor();
         if open_history_window(cx, anchor, false, None).is_none() {
