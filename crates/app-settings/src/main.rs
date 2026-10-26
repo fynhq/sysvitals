@@ -446,8 +446,8 @@ fn apply_material(cx: &mut App) {
         let alpha = if cfg!(target_os = "macos") {
             material_tint_alpha_macos(dark)
         } else {
-            // The settings page is a stack of opaque cards, so its light page
-            // can expose more Mica than the history popup's chart surface.
+            // The settings page sits directly on the material at full strength;
+            // every control lives on an opaque card that carries its contrast.
             material_tint_alpha_settings(dark)
         };
         // Force an opaque base before scaling alpha, so the "set" and

@@ -82,11 +82,11 @@ pub fn choose_macos_material(transparency_enabled: bool) -> Material {
 /// layer while text stays readable.
 pub const MATERIAL_TINT_ALPHA: f32 = 0.45;
 
-/// Light-mode tint for the settings panel. Its content is a stack of opaque
-/// cards, so the page itself can expose more of the wallpaper than the history
-/// popup without hurting control readability. 0.30 is a visible step toward
-/// the material; the dark value already matches the shared dark tint.
-pub const MATERIAL_TINT_ALPHA_SETTINGS: f32 = 0.30;
+/// Tint for the settings panel, in both appearances. The page sits directly
+/// on the material (0.0 = no tint layer) so Mica shows at full strength, while
+/// every control lives on an opaque card that keeps its contrast. The history
+/// popup keeps its own tint because the chart has no card surface behind it.
+pub const MATERIAL_TINT_ALPHA_SETTINGS: f32 = 0.0;
 
 /// Dark-mode tint alpha. The dark palette itself is already a dark layer; at
 /// 0.55 it hid most of the Mica wallpaper tint (on-device: light mode looked
@@ -118,15 +118,11 @@ pub fn material_tint_alpha(dark: bool) -> f32 {
     }
 }
 
-/// Pick the tint alpha for the settings panel. The dark value is the shared
-/// one; light mode exposes more Mica because every option lives on an opaque
-/// card. macOS keeps its own (stronger) native-popover tint.
-pub fn material_tint_alpha_settings(dark: bool) -> f32 {
-    if dark {
-        MATERIAL_TINT_ALPHA_DARK
-    } else {
-        MATERIAL_TINT_ALPHA_SETTINGS
-    }
+/// Pick the tint alpha for the settings panel. Both appearances expose the
+/// material fully; the opaque cards provide the contrast. macOS keeps its own
+/// (stronger) native-popover tint.
+pub fn material_tint_alpha_settings(_dark: bool) -> f32 {
+    MATERIAL_TINT_ALPHA_SETTINGS
 }
 
 /// Pick the macOS tint alpha for the current palette mode. Kept separate from
@@ -214,14 +210,20 @@ mod tests {
     }
 
     #[test]
-    fn settings_light_tint_exposes_more_mica() {
+    fn settings_exposes_the_material_fully() {
+        // No tint layer in either appearance: the page sits directly on Mica
+        // and the opaque cards carry the control contrast.
+        assert_eq!(MATERIAL_TINT_ALPHA_SETTINGS, 0.0);
         assert_eq!(
             material_tint_alpha_settings(false),
             MATERIAL_TINT_ALPHA_SETTINGS
         );
-        assert_eq!(material_tint_alpha_settings(true), MATERIAL_TINT_ALPHA_DARK);
-        // A lower alpha lets more of the material through.
+        assert_eq!(
+            material_tint_alpha_settings(true),
+            MATERIAL_TINT_ALPHA_SETTINGS
+        );
         assert!(material_tint_alpha_settings(false) < material_tint_alpha(false));
+        assert!(material_tint_alpha_settings(true) < material_tint_alpha(true));
     }
 
     #[test]
