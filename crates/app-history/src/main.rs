@@ -14,14 +14,21 @@
 
 use std::collections::HashSet;
 use std::env;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(windows)]
-use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+use windows::Win32::Foundation::{CloseHandle, WAIT_TIMEOUT};
 #[cfg(windows)]
-use windows::Win32::System::Threading::{OpenEventW, WaitForSingleObject, EVENT_ALL_ACCESS};
+use windows::Win32::System::Memory::{
+    MapViewOfFile, OpenFileMappingW, FILE_MAP_READ, FILE_MAP_WRITE,
+};
+#[cfg(windows)]
+use windows::Win32::System::Threading::{
+    GetCurrentProcess, OpenProcess, SetProcessWorkingSetSize, WaitForSingleObject,
+    PROCESS_SYNCHRONIZE,
+};
 #[cfg(windows)]
 use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
@@ -333,6 +340,127 @@ fn transparent_color() -> Hsla {
     hsla(0.0, 0.0, 0.0, 0.0)
 }
 
+// ------------------------------------------------------- resident mode (Windows)
+
+#[cfg(windows)]
+fn utf16(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// The command/status block created by the indicator. The resident process
+/// keeps a read/write view of it for its whole lifetime; the one-shot macOS
+/// path never maps it.
+#[cfg(windows)]
+struct HistoryShared {
+    state: *mut sysvitals_core::HistoryState,
+}
+
+#[cfg(windows)]
+impl HistoryShared {
+    fn snapshot(&self) -> sysvitals_core::HistoryState {
+        unsafe {
+            let p = self.state;
+            use std::ptr::{addr_of, read_volatile};
+            sysvitals_core::HistoryState {
+                magic: read_volatile(addr_of!((*p).magic)),
+                version: read_volatile(addr_of!((*p).version)),
+                desired_open: read_volatile(addr_of!((*p).desired_open)),
+                visible: read_volatile(addr_of!((*p).visible)),
+                generation: read_volatile(addr_of!((*p).generation)),
+                _reserved: 0,
+                anchor: [
+                    read_volatile(addr_of!((*p).anchor[0])),
+                    read_volatile(addr_of!((*p).anchor[1])),
+                    read_volatile(addr_of!((*p).anchor[2])),
+                    read_volatile(addr_of!((*p).anchor[3])),
+                ],
+            }
+        }
+    }
+
+    fn set_desired(&self, open: bool) {
+        unsafe {
+            std::ptr::write_volatile(
+                std::ptr::addr_of_mut!((*self.state).desired_open),
+                u32::from(open),
+            );
+        }
+    }
+
+    fn set_visible(&self, visible: bool) {
+        unsafe {
+            std::ptr::write_volatile(
+                std::ptr::addr_of_mut!((*self.state).visible),
+                u32::from(visible),
+            );
+        }
+    }
+
+    /// Called by the popup's own dismissal paths (blur/Esc) and by the
+    /// resident loop after it takes the window down. Clearing the request as
+    /// well as visibility is what lets the indicator's next click reopen.
+    fn mark_hidden(&self) {
+        self.set_desired(false);
+        self.set_visible(false);
+    }
+}
+
+#[cfg(not(windows))]
+struct HistoryShared;
+
+#[cfg(not(windows))]
+impl HistoryShared {
+    fn mark_hidden(&self) {}
+}
+
+/// Open the indicator-owned state block. A missing block means this process
+/// was not started by a resident-capable overlay, so it exits instead of
+/// lingering invisibly.
+#[cfg(windows)]
+fn open_history_state() -> Option<*mut sysvitals_core::HistoryState> {
+    let name = utf16(sysvitals_core::HISTORY_STATE_MAP);
+    unsafe {
+        let mapping = OpenFileMappingW(
+            (FILE_MAP_READ | FILE_MAP_WRITE).0,
+            false,
+            windows::core::PCWSTR(name.as_ptr()),
+        )
+        .ok()?;
+        let view = MapViewOfFile(
+            mapping,
+            FILE_MAP_READ | FILE_MAP_WRITE,
+            0,
+            0,
+            std::mem::size_of::<sysvitals_core::HistoryState>(),
+        );
+        let _ = CloseHandle(mapping);
+        (!view.Value.is_null()).then_some(view.Value as *mut sysvitals_core::HistoryState)
+    }
+}
+
+/// `--parent-pid <pid>`: the resident process exits when the indicator does,
+/// even if the launcher never gets a chance to terminate it.
+#[cfg(windows)]
+fn parse_parent_pid() -> Option<u32> {
+    let mut args = env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == "--parent-pid" {
+            return args.next()?.parse().ok();
+        }
+    }
+    None
+}
+
+#[cfg(windows)]
+fn trim_working_set() {
+    unsafe {
+        // SIZE_T(-1) asks Windows to trim the process to its minimum working
+        // set. Private commit stays allocated; what the user sees in Task
+        // Manager (and what competes for physical RAM) drops to a few MB.
+        let _ = SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX);
+    }
+}
+
 struct HistoryView {
     lang: Language,
     /// Created hidden by the hover pre-warm; do not claim activation on the
@@ -373,10 +501,24 @@ struct HistoryView {
     /// `None` so the first tick always re-applies once (idempotent when the
     /// startup override already succeeded).
     last_accent: Option<u32>,
+    /// Signals the resident launcher that the first database read finished.
+    /// The window stays hidden until this flips, so the first visible frame
+    /// already carries chart data.
+    first_load: Arc<AtomicBool>,
+    /// Shared command/status block in resident mode; `None` for the one-shot
+    /// launch used on macOS and for the fallback path.
+    shared: Option<Arc<HistoryShared>>,
 }
 
 impl HistoryView {
-    fn new(lang: Language, csv_scope: CsvScope, prewarm: bool, cx: &mut Context<Self>) -> Self {
+    fn new(
+        lang: Language,
+        csv_scope: CsvScope,
+        prewarm: bool,
+        first_load: Arc<AtomicBool>,
+        shared: Option<Arc<HistoryShared>>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let mut view = Self {
             lang,
             prewarm,
@@ -391,11 +533,21 @@ impl HistoryView {
             _appearance: None,
             _escape: None,
             last_accent: None,
+            first_load,
+            shared,
         };
         view.start_refresh_loop(cx);
         view.start_escape_observer(cx);
         view.start_accent_watch(cx);
         view
+    }
+
+    /// Tell the resident indicator that this popup is gone. Called before
+    /// every `remove_window`; a no-op for the one-shot launch.
+    fn mark_hidden(&self) {
+        if let Some(shared) = &self.shared {
+            shared.mark_hidden();
+        }
     }
 
     /// Poll the OS accent every 500 ms and re-apply the override when it
@@ -442,8 +594,9 @@ impl HistoryView {
         if self._escape.is_some() {
             return;
         }
-        let subscription = cx.observe_keystrokes(|_view, event, window, _cx| {
+        let subscription = cx.observe_keystrokes(|view, event, window, _cx| {
             if event.keystroke.key == "escape" {
+                view.mark_hidden();
                 window.remove_window();
             }
         });
@@ -512,6 +665,7 @@ impl HistoryView {
                 view.ever_active = true;
             } else if view.ever_active {
                 // Clicked away: dismiss the popup like a native menu.
+                view.mark_hidden();
                 window.remove_window();
             }
         });
@@ -564,12 +718,13 @@ impl HistoryView {
                 .update(cx, |view: &mut HistoryView, cx| {
                     view.reload_config();
                     view.load_data();
+                    view.first_load.store(true, Ordering::Release);
                     log_event(
                         "INFO",
                         &format!(
-                            "history: window created in {}ms, first data in {}ms ({} points, prewarm={})",
+                            "history: window created at {}ms, first data {}ms later ({} points, hidden_start={})",
                             WINDOW_CREATED_MS.load(Ordering::Relaxed),
-                            elapsed_ms(),
+                            elapsed_ms().saturating_sub(WINDOW_CREATED_MS.load(Ordering::Relaxed) as u128),
                             view.buckets.len(),
                             view.prewarm,
                         ),
@@ -1438,6 +1593,284 @@ fn apply_theme_and_accent(cx: &mut App) {
     });
 }
 
+/// Open one history window. The caller owns its lifetime: the macOS path
+/// opens it visible and lets the process exit with it, while the resident
+/// Windows loop opens it hidden, waits for the first data load, then reveals
+/// it.
+///
+/// `hidden_start` is passed to the view so its activation observer does not
+/// claim activation for the offscreen first frame: the resident launcher
+/// activates the window itself once the chart data is ready.
+fn open_history_window(
+    cx: &mut App,
+    anchor: Option<AnchorRect>,
+    hidden_start: bool,
+    shared: Option<Arc<HistoryShared>>,
+) -> Option<(AnyWindowHandle, Arc<AtomicBool>)> {
+    let cfg = match config_path().and_then(|p| Config::load(&p).map(|(c, _)| c)) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("app-history: config load failed: {e}; using defaults");
+            Config::default()
+        }
+    };
+    let lang = cfg.display.language;
+    let csv_scope = cfg.history.csv_scope;
+    let window_title = format!("SysVitals {}", t(lang, "chart.title"));
+
+    // Popup geometry in GPUI logical pixels. Height cut 25% (520 -> 390):
+    // a 3x shorter vertical span is still readable for a two-line trend,
+    // and the popup sits closer to the indicator without dominating the
+    // desktop. Anchor origin logic keeps `POPUP_GAP` on every edge it is
+    // placed against, so a work area narrower than the default width
+    // shrinks the popup instead of pinning it flush to a screen edge.
+    let popup_size = size(px(680.), px(390.));
+    let window_bounds = match anchor.as_ref() {
+        Some(a) => {
+            let work = anchor_work_area(a, cx);
+            let work_w = f32::from(work.size.width);
+            let width = f32::from(popup_size.width).min((work_w - 2.0 * POPUP_GAP).max(1.0));
+            let popup_size = size(px(width), popup_size.height);
+            Bounds::new(
+                anchor_origin(a, width, f32::from(popup_size.height), &work),
+                popup_size,
+            )
+        }
+        None => Bounds::centered(None, popup_size, cx),
+    };
+    let anchored = anchor.is_some();
+
+    // Anchored popups behave like a menu: no title bar, no shadow of
+    // a normal window, cannot be dragged or resized. When no anchor
+    // was passed, fall back to a plain titled window so the process
+    // is still usable if the indicator failed to compute a rect.
+    //
+    // macOS needs the anchored case to pass `titlebar: None`. The
+    // transparent-titlebar path keeps `NSClosableWindowMask` while adding
+    // `NSFullSizeContentViewWindowMask`, so AppKit still renders the
+    // traffic-light buttons on top of content that now spans the whole
+    // window — they collided with the chart's top-left. Dropping the
+    // titlebar options removes the closable bit from the style mask, so no
+    // window buttons are created. The library's only other lever,
+    // `traffic_light_position`, merely relocates the buttons rather than
+    // removing them. Windows ignores this field for its borderless popup,
+    // so that platform keeps the previous options unchanged.
+    #[cfg(target_os = "macos")]
+    let titlebar = if anchored {
+        None
+    } else {
+        Some(TitlebarOptions {
+            title: Some(window_title.clone().into()),
+            ..Default::default()
+        })
+    };
+    #[cfg(not(target_os = "macos"))]
+    let titlebar = Some(TitlebarOptions {
+        title: Some(window_title.clone().into()),
+        appears_transparent: anchored,
+        ..Default::default()
+    });
+
+    let window_options = WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(window_bounds)),
+        titlebar,
+        kind: if anchored {
+            WindowKind::PopUp
+        } else {
+            WindowKind::Normal
+        },
+        is_movable: !anchored,
+        is_resizable: !anchored,
+        // System backdrop material (Win11 Mica / Win10-era acrylic blur /
+        // macOS window blur, opaque fallback on anything older or when the
+        // user disabled transparency effects). The palette tint applied in
+        // `apply_theme_and_accent` is what lets it show through. This is
+        // purely a compositor attribute — it does not change the window's
+        // activation edges, so the blur-close contract is untouched.
+        window_background: backdrop_for(detect_material()),
+        show: !hidden_start,
+        focus: !hidden_start,
+        ..Default::default()
+    };
+
+    let first_load = Arc::new(AtomicBool::new(false));
+    // Blur-close and appearance observation are registered from the first
+    // render pass (both idempotent); Esc is handled by an app-level keystroke
+    // observer set up in `HistoryView::new`. The build closure only needs to
+    // create the view.
+    let opened = gpui_kit::open_window(window_options, cx, {
+        let first_load = first_load.clone();
+        let shared = shared.clone();
+        move |_window, cx| {
+            cx.new(|cx| HistoryView::new(lang, csv_scope, hidden_start, first_load, shared, cx))
+        }
+    });
+    let (window_handle, _view) = match opened {
+        Ok(opened) => opened,
+        Err(e) => {
+            eprintln!("app-history: open window failed: {e}");
+            return None;
+        }
+    };
+    WINDOW_CREATED_MS.store(elapsed_ms() as u64, Ordering::Relaxed);
+    Some((window_handle, first_load))
+}
+
+/// Resident loop used on Windows: keep the process (and GPUI/DirectX) warm
+/// with no window, open a window only while the indicator asks for one, and
+/// trim the working set while idle. The window is created hidden and shown
+/// after its first chart load so the first visible frame already has data.
+#[cfg(windows)]
+fn run_resident(cx: &mut App) {
+    let Some(state) = open_history_state() else {
+        eprintln!("app-history: resident state mapping unavailable; exiting");
+        cx.quit();
+        return;
+    };
+    let parent_pid = parse_parent_pid();
+    let parent =
+        parent_pid.and_then(|pid| unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, pid).ok() });
+    if parent.is_none() {
+        eprintln!("app-history: resident parent process unavailable; exiting");
+        cx.quit();
+        return;
+    }
+    let parent = parent.expect("checked above");
+    let shared = Arc::new(HistoryShared { state });
+    log_event(
+        "INFO",
+        &format!("history: resident started (parent pid {parent_pid:?})"),
+    );
+
+    cx.spawn(async move |cx| {
+        let mut window: Option<AnyWindowHandle> = None;
+        let mut first_load: Option<Arc<AtomicBool>> = None;
+        let mut activated = false;
+        let mut opened_at: Option<Instant> = None;
+        let mut idle_since: Option<Instant> = Some(Instant::now());
+        let mut trimmed = false;
+
+        loop {
+            cx.background_executor()
+                .timer(Duration::from_millis(40))
+                .await;
+
+            let snapshot = cx.update(|_app| unsafe { shared.snapshot() });
+            let parent_dead = unsafe { WaitForSingleObject(parent, 0) != WAIT_TIMEOUT };
+            if parent_dead {
+                cx.update(|app| app.quit());
+                break;
+            }
+
+            let windows = cx.update(|app| app.windows());
+            if let Some(handle) = window {
+                // Blur/Esc and external closes remove the window behind the
+                // loop's back; the request flag normally arrives first.
+                if !windows.contains(&handle) {
+                    window = None;
+                    first_load = None;
+                    activated = false;
+                    opened_at = None;
+                    idle_since = Some(Instant::now());
+                    trimmed = false;
+                    unsafe { shared.mark_hidden() };
+                    trim_working_set();
+                    continue;
+                }
+                if snapshot.desired_open == 0 {
+                    // `visible == 0` means the view already dismissed itself
+                    // (blur/Esc) and its removal is in flight; calling
+                    // `remove_window` again could double-remove it. A still
+                    // visible window was asked to close by the indicator.
+                    if snapshot.visible != 0 {
+                        let _ = cx.update(|app| {
+                            let _ = handle.update(app, |_, window, _| window.remove_window());
+                        });
+                    }
+                    unsafe { shared.mark_hidden() };
+                    window = None;
+                    first_load = None;
+                    activated = false;
+                    opened_at = None;
+                    idle_since = Some(Instant::now());
+                    trimmed = false;
+                    trim_working_set();
+                    continue;
+                }
+                if !activated {
+                    let ready = first_load
+                        .as_ref()
+                        .map_or(true, |flag| flag.load(Ordering::Acquire));
+                    let timed_out = opened_at.map_or(true, |opened| {
+                        opened.elapsed() > Duration::from_millis(1500)
+                    });
+                    if ready || timed_out {
+                        let _ = cx.update(|app| {
+                            let _ = handle.update(app, |_view, window, _| {
+                                window.activate_window();
+                            });
+                        });
+                        activated = true;
+                        unsafe { shared.set_visible(true) };
+                        log_event(
+                            "INFO",
+                            &format!("history: popup shown in {}ms", elapsed_ms()),
+                        );
+                    }
+                }
+                continue;
+            }
+
+            if snapshot.desired_open != 0 && windows.is_empty() {
+                let anchor = snapshot.anchor_is_valid().then(|| AnchorRect {
+                    left: snapshot.anchor[0],
+                    top: snapshot.anchor[1],
+                    right: snapshot.anchor[2],
+                    bottom: snapshot.anchor[3],
+                });
+                let opened = cx.update(|app| {
+                    // The OS accent may have changed while the popup was
+                    // closed; re-apply before the first paint.
+                    apply_theme_and_accent(app);
+                    open_history_window(app, anchor, true, Some(shared.clone()))
+                });
+                match opened {
+                    Some((handle, ready)) => {
+                        window = Some(handle);
+                        first_load = Some(ready);
+                        activated = false;
+                        opened_at = Some(Instant::now());
+                        idle_since = None;
+                        trimmed = false;
+                        unsafe { shared.set_visible(true) };
+                    }
+                    None => {
+                        unsafe { shared.mark_hidden() };
+                        log_event("WARN", "history: resident window open failed");
+                    }
+                }
+            } else {
+                let now = Instant::now();
+                if idle_since.is_none() {
+                    idle_since = Some(now);
+                    trimmed = false;
+                }
+                let idle_for = idle_since.map_or(Duration::ZERO, |since| since.elapsed());
+                if !trimmed && idle_for > Duration::from_secs(2) {
+                    trim_working_set();
+                    trimmed = true;
+                } else if idle_for > Duration::from_secs(30) {
+                    trim_working_set();
+                    idle_since = Some(now);
+                }
+            }
+        }
+
+        let _ = unsafe { CloseHandle(parent) };
+    })
+    .detach();
+}
+
 fn main() {
     let _ = START.set(Instant::now());
 
@@ -1449,20 +1882,11 @@ fn main() {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     }
 
-    let cfg = match config_path().and_then(|p| Config::load(&p).map(|(c, _)| c)) {
-        Ok(cfg) => cfg,
-        Err(e) => {
-            eprintln!("app-history: config load failed: {e}; using defaults");
-            Config::default()
-        }
-    };
-
-    let lang = cfg.display.language;
-    let csv_scope = cfg.history.csv_scope;
-    let window_title = format!("SysVitals {}", t(lang, "chart.title"));
-    // Windows pre-warm: the overlay starts this process on indicator hover
-    // and reveals it through a named event when the user clicks.
-    let prewarm = cfg!(windows) && env::args().any(|arg| arg == "--prewarm");
+    // Windows resident mode: the overlay starts this process once and keeps
+    // it alive with no window. macOS keeps the one-shot launch used by its
+    // menu-bar overlay.
+    #[cfg(windows)]
+    let resident = env::args().any(|arg| arg == "--resident");
 
     // Register the bundled icon asset source before the run loop starts.
     // Without this the GPUI default asset source (`()`) returns `Ok(None)`
@@ -1485,7 +1909,17 @@ fn main() {
         .with_assets(gpui_kit::assets::Assets)
         .with_windowing(WindowingRequest::Headless)
         .with_quit_mode(QuitMode::LastWindowClosed);
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    let app = if resident {
+        // The resident process outlives every window; the indicator owns its
+        // lifetime through the parent handle and explicit termination.
+        gpui_kit::application()
+            .with_assets(gpui_kit::assets::Assets)
+            .with_quit_mode(QuitMode::Explicit)
+    } else {
+        gpui_kit::application().with_assets(gpui_kit::assets::Assets)
+    };
+    #[cfg(not(any(windows, target_os = "macos")))]
     let app = gpui_kit::application().with_assets(gpui_kit::assets::Assets);
 
     app.run(move |cx| {
@@ -1498,146 +1932,15 @@ fn main() {
         // reload wipes it.
         apply_theme_and_accent(cx);
 
-        // Popup geometry in GPUI logical pixels. Height cut 25% (520 -> 390):
-        // a 3x shorter vertical span is still readable for a two-line trend,
-        // and the popup sits closer to the indicator without dominating the
-        // desktop. Anchor origin logic keeps `POPUP_GAP` on every edge it is
-        // placed against, so a work area narrower than the default width
-        // shrinks the popup instead of pinning it flush to a screen edge.
-        let popup_size = size(px(680.), px(390.));
-        let anchor = parse_anchor();
-        let window_bounds = match anchor.as_ref() {
-            Some(a) => {
-                let work = anchor_work_area(a, cx);
-                let work_w = f32::from(work.size.width);
-                let width = f32::from(popup_size.width).min((work_w - 2.0 * POPUP_GAP).max(1.0));
-                let popup_size = size(px(width), popup_size.height);
-                Bounds::new(
-                    anchor_origin(a, width, f32::from(popup_size.height), &work),
-                    popup_size,
-                )
-            }
-            None => Bounds::centered(None, popup_size, cx),
-        };
-        let anchored = anchor.is_some();
-
-        // Anchored popups behave like a menu: no title bar, no shadow of
-        // a normal window, cannot be dragged or resized. When no anchor
-        // was passed, fall back to a plain titled window so the process
-        // is still usable if the indicator failed to compute a rect.
-        //
-        // macOS needs the anchored case to pass `titlebar: None`. The
-        // transparent-titlebar path keeps `NSClosableWindowMask` while adding
-        // `NSFullSizeContentViewWindowMask`, so AppKit still renders the
-        // traffic-light buttons on top of content that now spans the whole
-        // window — they collided with the chart's top-left. Dropping the
-        // titlebar options removes the closable bit from the style mask, so no
-        // window buttons are created. The library's only other lever,
-        // `traffic_light_position`, merely relocates the buttons rather than
-        // removing them. Windows ignores this field for its borderless popup,
-        // so that platform keeps the previous options unchanged.
-        #[cfg(target_os = "macos")]
-        let titlebar = if anchored {
-            None
-        } else {
-            Some(TitlebarOptions {
-                title: Some(window_title.clone().into()),
-                ..Default::default()
-            })
-        };
-        #[cfg(not(target_os = "macos"))]
-        let titlebar = Some(TitlebarOptions {
-            title: Some(window_title.clone().into()),
-            appears_transparent: anchored,
-            ..Default::default()
-        });
-
-        let window_options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(window_bounds)),
-            titlebar,
-            kind: if anchored {
-                WindowKind::PopUp
-            } else {
-                WindowKind::Normal
-            },
-            is_movable: !anchored,
-            is_resizable: !anchored,
-            // System backdrop material (Win11 Mica / Win10-era acrylic blur /
-            // macOS window blur, opaque fallback on anything older or when the
-            // user disabled transparency effects). The palette tint applied in
-            // `apply_theme_and_accent` is what lets it show through. This is
-            // purely a compositor attribute — it does not change the window's
-            // activation edges, so the blur-close contract is untouched.
-            window_background: backdrop_for(detect_material()),
-            show: !prewarm,
-            focus: !prewarm,
-            ..Default::default()
-        };
-
-        // Blur-close and appearance observation are registered from the
-        // first render pass (both idempotent); Esc is handled by an
-        // app-level keystroke observer set up in `HistoryView::new`. The
-        // build closure only needs to create the view.
-        let (window_handle, _view) =
-            gpui_kit::open_window(window_options, cx, move |_window, cx| {
-                cx.new(|cx| HistoryView::new(lang, csv_scope, prewarm, cx))
-            })
-            .expect("Failed to open history window");
-        WINDOW_CREATED_MS.store(elapsed_ms() as u64, Ordering::Relaxed);
-
         #[cfg(windows)]
-        if prewarm {
-            cx.spawn(async move |cx| {
-                let name: Vec<u16> = sysvitals_core::HISTORY_PREWARM_EVENT
-                    .encode_utf16()
-                    .chain(std::iter::once(0))
-                    .collect();
-                let event = unsafe {
-                    OpenEventW(
-                        EVENT_ALL_ACCESS,
-                        false,
-                        windows::core::PCWSTR(name.as_ptr()),
-                    )
-                };
-                let Ok(event) = event else {
-                    // No launcher to wait for: never leave an invisible
-                    // process behind.
-                    let _ = cx.update(|app| {
-                        window_handle.update(app, |_, window, _| window.remove_window())
-                    });
-                    return;
-                };
-                let started = Instant::now();
-                loop {
-                    cx.background_executor()
-                        .timer(Duration::from_millis(15))
-                        .await;
-                    if unsafe { WaitForSingleObject(event, 0) } == WAIT_OBJECT_0 {
-                        let _ = cx.update(|app| {
-                            window_handle.update(app, |_, window, _| {
-                                window.activate_window();
-                            })
-                        });
-                        log_event(
-                            "INFO",
-                            &format!("history: popup shown in {}ms", elapsed_ms()),
-                        );
-                        break;
-                    }
-                    if started.elapsed() > Duration::from_secs(20) {
-                        // Nobody clicked: closing the hidden window exits the
-                        // process through LastWindowClosed.
-                        let _ = cx.update(|app| {
-                            window_handle.update(app, |_, window, _| window.remove_window())
-                        });
-                        break;
-                    }
-                }
-                let _ = unsafe { CloseHandle(event) };
-            })
-            .detach();
+        if resident {
+            run_resident(cx);
+            return;
         }
-        #[cfg(not(windows))]
-        let _ = window_handle;
+
+        let anchor = parse_anchor();
+        if open_history_window(cx, anchor, false, None).is_none() {
+            cx.quit();
+        }
     });
 }
