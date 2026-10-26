@@ -16,10 +16,8 @@
 // terminal flashes up beside the settings window every time it launches.
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
-#[cfg(windows)]
-use windows::Win32::System::Registry::{
-    HKEY, HKEY_CURRENT_USER, KEY_READ, REG_VALUE_TYPE, RegCloseKey, RegOpenKeyExW, RegQueryValueExW,
-};
+use std::time::Instant;
+
 #[cfg(windows)]
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
@@ -40,11 +38,13 @@ use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use sysvitals_core::backdrop::Material;
 use sysvitals_core::config::{
     ALLOWED_INTERVAL_MS, ALLOWED_ITEM_SPACING_PX, ALLOWED_LEFT_MARGIN_PX,
 };
 use sysvitals_core::{Anchor, Config, Language, Theme, t};
+use sysvitals_panel::{PanelSurface, backdrop_for, detect_material, system_accent_hex};
+#[cfg(windows)]
+use sysvitals_panel::{hkcu_dword, panel_font_family};
 
 // ---------------------------------------------------------------------------
 // Platform gate for the layout section
@@ -61,45 +61,6 @@ const TASKBAR_VALUE: &str = "TaskbarAl";
 #[cfg(windows)]
 fn utf16(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
-}
-
-#[cfg(windows)]
-fn hkcu_dword(key: &str, value: &str) -> Option<u32> {
-    let key = utf16(key);
-    let value = utf16(value);
-    let mut hkey = HKEY::default();
-    if unsafe {
-        RegOpenKeyExW(
-            HKEY_CURRENT_USER,
-            windows::core::PCWSTR(key.as_ptr()),
-            None,
-            KEY_READ,
-            &mut hkey,
-        )
-    }
-    .is_err()
-    {
-        return None;
-    }
-    let mut data = [0u8; 4];
-    let mut size = 4u32;
-    let mut kind = REG_VALUE_TYPE::default();
-    let queried = unsafe {
-        RegQueryValueExW(
-            hkey,
-            windows::core::PCWSTR(value.as_ptr()),
-            None,
-            Some(&mut kind),
-            Some(data.as_mut_ptr()),
-            Some(&mut size),
-        )
-    };
-    let _ = unsafe { RegCloseKey(hkey) };
-    if queried.is_ok() && size >= 4 {
-        Some(u32::from_le_bytes(data))
-    } else {
-        None
-    }
 }
 
 /// Whether the indicator's layout section is offered on this machine: the
@@ -125,7 +86,10 @@ fn taskbar_is_vertical() -> bool {
     use windows::Win32::UI::Shell::{
         ABE_LEFT, ABE_RIGHT, ABM_GETTASKBARPOS, APPBARDATA, SHAppBarMessage,
     };
-    use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CYSCREEN};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+        SM_YVIRTUALSCREEN,
+    };
     let mut abd = APPBARDATA {
         cbSize: std::mem::size_of::<APPBARDATA>() as u32,
         ..Default::default()
@@ -134,9 +98,19 @@ fn taskbar_is_vertical() -> bool {
         return false;
     }
     // Auto-hidden bars report a rect parked off-screen; then the orientation
-    // does not matter for what is visible right now.
-    let screen_h = unsafe { GetSystemMetrics(SM_CYSCREEN) };
-    if abd.rc.bottom <= 0 || abd.rc.top >= screen_h {
+    // does not matter for what is visible right now. Validate against the
+    // virtual desktop: the main taskbar can sit on a secondary monitor with
+    // negative or beyond-primary coordinates.
+    let (vx, vy, vw, vh) = unsafe {
+        (
+            GetSystemMetrics(SM_XVIRTUALSCREEN),
+            GetSystemMetrics(SM_YVIRTUALSCREEN),
+            GetSystemMetrics(SM_CXVIRTUALSCREEN),
+            GetSystemMetrics(SM_CYVIRTUALSCREEN),
+        )
+    };
+    if abd.rc.bottom <= vy || abd.rc.top >= vy + vh || abd.rc.right <= vx || abd.rc.left >= vx + vw
+    {
         return false;
     }
     abd.uEdge == ABE_LEFT || abd.uEdge == ABE_RIGHT
@@ -317,302 +291,10 @@ fn mac_select_trigger(
 // Window backdrop material (Win11 Mica / macOS blur, with fallbacks)
 // ---------------------------------------------------------------------------
 
-/// Read the registry DWORD at `HKCU\Software\Microsoft\Windows\CurrentVersion\
-/// Themes\Personalize\<value>`. `None` when the key is missing or unreadable.
-#[cfg(windows)]
-fn personalize_dword(value: &str) -> Option<u32> {
-    const PERSONALIZE_KEY: &str =
-        "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize";
-    hkcu_dword(PERSONALIZE_KEY, value)
-}
-
-/// The Windows OS build number, or `None` if the version probe fails.
-///
-/// `RtlGetVersion` is the documented way to read the real build (the classic
-/// `GetVersionEx` is version-helpered and lies on 8.1+). The buffer is
-/// zeroed first, so a failed call leaves `dwBuildNumber` at 0 and the caller
-/// falls back to `Material::Opaque`.
-#[cfg(windows)]
-fn os_build_number() -> Option<u32> {
-    use windows::Wdk::System::SystemServices::RtlGetVersion;
-    use windows::Win32::System::SystemInformation::OSVERSIONINFOW;
-    let mut info = OSVERSIONINFOW::default();
-    info.dwOSVersionInfoSize = std::mem::size_of::<OSVERSIONINFOW>() as u32;
-    if unsafe { RtlGetVersion(&mut info) }.is_err() {
-        return None;
-    }
-    Some(info.dwBuildNumber)
-}
-
-/// The backdrop material this Windows host supports, honoring the user's
-/// transparency-effects preference. Kept pure in `core`; this only feeds it
-/// the two platform probes.
-#[cfg(windows)]
-fn detect_material() -> Material {
-    // `EnableTransparency` = 0 means the user turned transparency effects off;
-    // a missing value (None) is treated as enabled, matching the OS default.
-    let transparency = personalize_dword("EnableTransparency")
-        .map(|v| v != 0)
-        .unwrap_or(true);
-    sysvitals_core::backdrop::choose_windows_material(os_build_number(), transparency)
-}
-
-/// macOS always requests the blur material: `NSVisualEffectView` exists on
-/// every supported host, and AppKit automatically flattens it when the user
-/// enables "reduce transparency" — so the accessibility fallback is the
-/// system's own, not something we re-implement.
-#[cfg(target_os = "macos")]
-fn detect_material() -> Material {
-    sysvitals_core::backdrop::choose_macos_material(true)
-}
-
-/// Windows 11 ships Segoe UI Variable, whose default optical size is tuned
-/// for UI text and renders small sizes more crisply than the legacy Segoe UI.
-/// Older builds keep the system-resolved font; an unavailable family falls
-/// back through GPUI's default stack.
-///
-/// The typeface is the system one, but glyph antialiasing stays grayscale:
-/// GPUI enables ClearType only for opaque windows, and this panel keeps its
-/// Mica backdrop. The cards being opaque is not enough — GPUI's rendering
-/// mode is a window property, not a per-element one. Making the window
-/// opaque would enable ClearType at the cost of the material.
-#[cfg(windows)]
-fn panel_font_family() -> Option<&'static str> {
-    os_build_number()
-        .filter(|build| *build >= 22000)
-        .map(|_| "Segoe UI Variable")
-}
-
-#[cfg(not(any(windows, target_os = "macos")))]
-fn detect_material() -> Material {
-    Material::Opaque
-}
-
-/// Map the chosen material onto GPUI's window-background request. The pinned
-/// platform layer recognizes all three variants on their respective hosts and
-/// degrades gracefully to opaque where a variant is unsupported.
-fn backdrop_for(material: Material) -> WindowBackgroundAppearance {
-    match material {
-        Material::Mica => WindowBackgroundAppearance::MicaBackdrop,
-        Material::Blur => WindowBackgroundAppearance::Blurred,
-        Material::Opaque => WindowBackgroundAppearance::Opaque,
-    }
-}
-
-/// Unpack an AppKit `NSColor` into sRGB components packed `0xRRGGBB`.
-///
-/// Only for colors whose resolved value does not depend on the current
-/// appearance (the control accent, which reflects the current system accent
-/// in every mode, including the wallpaper-derived multicolor case).
-/// Dynamic-per-appearance catalog colors (window background, label colors)
-/// would resolve to their light variants outside a draw cycle, so callers
-/// wanting those must install the right NSAppearance first — none of our
-/// calls do, so the tint path just uses the palette's own background (which
-/// GPUI has already flipped on the same system signal).
-///
-/// Returns `None` if the sRGB conversion or the component read fails; callers
-/// then keep their palette-driven fallback instead of painting black. All
-/// call sites run on the main thread (GPUI drives the app from the UI thread).
-#[cfg(target_os = "macos")]
-fn system_color_hex(color: &objc2_app_kit::NSColor) -> Option<u32> {
-    use objc2::rc::Retained;
-    use objc2_app_kit::NSColorSpace;
-    let srgb = NSColorSpace::sRGBColorSpace();
-    let converted: Retained<objc2_app_kit::NSColor> = color.colorUsingColorSpace(&srgb)?;
-    // `CGFloat` is a plain `f64` alias on the supported 64-bit targets, so
-    // local `f64`s are exactly what the out-params expect.
-    let (mut r, mut g, mut b, mut a) = (0f64, 0f64, 0f64, 0f64);
-    unsafe { converted.getRed_green_blue_alpha(&mut r, &mut g, &mut b, &mut a) };
-    let to8 = |x: f64| ((x.clamp(0.0, 1.0) * 255.0).round() as u32) & 0xFF;
-    Some((to8(r) << 16) | (to8(g) << 8) | to8(b))
-}
-
-/// Apply the chosen backdrop to the palette: tint the root surface so the
-/// material shows through. On the opaque fallback this is a no-op, keeping the
-/// pre-material rendering byte-for-byte. Re-runs on every theme change (the
-/// palette reload overwrites it) — the same replay contract as the accent.
-fn apply_material(cx: &mut App) {
-    use sysvitals_core::backdrop::{
-        material_tint_alpha_macos, material_tint_alpha_settings, should_tint,
-    };
-    let material = detect_material();
-    if !should_tint(material) {
-        return;
-    }
-    UiTheme::update(cx, |theme| {
-        let dark = theme.mode.is_dark();
-        // The macOS blur is much clearer than Windows Mica; native
-        // popovers are strongly tinted, so use the dedicated macOS alpha.
-        let alpha = if cfg!(target_os = "macos") {
-            material_tint_alpha_macos(dark)
-        } else {
-            // The settings page sits directly on the material at full strength;
-            // every control lives on an opaque card that carries its contrast.
-            material_tint_alpha_settings(dark)
-        };
-        // Force an opaque base before scaling alpha, so the "set" and
-        // "multiply" readings of `opacity` agree and the tint does not hinge
-        // on the helper's exact semantics.
-        let opaque = |c: Hsla| Hsla { a: 1.0, ..c };
-        theme.colors.background = opaque(theme.colors.background).opacity(alpha);
-    });
-}
-
-/// The system accent color packed as `0x00RRGGBB`, or `None` when it should
-/// not be used at all.
-///
-/// Windows stores the accent the Settings app itself paints with in
-/// `Explorer\Accent\AccentColorMenu` (ABGR). That value changes as soon as
-/// the picker is confirmed. `DwmGetColorizationColor` is only a fallback: it
-/// reports the DWM colorization blend, which can lag behind the picker and
-/// is darkened by the transparency/color-prevalence mix, so it does not
-/// always match the accent Windows paints on its own controls.
-///
-/// macOS always follows `NSColor.controlAccentColor`: it resolves both an
-/// explicit pick (including Graphite) and the default "multicolor" mode,
-/// where AppKit derives the accent from the desktop picture. The earlier
-/// presence check on `AppleAccentColor` deliberately kept the library look
-/// under multicolor, but on-device feedback is that the panels should match
-/// the system accent in every mode, not just when a named color is chosen.
-/// `controlAccentColor` does not vary with light/dark, so no appearance
-/// resolution is needed.
-#[cfg(windows)]
-fn system_accent_hex() -> Option<u32> {
-    const ACCENT_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Accent";
-    if let Some(abgr) = hkcu_dword(ACCENT_KEY, "AccentColorMenu") {
-        return Some(sysvitals_core::color::abgr_to_rgb(abgr));
-    }
-    // Older or unusual configurations may not have the Explorer value; the
-    // DWM colorization color is still a usable approximation.
-    use windows::Win32::Graphics::Dwm::DwmGetColorizationColor;
-    let mut argb = 0u32;
-    // Written via `Default::default()` so the code does not name the `BOOL`
-    // type: in windows-core 0.62 that is a plain `pub type BOOL = i32` alias,
-    // and naming it as `BOOL(0)` would compile as a tuple-struct constructor
-    // (E0423). `Default` covers both aliases and newtypes.
-    let opaque_result = unsafe { DwmGetColorizationColor(&mut argb, &mut Default::default()) };
-    opaque_result.ok()?;
-    Some(argb & 0x00FF_FFFF)
-}
-
-#[cfg(target_os = "macos")]
-fn system_accent_hex() -> Option<u32> {
-    system_color_hex(&objc2_app_kit::NSColor::controlAccentColor())
-}
-
-#[cfg(not(any(windows, target_os = "macos")))]
-fn system_accent_hex() -> Option<u32> {
-    None
-}
-
-/// Convert a packed 24-bit RGB hex to GPUI's `Hsla` (h in 0..1, s/l/a in
-/// 0..1). Hand-rolled so this code path does not depend on whether the
-/// current gpui-kit re-export exposes `rgb` and `Rgba`; only `hsla`, `Hsla`,
-/// and `f32` math are required, all of which are already used in this file.
-fn rgb_hex_to_hsla(hex: u32) -> Hsla {
-    let r = ((hex >> 16) & 0xFF) as f32 / 255.0;
-    let g = ((hex >> 8) & 0xFF) as f32 / 255.0;
-    let b = (hex & 0xFF) as f32 / 255.0;
-    let max = r.max(g).max(b);
-    let min = r.min(g).min(b);
-    let l = (max + min) * 0.5;
-    if (max - min).abs() < 1e-6 {
-        return hsla(0.0, 0.0, l, 1.0);
-    }
-    let d = max - min;
-    let s = if l > 0.5 {
-        d / (2.0 - max - min)
-    } else {
-        d / (max + min)
-    };
-    let h = if (max - r).abs() < 1e-6 {
-        ((g - b) / d + if g < b { 6.0 } else { 0.0 }) / 6.0
-    } else if (max - g).abs() < 1e-6 {
-        ((b - r) / d + 2.0) / 6.0
-    } else {
-        ((r - g) / d + 4.0) / 6.0
-    };
-    hsla(h, s, l, 1.0)
-}
-
-/// Push the OS accent color into the GPUI theme so every primary-tinted
-/// control (segmented tiles, switches, focus rings, the Select popup's
-/// active row) matches the Windows "Personalization / Colors" choice.
-///
-/// The library's default `ThemeColor.button_primary` is a fixed brand blue
-/// that does NOT derive from `ThemeColor.primary`, so both fields are
-/// written; the hover/active variants are derived by shifting lightness
-/// around the accent, and `ring` follows so the focus outline agrees with
-/// the button. On Windows the foreground is recomputed from the accent's
-/// luminance, mirroring the OS: near-white text on a dark accent, near-black
-/// on a light one. macOS always uses white: the system blue accent is bright
-/// enough for the WCAG heuristic to pick a dark label, but on-device feedback
-/// is that accent-filled tiles and buttons should keep the light label in
-/// both appearances. A no-op on hosts with no accent source or when the
-/// platform probe fails: the library's default palette is preferable to a
-/// half-set theme.
-fn apply_accent(cx: &mut App) {
-    let Some(hex) = system_accent_hex() else {
-        return;
-    };
-    let base = rgb_hex_to_hsla(hex);
-    // Windows uses WCAG relative luminance (not HSL lightness: a saturated
-    // yellow has an HSL lightness near 0.5 but is far brighter than a
-    // mid-blue). macOS is fixed to white per the on-device acceptance note.
-    #[cfg(target_os = "macos")]
-    let foreground = hsla(0.0, 0.0, 1.0, 1.0);
-    #[cfg(not(target_os = "macos"))]
-    let foreground = if sysvitals_core::color::prefers_dark_foreground(hex) {
-        hsla(0.0, 0.0, 0.08, 1.0)
-    } else {
-        hsla(0.0, 0.0, 0.97, 1.0)
-    };
-    UiTheme::update(cx, |theme| {
-        let shift = |dl: f32| Hsla {
-            l: (base.l + dl).clamp(0.05, 0.95),
-            ..base
-        };
-        theme.colors.primary = base;
-        theme.colors.button_primary = base;
-        theme.colors.primary_hover = shift(0.06);
-        theme.colors.button_primary_hover = shift(0.06);
-        theme.colors.primary_active = shift(-0.06);
-        theme.colors.button_primary_active = shift(-0.06);
-        theme.colors.primary_foreground = foreground;
-        theme.colors.button_primary_foreground = foreground;
-        theme.colors.ring = base;
-        // Keep the library's dropdown selection in the same accent family as
-        // the rest of the system controls. The stock palette paints the
-        // selected row blue no matter which accent the user picked.
-        theme.colors.list_active = Hsla {
-            a: if theme.mode.is_dark() { 0.26 } else { 0.16 },
-            ..base
-        };
-        theme.colors.list_active_border = base;
-        theme.colors.selection = Hsla { a: 0.30, ..base };
-        theme.colors.caret = base;
-    });
-}
-
-/// Sync the window's palette to the OS light/dark appearance. The panel
-/// always follows the system, independent of the user's `display.theme`
-/// setting (which now governs only the resident indicator). `Theme::change`
-/// (which `sync_system_appearance` calls under the hood) reloads the whole
-/// palette, so this must be followed by [`apply_accent`] — see
-/// [`apply_theme_and_accent`].
-fn apply_system_theme(cx: &mut App) {
-    UiTheme::sync_system_appearance(None, cx);
-}
-
-/// Re-apply the theme palette, the accent override, and the backdrop tint
-/// together, in that order. `Theme::change` (which `sync_system_appearance`
-/// calls) loads the registered palette for the mode, overwriting every color
-/// field — the accent and the material tint are runtime patches applied on
-/// top, so both must follow every theme change, never precede it.
+/// Re-apply the shared theme/accent/material stack, then the settings-only
+/// typography and token overrides.
 fn apply_theme_and_accent(cx: &mut App) {
-    apply_system_theme(cx);
-    apply_accent(cx);
-    apply_material(cx);
+    sysvitals_panel::apply_theme_and_accent(cx, PanelSurface::Settings);
     // Typography: keep the library's 16px rem base so its 0.875rem controls
     // (buttons, inputs, selects, dropdown rows) land on 14px, matching the
     // option labels on the left — the render root pins body text to that
@@ -726,11 +408,11 @@ struct SettingsView {
     /// `layout_available`). False hides it entirely.
     layout_available: bool,
     /// Whether the taskbar is docked left/right (see `taskbar_is_vertical`),
-    /// probed once at view start. On such a bar the margin row is shown
-    /// unconditionally (the value offsets the indicator from the bar's top
-    /// edge), while the anchor dropdown — which selects between the tray end
-    /// and the far-left end of a HORIZONTAL bar — would be a dead control and
-    /// stays hidden.
+    /// re-probed at most once a second while the window is open. On such a
+    /// bar the margin row is shown unconditionally (the value offsets the
+    /// indicator from the bar's top edge), while the anchor dropdown — which
+    /// selects between the tray end and the far-left end of a HORIZONTAL bar
+    /// — would be a dead control and stays hidden.
     vertical_taskbar: bool,
     /// Last accent value seen by the live-refresh poll; the override only
     /// re-applies when this moves (see `new`).
@@ -738,6 +420,12 @@ struct SettingsView {
     /// Whether the most recent config write failed. Shown in the footer so a
     /// read-only/full disk does not silently swallow every setting change.
     save_failed: std::cell::Cell<bool>,
+    /// Serialized form last written (or loaded) so a focus loss with no edits
+    /// does not touch the file and trigger an indicator reload.
+    last_saved_toml: Option<String>,
+    /// Taskbar-shape probes are syscalls/registry reads; refresh them at most
+    /// once a second on interaction-driven renders.
+    last_taskbar_probe: Option<Instant>,
     /// Keep event subscriptions alive for the lifetime of the view.
     _subscriptions: Vec<Subscription>,
     /// Flush guard: saves the current state whenever the window loses focus,
@@ -890,6 +578,7 @@ impl SettingsView {
             }
         });
 
+        let last_saved_toml = cfg.to_toml_string().ok();
         let view = Self {
             dual_row: cfg.display.dual_row,
             show_resources: cfg.display.show_resources,
@@ -921,6 +610,8 @@ impl SettingsView {
             // after which it tracks the real value.
             last_accent: None,
             save_failed: std::cell::Cell::new(false),
+            last_saved_toml,
+            last_taskbar_probe: Some(Instant::now()),
             _subscriptions,
             _deactivation: None,
             _appearance: None,
@@ -952,7 +643,7 @@ impl SettingsView {
                         }
                         view.last_accent = current;
                         if current.is_some() {
-                            apply_accent(cx);
+                            sysvitals_panel::apply_accent(cx);
                         } else {
                             // The OS moved back to "multicolor" (or the accent
                             // probe failed): reload the palette so the old accent
@@ -1020,11 +711,42 @@ impl SettingsView {
         cfg
     }
 
-    fn save(&self, cx: &App) {
-        let cfg = self.collect_config(cx);
-        let result = sysvitals_core::config::config_path().and_then(|path| cfg.save(&path));
+    /// Persist the UI-owned fields. The settings model is a startup snapshot,
+    /// so a blind whole-file write would silently revert fields this window
+    /// does not edit (`history.*`, `sample.cpu_smoothing`,
+    /// `windows.auto_start`) after a manual edit. Re-read the current file
+    /// and carry those fields forward; only UI-owned fields come from the
+    /// view. Also skip the write when the serialized result is unchanged, so
+    /// merely focusing away does not bump the mtime and make the indicator
+    /// reload/re-sample.
+    fn save(&mut self, cx: &App) {
+        let mut cfg = self.collect_config(cx);
+        let Ok(path) = sysvitals_core::config::config_path() else {
+            self.save_failed.set(true);
+            return;
+        };
+        if let Ok((disk, _)) = Config::load(&path) {
+            cfg.history = disk.history;
+            cfg.sample.cpu_smoothing = disk.sample.cpu_smoothing;
+            cfg.windows.auto_start = disk.windows.auto_start;
+        }
+        let text = match cfg.to_toml_string() {
+            Ok(text) => text,
+            Err(e) => {
+                eprintln!("app-settings: config serialize failed: {e}");
+                self.save_failed.set(true);
+                return;
+            }
+        };
+        if self.last_saved_toml.as_deref() == Some(text.as_str()) {
+            return;
+        }
+        let result = cfg.save(&path);
         if let Err(e) = &result {
             eprintln!("app-settings: config save failed: {e}");
+        } else {
+            self.cfg = cfg;
+            self.last_saved_toml = Some(text);
         }
         self.save_failed.set(result.is_err());
     }
@@ -1145,11 +867,18 @@ fn switch_row(title: String, control: impl IntoElement) -> impl IntoElement {
 
 impl Render for SettingsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Re-probe the taskbar shape on every render: the user can move or
-        // auto-hide the bar while this window stays open, and the Layout row
-        // visibility must follow within the next repaint.
-        self.vertical_taskbar = taskbar_is_vertical();
-        self.layout_available = layout_available();
+        // Re-probe the taskbar shape at most once a second: the user can move
+        // or auto-hide the bar while this window stays open, but a registry
+        // read plus `SHAppBarMessage` on every keystroke-triggered repaint is
+        // needless I/O on the UI thread.
+        let probe_due = self
+            .last_taskbar_probe
+            .is_none_or(|last| last.elapsed() >= std::time::Duration::from_secs(1));
+        if probe_due {
+            self.vertical_taskbar = taskbar_is_vertical();
+            self.layout_available = layout_available();
+            self.last_taskbar_probe = Some(Instant::now());
+        }
         // Deactivation flush (registered once): persist the current state
         // whenever the window loses focus, covering the case where a prefix
         // field still holds the last edit when the window is closed or the
@@ -1225,9 +954,9 @@ impl Render for SettingsView {
         }
 
         let mut interval_row = h_flex().gap_1().flex_wrap();
-        for i in 0..ALLOWED_INTERVAL_MS.len() {
+        for (i, interval_ms) in ALLOWED_INTERVAL_MS.iter().enumerate() {
             let active = i == self.interval_idx;
-            let secs = ALLOWED_INTERVAL_MS[i] / 1000;
+            let secs = *interval_ms / 1000;
             let text = format!("{secs} {}", t(lang, "settings.unit_seconds"));
             interval_row = interval_row.child(
                 Button::new(format!("interval-{i}"))
@@ -1721,7 +1450,19 @@ fn load_config_with_backup() -> Config {
     let Ok(path) = sysvitals_core::config::config_path() else {
         return Config::default();
     };
-    match Config::load(&path) {
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Config::default(),
+        Err(e) => {
+            // A sharing violation/permission error is transient: do not move
+            // the user's file aside (the next save would then overwrite the
+            // canonical path with defaults). Only a malformed file is backed
+            // up below.
+            eprintln!("app-settings: config read failed: {e}; using defaults");
+            return Config::default();
+        }
+    };
+    match Config::from_toml_str(&text) {
         Ok((cfg, _)) => cfg,
         Err(e) => {
             let stamp = std::time::SystemTime::now()
@@ -1731,7 +1472,7 @@ fn load_config_with_backup() -> Config {
             let backup = path.with_file_name(format!("config.toml.corrupt-{stamp}"));
             let _ = std::fs::rename(&path, &backup);
             eprintln!(
-                "app-settings: config load failed: {e}; backed up to {}",
+                "app-settings: config parse failed: {e}; backed up to {}",
                 backup.display()
             );
             Config::default()
@@ -1739,7 +1480,142 @@ fn load_config_with_backup() -> Config {
     }
 }
 
+/// Whether another settings process already owns the instance lock. A
+/// second window has its own startup snapshot and would overwrite the first
+/// one's edits on its next save, so duplicate launches exit quietly.
+#[cfg(windows)]
+fn acquire_single_instance() -> bool {
+    use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError};
+    use windows::Win32::System::Threading::CreateMutexW;
+    let name = utf16("Local\\SysVitalsSettings_SingleInstance");
+    match unsafe { CreateMutexW(None, false, windows::core::PCWSTR(name.as_ptr())) } {
+        Ok(handle) => {
+            if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+                false
+            } else {
+                *SETTINGS_INSTANCE.lock().unwrap_or_else(|e| e.into_inner()) =
+                    Some(handle.0 as isize);
+                true
+            }
+        }
+        // A mutex failure must not keep the panel from opening; the parent
+        // launch slot remains the primary duplicate guard.
+        Err(_) => true,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn acquire_single_instance() -> bool {
+    use std::os::fd::AsRawFd;
+    let Ok(dir) = sysvitals_core::config::data_dir() else {
+        return true;
+    };
+    let _ = std::fs::create_dir_all(&dir);
+    let Ok(file) = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join("settings.lock"))
+    else {
+        return true;
+    };
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        return false;
+    }
+    *SETTINGS_INSTANCE_FILE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some(file);
+    true
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+fn acquire_single_instance() -> bool {
+    true
+}
+
+#[cfg(windows)]
+static SETTINGS_INSTANCE: std::sync::Mutex<Option<isize>> = std::sync::Mutex::new(None);
+#[cfg(target_os = "macos")]
+static SETTINGS_INSTANCE_FILE: std::sync::Mutex<Option<std::fs::File>> =
+    std::sync::Mutex::new(None);
+
+fn parse_parent_pid() -> Option<u32> {
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == "--parent-pid" {
+            return args.next()?.parse().ok();
+        }
+    }
+    None
+}
+
+/// Quit when the indicator that launched this panel disappears without
+/// running its quit path (crash, Force Quit). The job object covers Windows
+/// ordinary exits, but a monitored parent also catches a child launched
+/// before the job was configured and mirrors the mac behavior.
+#[cfg(windows)]
+fn watch_parent(cx: &mut App) {
+    use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_TIMEOUT};
+    use windows::Win32::System::Threading::{
+        OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+    };
+    let Some(pid) = parse_parent_pid() else {
+        return;
+    };
+    let raw = match unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, pid) } {
+        Ok(handle) => handle.0 as isize,
+        Err(e) => {
+            eprintln!("app-settings: parent process unavailable: {e}");
+            cx.quit();
+            return;
+        }
+    };
+    cx.spawn(async move |cx| {
+        loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(1))
+                .await;
+            let exited = unsafe { WaitForSingleObject(HANDLE(raw as *mut std::ffi::c_void), 0) }
+                != WAIT_TIMEOUT;
+            if exited {
+                cx.update(|app| app.quit());
+                break;
+            }
+        }
+        let _ = unsafe { CloseHandle(HANDLE(raw as *mut std::ffi::c_void)) };
+    })
+    .detach();
+}
+
+#[cfg(target_os = "macos")]
+fn watch_parent(cx: &mut App) {
+    let Some(pid) = parse_parent_pid() else {
+        return;
+    };
+    cx.spawn(async move |cx| {
+        loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(1))
+                .await;
+            if unsafe { libc::kill(pid as i32, 0) } != 0
+                && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+            {
+                cx.update(|app| app.quit());
+                break;
+            }
+        }
+    })
+    .detach();
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+fn watch_parent(_cx: &mut App) {}
+
 fn main() {
+    if !acquire_single_instance() {
+        eprintln!("app-settings: another settings window is already running; exiting");
+        return;
+    }
     // GPUI does not declare DPI awareness itself. Without this the process
     // is treated as DPI-unaware and Windows bitmap-stretches the whole window
     // on a scaled display, which is what makes the text look soft.
@@ -1791,6 +1667,7 @@ fn main() {
         // it (all three are theme-color writes and must be sequenced
         // together).
         apply_theme_and_accent(cx);
+        watch_parent(cx);
 
         let titlebar = {
             #[cfg(target_os = "macos")]
@@ -1859,7 +1736,7 @@ fn main() {
                 cx.background_executor()
                     .timer(std::time::Duration::from_millis(120))
                     .await;
-                let _ = cx.update(|app| {
+                cx.update(|app| {
                     app.activate(true);
                     let _ = window_handle.update(app, |_, window, _| window.activate_window());
                 });
