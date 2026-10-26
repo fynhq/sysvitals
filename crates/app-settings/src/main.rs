@@ -370,6 +370,12 @@ fn detect_material() -> Material {
 /// for UI text and renders small sizes more crisply than the legacy Segoe UI.
 /// Older builds keep the system-resolved font; an unavailable family falls
 /// back through GPUI's default stack.
+///
+/// The typeface is the system one, but glyph antialiasing stays grayscale:
+/// GPUI enables ClearType only for opaque windows, and this panel keeps its
+/// Mica backdrop. The cards being opaque is not enough — GPUI's rendering
+/// mode is a window property, not a per-element one. Making the window
+/// opaque would enable ClearType at the cost of the material.
 #[cfg(windows)]
 fn panel_font_family() -> Option<&'static str> {
     os_build_number()
@@ -1050,17 +1056,16 @@ fn section_label(text: String, dim: Hsla) -> impl IntoElement {
     div().text_xs().font_semibold().text_color(dim).child(text)
 }
 
-/// A grouped option surface. Windows keeps the WinUI card (8px radius, 4px
-/// row gap, plus an optional hairline when the opaque light fill would melt
-/// into a bright Mica page); macOS uses a flatter grouped-list card (10px
-/// radius, rows touch and are separated by [`card_divider`]) so it reads like
-/// System Settings instead of a stack of floating cards.
+/// A grouped option surface. Windows keeps the WinUI card (8px radius plus
+/// an optional hairline when the opaque light fill would melt into a bright
+/// Mica page); macOS uses a flatter grouped-list card (10px radius). Rows
+/// touch on both hosts and are separated by [`card_divider`], like a native
+/// grouped list rather than a stack of floating controls.
 fn settings_card(bg: Hsla, border: Option<Hsla>) -> Div {
     v_flex()
         .w_full()
         .rounded(px(if cfg!(target_os = "macos") { 10. } else { 8. }))
         .bg(bg)
-        .when(cfg!(not(target_os = "macos")), |this| this.gap_1())
         .when(border.is_some(), |this| {
             this.border_1()
                 .border_color(border.unwrap_or_else(|| hsla(0., 0., 0., 0.)))
@@ -1068,14 +1073,22 @@ fn settings_card(bg: Hsla, border: Option<Hsla>) -> Div {
         .p_3()
 }
 
-/// macOS grouped-list separator between option rows. AppKit's official
-/// separator color is `NSColor.separatorColor` (10% black in light, 10%
-/// white in dark at the default contrast); the thickness is a hairline, i.e.
-/// one device pixel, not one point. A one-point line is two pixels on a
-/// Retina display and reads heavier than System Settings. Windows cards use
-/// the 4px gap instead and never insert this element.
+/// Grouped-list separator between option rows, one device pixel thick.
+///
+/// Windows uses WinUI's `DividerStrokeColorDefault` (`#0F000000` in light,
+/// `#15FFFFFF` in dark). macOS keeps `NSColor.separatorColor` (10% black /
+/// white), which is what System Settings paints. The line is deliberately a
+/// hairline in physical pixels: one logical point would be two pixels on a
+/// Retina display (or 1.25–1.5px at Windows fractional scaling) and read
+/// heavier than either platform's grouped lists.
 fn card_divider(dark: bool, scale_factor: f32) -> Div {
-    let color = if dark {
+    let color = if cfg!(windows) {
+        if dark {
+            hsla(0., 0., 1., 0x15 as f32 / 255.)
+        } else {
+            hsla(0., 0., 0., 0x0F as f32 / 255.)
+        }
+    } else if dark {
         hsla(0., 0., 1., 0.10)
     } else {
         hsla(0., 0., 0., 0.10)
@@ -1426,9 +1439,7 @@ impl Render for SettingsView {
                 t(lang, "settings.language").to_string(),
                 lang_row,
             ))
-            .when(cfg!(target_os = "macos"), |this| {
-                this.child(card_divider(dark, scale_factor))
-            })
+            .child(card_divider(dark, scale_factor))
             .child(labeled_row(
                 t(lang, "settings.sample_interval").to_string(),
                 interval_row,
@@ -1437,10 +1448,11 @@ impl Render for SettingsView {
                 // Offered only where the choice is actually honored. On
                 // macOS the indicator title is drawn by AppKit, which picks
                 // its own color from the menu-bar appearance.
-                this.child(labeled_row(
-                    t(lang, "settings.theme").to_string(),
-                    theme_row,
-                ))
+                this.child(card_divider(dark, scale_factor))
+                    .child(labeled_row(
+                        t(lang, "settings.theme").to_string(),
+                        theme_row,
+                    ))
             });
 
         let display_card = settings_card(card_bg, card_border)
@@ -1454,9 +1466,7 @@ impl Render for SettingsView {
                         cx.notify();
                     })),
             ))
-            .when(cfg!(target_os = "macos"), |this| {
-                this.child(card_divider(dark, scale_factor))
-            })
+            .child(card_divider(dark, scale_factor))
             .child(switch_row(
                 t(lang, "settings.group_resources").to_string(),
                 Switch::new("show-res")
@@ -1467,9 +1477,7 @@ impl Render for SettingsView {
                         cx.notify();
                     })),
             ))
-            .when(cfg!(target_os = "macos"), |this| {
-                this.child(card_divider(dark, scale_factor))
-            })
+            .child(card_divider(dark, scale_factor))
             .child(switch_row(
                 t(lang, "settings.group_network").to_string(),
                 Switch::new("show-net")
@@ -1480,9 +1488,7 @@ impl Render for SettingsView {
                         cx.notify();
                     })),
             ))
-            .when(cfg!(target_os = "macos"), |this| {
-                this.child(card_divider(dark, scale_factor))
-            })
+            .child(card_divider(dark, scale_factor))
             .child(labeled_row(
                 t(lang, "settings.item_spacing").to_string(),
                 spacing_control,
@@ -1503,7 +1509,7 @@ impl Render for SettingsView {
         let show_margin = (self.layout_available && self.anchor_idx == 1 && !self.vertical_taskbar)
             || self.vertical_taskbar;
         if show_margin {
-            if cfg!(target_os = "macos") && show_layout {
+            if show_layout {
                 layout_card = layout_card.child(card_divider(dark, scale_factor));
             }
             layout_card = layout_card.child(labeled_row(
@@ -1520,7 +1526,7 @@ impl Render for SettingsView {
         let prefix_card = settings_card(card_bg, card_border)
             .child(
                 v_flex()
-                    .gap_3()
+                    .when(cfg!(target_os = "macos"), |this| this.gap_3())
                     .child(
                         h_flex()
                             .gap_4()
@@ -1537,6 +1543,9 @@ impl Render for SettingsView {
                                 control,
                             )),
                     )
+                    .when(cfg!(not(target_os = "macos")), |this| {
+                        this.child(card_divider(dark, scale_factor).my_2())
+                    })
                     .child(
                         h_flex()
                             .gap_4()
@@ -1558,9 +1567,7 @@ impl Render for SettingsView {
                 div()
                     .text_xs()
                     .text_color(faint)
-                    // The macOS card has no row gap; keep the hint separated
-                    // from the 2x2 prefix grid. Windows keeps its 4px gap.
-                    .when(cfg!(target_os = "macos"), |this| this.pt_2())
+                    .pt_2()
                     .child(t(lang, "settings.prefix_hint").to_string()),
             );
 
@@ -1638,7 +1645,7 @@ impl Render for SettingsView {
                                 .child(title),
                         ),
                 )
-                .child(div().flex_1().child(body))
+                .child(div().flex_1().overflow_hidden().child(body))
         }
         #[cfg(windows)]
         {
@@ -1659,7 +1666,7 @@ impl Render for SettingsView {
                                 .child(title),
                         ),
                 )
-                .child(div().flex_1().child(body))
+                .child(div().flex_1().overflow_hidden().child(body))
         }
         #[cfg(not(any(windows, target_os = "macos")))]
         {

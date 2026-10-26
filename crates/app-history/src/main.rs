@@ -1144,6 +1144,12 @@ fn os_build_number() -> Option<u32> {
 /// for UI text and renders small sizes more crisply than the legacy Segoe UI.
 /// Older builds keep the system-resolved font; an unavailable family falls
 /// back through GPUI's default stack.
+///
+/// The typeface is the system one, but glyph antialiasing stays grayscale:
+/// GPUI enables ClearType only for opaque windows, and this popup keeps its
+/// Mica/acrylic backdrop. If the material is dropped (transparency disabled,
+/// older host), the window becomes opaque and GPUI switches to ClearType on
+/// its own.
 #[cfg(windows)]
 fn panel_font_family() -> Option<&'static str> {
     os_build_number()
