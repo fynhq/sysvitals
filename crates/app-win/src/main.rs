@@ -53,19 +53,14 @@ mod win {
     use windows::Wdk::System::SystemServices::RtlGetVersion;
     use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE, WAIT_TIMEOUT};
     use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
-    use windows::Win32::Graphics::Dwm::{
-        DwmExtendFrameIntoClientArea, DwmGetWindowAttribute, DwmSetWindowAttribute,
-        DWMSBT_TRANSIENTWINDOW, DWMWA_CLOAKED, DWMWA_SYSTEMBACKDROP_TYPE,
-        DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
-    };
+    use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
     use windows::Win32::Graphics::Gdi::{
-        BeginPaint, CreateCompatibleDC, CreateDIBSection, CreateFontW, DeleteDC, DeleteObject,
-        DrawTextW, EndPaint, GetDC, GetMonitorInfoW, GetTextExtentPoint32W, MonitorFromPoint,
-        MonitorFromWindow, ReleaseDC, SelectObject, SetBkMode, SetTextColor, AC_SRC_ALPHA,
-        AC_SRC_OVER, ANTIALIASED_QUALITY, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION,
-        CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH, DIB_RGB_COLORS, DT_CALCRECT,
-        DT_CENTER, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, FF_SWISS, FW_REGULAR,
-        FW_SEMIBOLD, HFONT, MONITORINFO, MONITOR_DEFAULTTONEAREST, OUT_DEFAULT_PRECIS, PAINTSTRUCT,
+        CreateCompatibleDC, CreateDIBSection, CreateFontW, DeleteDC, DeleteObject, DrawTextW,
+        GetDC, GetMonitorInfoW, MonitorFromWindow, ReleaseDC, SelectObject, SetBkMode,
+        SetTextColor, AC_SRC_ALPHA, AC_SRC_OVER, ANTIALIASED_QUALITY, BITMAPINFO, BITMAPINFOHEADER,
+        BI_RGB, BLENDFUNCTION, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH, DIB_RGB_COLORS,
+        DT_CALCRECT, DT_CENTER, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, FF_SWISS,
+        FW_REGULAR, FW_SEMIBOLD, HFONT, MONITORINFO, MONITOR_DEFAULTTONEAREST, OUT_DEFAULT_PRECIS,
         TRANSPARENT,
     };
     use windows::Win32::System::Com::{
@@ -95,14 +90,9 @@ mod win {
         CreateMutexW, CreateProcessW, GetCurrentProcessId, GetExitCodeProcess, TerminateProcess,
         WaitForSingleObject, PROCESS_INFORMATION, STARTUPINFOW,
     };
-    use windows::Win32::UI::Controls::MARGINS;
     use windows::Win32::UI::HiDpi::{
         GetDpiForSystem, GetDpiForWindow, SetProcessDpiAwarenessContext,
         DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
-    };
-    use windows::Win32::UI::Input::KeyboardAndMouse::{
-        GetAsyncKeyState, ReleaseCapture, SetCapture, SetFocus, VK_DOWN, VK_ESCAPE, VK_RETURN,
-        VK_UP,
     };
     use windows::Win32::UI::Shell::{
         IVirtualDesktopManager, SHAppBarMessage, ShellExecuteW, VirtualDesktopManager, ABE_LEFT,
@@ -110,7 +100,7 @@ mod win {
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
-        DispatchMessageW, FindWindowExW, FindWindowW, GetClassNameW, GetClientRect, GetCursorPos,
+        DispatchMessageW, FindWindowExW, FindWindowW, GetClassNameW, GetCursorPos,
         GetForegroundWindow, GetMessageW, GetShellWindow, GetSystemMetrics, GetWindowLongPtrW,
         GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow,
         IsWindowVisible, KillTimer, MoveWindow, PostMessageW, PostQuitMessage, RegisterClassExW,
@@ -121,10 +111,9 @@ mod win {
         SM_CYSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
         SPI_GETNONCLIENTMETRICS, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE,
         SW_SHOWNOACTIVATE, SW_SHOWNORMAL, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, ULW_ALPHA,
-        WM_ACTIVATE, WM_CAPTURECHANGED, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_KEYDOWN,
-        WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NULL, WM_RBUTTONUP,
-        WM_SETTINGCHANGE, WM_TIMER, WNDCLASSEXW, WS_CHILD, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-        WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+        WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP,
+        WM_SETTINGCHANGE, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+        WS_EX_TOPMOST, WS_POPUP,
     };
 
     // ------------------------------------------------------------------ consts
@@ -140,15 +129,9 @@ mod win {
     /// overlay re-samples, resizes and re-renders in its own wndproc at top
     /// level, which is always safe (no reentrant rendering).
     const WM_APP_APPLY: u32 = 0x8000 + 1;
-    /// Posted to the overlay when a custom menu's modal loop is done. It only
-    /// has to break that loop; the main message loop would ignore it too.
-    const WM_APP_MENU_DONE: u32 = 0x8000 + 2;
     /// Posted by the background history-launch thread once the resident
     /// process handle is stored (or the launch failed).
     const WM_APP_HISTORY_READY: u32 = 0x8000 + 3;
-    /// Timer used by the custom menu to catch Esc even if the menu never
-    /// received keyboard focus.
-    const TIMER_MENU_ESC: usize = 0x518;
     /// Polls the resident history process so a crash is reaped and a stale
     /// request cleared without waiting for the next click.
     const TIMER_HISTORY: usize = 0x519;
@@ -161,22 +144,6 @@ mod win {
     /// explorer-restart path).
     const TIMER_WATCH: usize = 0x51B;
     const WATCHDOG_MS: u32 = 5_000;
-    /// Custom context-menu metrics, in logical pixels (scaled by the owner's
-    /// DPI when the window is created). These mirror WinUI 3's
-    /// `MenuFlyoutItem`/`MenuFlyoutSeparator` metrics in window coordinates:
-    /// a 32px item slot with a 4/2px item margin, 11px inner padding, a 1px
-    /// presenter border (DWM draws it over our extended client), and a 3px
-    /// separator slot (a 1-device-pixel line plus 1px padding on each side).
-    /// `MENU_PAD_*` therefore includes that border: text sits 16px from the
-    /// window edge.
-    const MENU_ROW_PX: i32 = 32;
-    const MENU_SEPARATOR_PX: i32 = 3;
-    const MENU_PAD_X_PX: i32 = 16;
-    const MENU_PAD_Y_PX: i32 = 3;
-    const MENU_MIN_W_PX: i32 = 96;
-    const MENU_ITEM_MARGIN_X_PX: i32 = 5;
-    const MENU_ITEM_MARGIN_Y_PX: i32 = 2;
-    const MENU_ITEM_RADIUS_PX: i32 = 4;
     /// Horizontal padding around the measured text.
     const PAD_PX: i32 = 6;
     /// Extra width slack added when sizing the overlay. Sizing measures text at
@@ -282,9 +249,6 @@ mod win {
         // COM virtual-desktop manager, created on demand the first time the
         // indicator is found cloaked. All access is on the message thread.
         static VD_MANAGER: RefCell<Option<IVirtualDesktopManager>> = const { RefCell::new(None) };
-        // State of the custom context menu currently on screen; `None` when
-        // no menu is open.
-        static MENU_STATE: RefCell<Option<MenuState>> = const { RefCell::new(None) };
     }
 
     // ------------------------------------------------------------ config access
@@ -426,16 +390,6 @@ mod win {
             return None;
         }
         Some(info.dwBuildNumber)
-    }
-
-    /// The system backdrop attribute exists from Windows 11 22H2 onward.
-    /// The user's transparency switch still wins: with effects off the custom
-    /// menu paints an opaque surface like the rest of the shell.
-    unsafe fn menu_material_available() -> bool {
-        let transparency = hkcu_dword(THEME_KEY, "EnableTransparency")
-            .map(|v| v != 0)
-            .unwrap_or(true);
-        transparency && os_build_number().is_some_and(|build| build >= 22621)
     }
 
     /// Win11 with centered taskbar icons: the only case where the far-left
@@ -715,8 +669,6 @@ mod win {
     /// in the topmost band — re-asserting the indicator's band during tracking
     /// would lift the tiny overlay back above the open menu. Skip those ticks.
     static MENU_TRACKING: AtomicBool = AtomicBool::new(false);
-    /// Chosen command id from the custom menu (0 = dismissed).
-    static MENU_CHOICE: AtomicUsize = AtomicUsize::new(0);
     /// Last top-level window seen covering the indicator's center. Used to
     /// log an occlusion once per covering window instead of every tick.
     static LAST_OCCLUDER: AtomicIsize = AtomicIsize::new(0);
@@ -729,11 +681,6 @@ mod win {
     static CLOAK_LOGGED: AtomicBool = AtomicBool::new(false);
     static CLOAK_MOVE_FAIL_LOGGED: AtomicBool = AtomicBool::new(false);
     static LAYERED_FAIL_LOGGED: AtomicBool = AtomicBool::new(false);
-    static MENU_RENDER_FAIL_LOGGED: AtomicBool = AtomicBool::new(false);
-    static MENU_ACTIVE_LOGGED: AtomicBool = AtomicBool::new(false);
-    /// Atom returned by `RegisterClassExW` for the menu content class. Stored
-    /// so a creation failure can say whether the class itself was registered.
-    static MENU_CONTENT_CLASS_ATOM: AtomicUsize = AtomicUsize::new(0);
 
     /// The Windows virtual-desktop manager, created on demand. The overlay is
     /// a top-level window, so Windows cloaks it when the user switches to
@@ -2178,29 +2125,6 @@ mod win {
         separator: bool,
     }
 
-    struct MenuState {
-        owner: HWND,
-        /// Layered click-through overlay owned by the menu that draws the
-        /// text and hover state over the parent material.
-        content: HWND,
-        entries: Vec<MenuEntry>,
-        rows: Vec<RECT>,
-        /// DPI scale of the monitor the menu was laid out for. Captured from
-        /// the overlay (a visible window) so a hidden menu window never has
-        /// to guess its own DPI.
-        scale: f32,
-        hover: Option<usize>,
-        /// Whether the DWM backdrop was accepted. If either the attribute or
-        /// the frame extension failed, the paint path falls back to an
-        /// opaque fill so the menu can never render as an invisible window.
-        material: bool,
-        /// Set once the menu has actually been activated. A menu that never
-        /// received activation must not dismiss on a synthetic
-        /// `WM_ACTIVATE(WA_INACTIVE)` delivered during show.
-        active_once: bool,
-        closing: bool,
-    }
-
     fn menu_entries(lang: Language) -> Vec<MenuEntry> {
         // Order: system resource viewer first (most actionable when the
         // indicator is in the way), then Settings, then the lifecycle group.
@@ -2233,759 +2157,9 @@ mod win {
         ]
     }
 
-    /// GDI font for the menu. The glyphs are rendered into a coverage DIB at
-    /// 2x and composited with per-pixel alpha, so the antialiasing quality
-    /// matches the indicator and ClearType is not needed.
-    unsafe fn menu_font(scale: f32) -> HFONT {
-        let face = if os_build_number().is_some_and(|build| build >= 22000) {
-            utf16("Segoe UI Variable")
-        } else {
-            utf16("Segoe UI")
-        };
-        let height = -((14.0 * scale).round() as i32).max(1);
-        CreateFontW(
-            height,
-            0,
-            0,
-            0,
-            FW_REGULAR.0 as i32,
-            0,
-            0,
-            0,
-            DEFAULT_CHARSET,
-            OUT_DEFAULT_PRECIS,
-            CLIP_DEFAULT_PRECIS,
-            ANTIALIASED_QUALITY,
-            (DEFAULT_PITCH.0 | FF_SWISS.0) as u32,
-            windows::core::PCWSTR(face.as_ptr()),
-        )
-    }
-
-    unsafe fn menu_hit_test(lparam: LPARAM) -> Option<usize> {
-        let x = (lparam.0 & 0xFFFF) as i16 as i32;
-        let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
-        MENU_STATE.with(|slot| {
-            let slot = slot.borrow();
-            let state = slot.as_ref()?;
-            state.rows.iter().enumerate().find_map(|(index, row)| {
-                (!state.entries[index].separator
-                    && x >= row.left
-                    && x < row.right
-                    && y >= row.top
-                    && y < row.bottom)
-                    .then_some(index)
-            })
-        })
-    }
-
-    unsafe fn menu_point_in_client(hwnd: HWND, lparam: LPARAM) -> bool {
-        let x = (lparam.0 & 0xFFFF) as i16 as i32;
-        let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
-        let mut rc = RECT::default();
-        GetClientRect(hwnd, &mut rc).is_ok() && x >= 0 && y >= 0 && x < rc.right && y < rc.bottom
-    }
-
-    unsafe fn update_menu_hover(hwnd: HWND, lparam: LPARAM) {
-        let next = menu_hit_test(lparam);
-        let changed = MENU_STATE.with(|slot| {
-            let mut slot = slot.borrow_mut();
-            let Some(state) = slot.as_mut() else {
-                return false;
-            };
-            let changed = state.hover != next;
-            state.hover = next;
-            changed
-        });
-        if changed {
-            let _ = render_menu_content(hwnd);
-        }
-    }
-
-    unsafe fn close_menu(hwnd: HWND) {
-        let already_closing = MENU_STATE.with(|slot| {
-            let mut slot = slot.borrow_mut();
-            let Some(state) = slot.as_mut() else {
-                return true;
-            };
-            if state.closing {
-                true
-            } else {
-                state.closing = true;
-                false
-            }
-        });
-        if !already_closing {
-            let _ = DestroyWindow(hwnd);
-        }
-    }
-
-    /// Render text and hover/separator accents into the layered content
-    /// window. The parent only carries the DWM material, so this surface can
-    /// be updated at any time without ever covering the backdrop.
-    unsafe fn render_menu_content(owner: HWND) -> bool {
-        let Some((content, entries, rows, scale, hover, material)) = MENU_STATE.with(|slot| {
-            let slot = slot.borrow();
-            let state = slot.as_ref()?;
-            Some((
-                state.content,
-                state.entries.clone(),
-                state.rows.clone(),
-                state.scale,
-                state.hover,
-                state.material,
-            ))
-        }) else {
-            return false;
-        };
-
-        let mut client = RECT::default();
-        if GetClientRect(owner, &mut client).is_err() {
-            return false;
-        }
-        let w = client.right;
-        let h = client.bottom;
-        if w <= 0 || h <= 0 {
-            return false;
-        }
-
-        let dark = LIGHT_THEME.load(Ordering::Relaxed) == 0;
-        let pad_x = (MENU_PAD_X_PX as f32 * scale).round() as i32;
-        let item_margin_x = (MENU_ITEM_MARGIN_X_PX as f32 * scale).round() as i32;
-        let item_margin_y = (MENU_ITEM_MARGIN_Y_PX as f32 * scale).round() as i32;
-        let item_radius = (MENU_ITEM_RADIUS_PX as f32 * scale).round() as i32;
-
-        // Supersampled glyph coverage surface.
-        const SS: i32 = 2;
-        let sw = w * SS;
-        let sh = h * SS;
-        let screen_dc = GetDC(None);
-        let mem_dc = CreateCompatibleDC(Some(screen_dc));
-        let mut ss_bmi = BITMAPINFO::default();
-        ss_bmi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
-        ss_bmi.bmiHeader.biWidth = sw;
-        ss_bmi.bmiHeader.biHeight = -sh;
-        ss_bmi.bmiHeader.biPlanes = 1;
-        ss_bmi.bmiHeader.biBitCount = 32;
-        ss_bmi.bmiHeader.biCompression = BI_RGB.0;
-        let mut ss_bits: *mut std::ffi::c_void = std::ptr::null_mut();
-        let Ok(ss_bmp) =
-            CreateDIBSection(Some(mem_dc), &ss_bmi, DIB_RGB_COLORS, &mut ss_bits, None, 0)
-        else {
-            let _ = DeleteDC(mem_dc);
-            let _ = ReleaseDC(None, screen_dc);
-            return false;
-        };
-        let old_ss_bmp = SelectObject(mem_dc, ss_bmp.into());
-        let ss_font = menu_font(scale * SS as f32);
-        let old_ss_font = SelectObject(mem_dc, ss_font.into());
-        SetBkMode(mem_dc, TRANSPARENT);
-        SetTextColor(mem_dc, COLORREF(0x00FF_FFFF));
-        let ss_px = ss_bits as *mut u32;
-        for i in 0..(sw * sh) as usize {
-            *ss_px.add(i) = 0;
-        }
-        for (index, entry) in entries.iter().enumerate() {
-            if entry.separator {
-                continue;
-            }
-            let Some(row) = rows.get(index) else {
-                continue;
-            };
-            let mut text_rc = RECT {
-                left: (row.left + pad_x) * SS,
-                top: row.top * SS,
-                right: (row.right - pad_x) * SS,
-                bottom: row.bottom * SS,
-            };
-            let mut label = utf16(&entry.label);
-            DrawTextW(
-                mem_dc,
-                &mut label,
-                &mut text_rc,
-                DT_SINGLELINE | DT_LEFT | DT_VCENTER | DT_NOPREFIX,
-            );
-        }
-        SelectObject(mem_dc, old_ss_font);
-        let _ = DeleteObject(ss_font.into());
-
-        // Final premultiplied-alpha surface for UpdateLayeredWindow.
-        let mut bmi = BITMAPINFO::default();
-        bmi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
-        bmi.bmiHeader.biWidth = w;
-        bmi.bmiHeader.biHeight = -h;
-        bmi.bmiHeader.biPlanes = 1;
-        bmi.bmiHeader.biBitCount = 32;
-        bmi.bmiHeader.biCompression = BI_RGB.0;
-        let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
-        let Ok(bmp) = CreateDIBSection(Some(mem_dc), &bmi, DIB_RGB_COLORS, &mut bits, None, 0)
-        else {
-            SelectObject(mem_dc, old_ss_bmp);
-            let _ = DeleteObject(ss_bmp.into());
-            let _ = DeleteDC(mem_dc);
-            let _ = ReleaseDC(None, screen_dc);
-            return false;
-        };
-        let px = bits as *mut u32;
-
-        let (ink_r, ink_g, ink_b) = if dark {
-            (255u32, 255u32, 255u32)
-        } else {
-            (0u32, 0u32, 0u32)
-        };
-        let (base_r, base_g, base_b) = if dark {
-            (32u32, 32u32, 32u32)
-        } else {
-            (249u32, 249u32, 249u32)
-        };
-        let base_alpha = if material { 1u32 } else { 255 };
-        // WinUI flyouts paint item hover with SubtleFillColorSecondary
-        // (#09000000 light, #0FFFFFFF dark), not a full-strength wash.
-        let hover_alpha = if dark { 0x0Fu32 } else { 0x09 };
-        // WinUI's DividerStrokeColorDefault: #15FFFFFF in dark, #0F000000 in
-        // light. The old 30/24 values were darker than the system flyouts and
-        // read as a hard rule instead of a hairline.
-        let separator_alpha = if dark { 0x15u32 } else { 0x0F };
-        let separator_lines: Vec<i32> = entries
-            .iter()
-            .enumerate()
-            .filter_map(|(index, entry)| {
-                if !entry.separator {
-                    return None;
-                }
-                rows.get(index)
-                    .map(|row| row.top + (row.bottom - row.top) / 2)
-            })
-            .collect();
-        let hover_pill = hover
-            .and_then(|index| {
-                entries
-                    .get(index)
-                    .filter(|entry| !entry.separator)
-                    .and_then(|_| rows.get(index))
-            })
-            .map(|row| {
-                let left = item_margin_x.min(w / 2);
-                let right = (w - item_margin_x).max(left);
-                let top = (row.top + item_margin_y).min(row.bottom);
-                let bottom = (row.bottom - item_margin_y).max(top);
-                let pw = (right - left).max(0);
-                let ph = (bottom - top).max(0);
-                let radius = item_radius.min(pw / 2).min(ph / 2);
-                let hx = (pw - 2 * radius).max(0) as f32 / 2.0;
-                let hy = (ph - 2 * radius).max(0) as f32 / 2.0;
-                let cx = left as f32 + pw as f32 / 2.0;
-                let cy = top as f32 + ph as f32 / 2.0;
-                (radius as f32, hx, hy, cx, cy)
-            });
-
-        for y in 0..h {
-            for x in 0..w {
-                let mut acc = 0u32;
-                for dy in 0..SS {
-                    for dx in 0..SS {
-                        acc += *ss_px.add(((y * SS + dy) * sw + (x * SS + dx)) as usize) & 0xFF;
-                    }
-                }
-                let cov = acc / (SS * SS) as u32;
-
-                // Premultiplied base: transparent (alpha 1) over a live
-                // material, opaque when the backdrop is unavailable.
-                let mut a = base_alpha;
-                let (mut r, mut g, mut b) = if base_alpha == 255 {
-                    (base_r, base_g, base_b)
-                } else {
-                    (0u32, 0u32, 0u32)
-                };
-
-                // Rounded item highlight: WinUI insets the hover fill 4px
-                // horizontally and 2px vertically inside the item slot and
-                // rounds it with ControlCornerRadius (4px).
-                let hover_cov = hover_pill.map_or(0.0, |(radius, hx, hy, cx, cy)| {
-                    let ddx = ((x as f32 + 0.5) - cx).abs() - hx;
-                    let ddy = ((y as f32 + 0.5) - cy).abs() - hy;
-                    let dist = (ddx.max(0.0).powi(2) + ddy.max(0.0).powi(2)).sqrt() - radius;
-                    (1.0 - dist.max(0.0)).clamp(0.0, 1.0)
-                });
-                let hover_a = (hover_alpha as f32 * hover_cov) as u32;
-                if hover_a > 0 {
-                    r = (ink_r * hover_a + r * (255 - hover_a)) / 255;
-                    g = (ink_g * hover_a + g * (255 - hover_a)) / 255;
-                    b = (ink_b * hover_a + b * (255 - hover_a)) / 255;
-                    a = hover_a + a * (255 - hover_a) / 255;
-                }
-
-                if separator_lines.contains(&y) {
-                    r = (ink_r * separator_alpha + r * (255 - separator_alpha)) / 255;
-                    g = (ink_g * separator_alpha + g * (255 - separator_alpha)) / 255;
-                    b = (ink_b * separator_alpha + b * (255 - separator_alpha)) / 255;
-                    a = separator_alpha + a * (255 - separator_alpha) / 255;
-                }
-
-                // WinUI's TextFillColorPrimary is #E4000000 in light (89.4%
-                // black), not pure black. Keep the glyph ink black and fold
-                // the opacity into the coverage so the text weight matches.
-                let text_cov = if dark { cov } else { cov * 0xE4 / 255 };
-                if text_cov > 0 {
-                    r = (ink_r * text_cov + r * (255 - text_cov)) / 255;
-                    g = (ink_g * text_cov + g * (255 - text_cov)) / 255;
-                    b = (ink_b * text_cov + b * (255 - text_cov)) / 255;
-                    a = text_cov + a * (255 - text_cov) / 255;
-                }
-
-                *px.add((y * w + x) as usize) =
-                    (a.min(255) << 24) | (r.min(255) << 16) | (g.min(255) << 8) | b.min(255);
-            }
-        }
-
-        let old_bmp = SelectObject(mem_dc, bmp.into());
-        let src_pt = POINT { x: 0, y: 0 };
-        let size = SIZE { cx: w, cy: h };
-        let blend = BLENDFUNCTION {
-            BlendOp: AC_SRC_OVER as u8,
-            BlendFlags: 0,
-            SourceConstantAlpha: 255,
-            AlphaFormat: AC_SRC_ALPHA as u8,
-        };
-        // Passing no destination point leaves the child at the position it
-        // was created at; only the surface is replaced.
-        let updated = UpdateLayeredWindow(
-            content,
-            None,
-            None,
-            Some(&size),
-            Some(mem_dc),
-            Some(&src_pt),
-            COLORREF(0),
-            Some(&blend),
-            ULW_ALPHA,
-        )
-        .is_ok();
-        if !updated && !MENU_RENDER_FAIL_LOGGED.swap(true, Ordering::Relaxed) {
-            log_event("WARN", "menu content UpdateLayeredWindow failed");
-        }
-        if updated {
-            MENU_RENDER_FAIL_LOGGED.store(false, Ordering::Relaxed);
-        }
-
-        SelectObject(mem_dc, old_bmp);
-        let _ = DeleteObject(bmp.into());
-        SelectObject(mem_dc, old_ss_bmp);
-        let _ = DeleteObject(ss_bmp.into());
-        let _ = DeleteDC(mem_dc);
-        let _ = ReleaseDC(None, screen_dc);
-        updated
-    }
-
-    unsafe extern "system" fn menu_wndproc(
-        hwnd: HWND,
-        msg: u32,
-        wparam: WPARAM,
-        lparam: LPARAM,
-    ) -> LRESULT {
-        match msg {
-            WM_ERASEBKGND => LRESULT(1),
-            WM_PAINT => {
-                // The parent intentionally paints nothing: its client is the
-                // DWM material. Text and hover live in the layered child.
-                let mut ps: PAINTSTRUCT = std::mem::zeroed();
-                let _ = BeginPaint(hwnd, &mut ps);
-                let _ = EndPaint(hwnd, &ps);
-                LRESULT(0)
-            }
-            WM_MOUSEMOVE => {
-                update_menu_hover(hwnd, lparam);
-                LRESULT(0)
-            }
-            WM_LBUTTONDOWN => {
-                if menu_point_in_client(hwnd, lparam) {
-                    update_menu_hover(hwnd, lparam);
-                } else {
-                    close_menu(hwnd);
-                }
-                LRESULT(0)
-            }
-            WM_LBUTTONUP => {
-                if let Some(index) = menu_hit_test(lparam) {
-                    let id = MENU_STATE.with(|slot| {
-                        let slot = slot.borrow();
-                        slot.as_ref()
-                            .and_then(|state| state.entries.get(index))
-                            .map(|entry| entry.id)
-                    });
-                    if let Some(id) = id {
-                        if id != 0 {
-                            MENU_CHOICE.store(id, Ordering::Relaxed);
-                            close_menu(hwnd);
-                        }
-                    }
-                } else if !menu_point_in_client(hwnd, lparam) {
-                    close_menu(hwnd);
-                }
-                LRESULT(0)
-            }
-            WM_RBUTTONUP | WM_MOUSEWHEEL => {
-                close_menu(hwnd);
-                LRESULT(0)
-            }
-            WM_KEYDOWN => {
-                let key = wparam.0 as u16;
-                if key == VK_ESCAPE.0 {
-                    close_menu(hwnd);
-                } else if key == VK_UP.0 || key == VK_DOWN.0 {
-                    let up = key == VK_UP.0;
-                    let moved = MENU_STATE.with(|slot| {
-                        let mut slot = slot.borrow_mut();
-                        let Some(state) = slot.as_mut() else {
-                            return false;
-                        };
-                        let selectable: Vec<usize> = state
-                            .entries
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, entry)| !entry.separator)
-                            .map(|(index, _)| index)
-                            .collect();
-                        if selectable.is_empty() {
-                            return false;
-                        }
-                        let next = match state
-                            .hover
-                            .and_then(|hover| selectable.iter().position(|index| *index == hover))
-                        {
-                            Some(position) if up => {
-                                selectable[(position + selectable.len() - 1) % selectable.len()]
-                            }
-                            Some(position) => selectable[(position + 1) % selectable.len()],
-                            None if up => *selectable.last().unwrap(),
-                            None => selectable[0],
-                        };
-                        state.hover = Some(next);
-                        true
-                    });
-                    if moved {
-                        let _ = render_menu_content(hwnd);
-                    }
-                } else if key == VK_RETURN.0 {
-                    let choice = MENU_STATE.with(|slot| {
-                        let slot = slot.borrow();
-                        let state = slot.as_ref()?;
-                        let index = state.hover?;
-                        state.entries.get(index).map(|entry| entry.id)
-                    });
-                    if let Some(id) = choice {
-                        if id != 0 {
-                            MENU_CHOICE.store(id, Ordering::Relaxed);
-                            close_menu(hwnd);
-                        }
-                    }
-                }
-                LRESULT(0)
-            }
-            WM_ACTIVATE => {
-                let active = (wparam.0 & 0xFFFF) != 0;
-                let should_close = MENU_STATE.with(|slot| {
-                    let mut slot = slot.borrow_mut();
-                    let Some(state) = slot.as_mut() else {
-                        return false;
-                    };
-                    if active {
-                        state.active_once = true;
-                        false
-                    } else {
-                        state.active_once
-                    }
-                });
-                if should_close {
-                    close_menu(hwnd);
-                }
-                LRESULT(0)
-            }
-            WM_CAPTURECHANGED => {
-                let closing = MENU_STATE
-                    .with(|slot| slot.borrow().as_ref().map_or(true, |state| state.closing));
-                if !closing && (lparam.0 as isize) != (hwnd.0 as isize) {
-                    close_menu(hwnd);
-                }
-                LRESULT(0)
-            }
-            WM_TIMER => {
-                if wparam.0 == TIMER_MENU_ESC
-                    && (GetAsyncKeyState(VK_ESCAPE.0 as i32) as u16 & 0x8000) != 0
-                {
-                    close_menu(hwnd);
-                }
-                LRESULT(0)
-            }
-            WM_DESTROY => {
-                let _ = KillTimer(Some(hwnd), TIMER_MENU_ESC);
-                let _ = ReleaseCapture();
-                let state = MENU_STATE.with(|slot| slot.borrow_mut().take());
-                if let Some(state) = state {
-                    // Owned windows die with the menu, but destroy the overlay
-                    // first so it cannot linger above the desktop for a frame.
-                    if !state.content.is_invalid() && IsWindow(Some(state.content)).as_bool() {
-                        let _ = DestroyWindow(state.content);
-                    }
-                    if !state.owner.is_invalid() {
-                        let _ =
-                            PostMessageW(Some(state.owner), WM_APP_MENU_DONE, WPARAM(0), LPARAM(0));
-                    }
-                }
-                LRESULT(0)
-            }
-            _ => DefWindowProcW(hwnd, msg, wparam, lparam),
-        }
-    }
-
-    /// Message proc for the layered content window. The window is
-    /// click-through and paints only through `UpdateLayeredWindow`, so all
-    /// messages can go straight to the default handler. A wrapper is required
-    /// because the windows crate exposes `DefWindowProcW` as a Rust-ABI
-    /// function, which is not itself the `extern "system"` proc-pointer type
-    /// `WNDCLASS` wants.
-    unsafe extern "system" fn menu_content_wndproc(
-        hwnd: HWND,
-        msg: u32,
-        wparam: WPARAM,
-        lparam: LPARAM,
-    ) -> LRESULT {
-        DefWindowProcW(hwnd, msg, wparam, lparam)
-    }
-
-    /// A DWM-material popup menu. Returns `None` only when the menu or its
-    /// content overlay could not be created, so the caller can fall back to
-    /// the classic menu.
-    unsafe fn show_custom_menu(owner: HWND, entries: &[MenuEntry]) -> Option<usize> {
-        let scale = GetDpiForWindow(owner).max(96) as f32 / 96.0;
-        let row_h = (MENU_ROW_PX as f32 * scale).round() as i32;
-        let separator_h = (MENU_SEPARATOR_PX as f32 * scale).round() as i32;
-        let pad_x = (MENU_PAD_X_PX as f32 * scale).round() as i32;
-        let pad_y = (MENU_PAD_Y_PX as f32 * scale).round() as i32;
-        let font = menu_font(scale);
-
-        let screen_dc = GetDC(None);
-        let old_font = SelectObject(screen_dc, font.into());
-        let mut max_text_w = 0;
-        for entry in entries.iter().filter(|entry| !entry.separator) {
-            let label = utf16(&entry.label);
-            let mut size = SIZE::default();
-            GetTextExtentPoint32W(screen_dc, &label, &mut size);
-            max_text_w = max_text_w.max(size.cx);
-        }
-        SelectObject(screen_dc, old_font);
-        let _ = ReleaseDC(None, screen_dc);
-        let _ = DeleteObject(font.into());
-
-        let width = (max_text_w + 2 * pad_x).max((MENU_MIN_W_PX as f32 * scale).round() as i32);
-        let mut rows = Vec::with_capacity(entries.len());
-        let mut y = pad_y;
-        for entry in entries {
-            let row_height = if entry.separator { separator_h } else { row_h };
-            rows.push(RECT {
-                left: 0,
-                top: y,
-                right: width,
-                bottom: y + row_height,
-            });
-            y += row_height;
-        }
-        let height = y + pad_y;
-
-        let mut point = POINT::default();
-        let _ = GetCursorPos(&mut point);
-        let monitor = MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST);
-        let mut monitor_info = MONITORINFO {
-            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-            ..Default::default()
-        };
-        let work = if GetMonitorInfoW(monitor, &mut monitor_info).as_bool() {
-            monitor_info.rcWork
-        } else {
-            RECT {
-                left: 0,
-                top: 0,
-                right: GetSystemMetrics(SM_CXSCREEN),
-                bottom: GetSystemMetrics(SM_CYSCREEN),
-            }
-        };
-        let mut x = point.x;
-        if x + width > work.right {
-            x = point.x - width;
-        }
-        let mut menu_y = point.y;
-        if menu_y + height > work.bottom {
-            menu_y = point.y - height;
-        }
-        let x = x.max(work.left);
-        let menu_y = menu_y.max(work.top);
-
-        let Ok(module) = GetModuleHandleW(None) else {
-            return None;
-        };
-        let class = utf16("SysVitalsMenu");
-        let title = utf16("SysVitals");
-        let hwnd = match CreateWindowExW(
-            WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
-            windows::core::PCWSTR(class.as_ptr()),
-            windows::core::PCWSTR(title.as_ptr()),
-            WS_POPUP,
-            x,
-            menu_y,
-            width,
-            height,
-            Some(owner),
-            None,
-            Some(module.into()),
-            None,
-        ) {
-            Ok(hwnd) => hwnd,
-            Err(e) => {
-                log_event("WARN", &format!("custom menu create failed: {e}"));
-                return None;
-            }
-        };
-
-        let mut material = false;
-        if menu_material_available() {
-            // Acrylic is the material the shell uses for transient surfaces
-            // such as menus and flyouts; Mica is reserved for app windows.
-            let backdrop = DWMSBT_TRANSIENTWINDOW.0;
-            let backdrop_ok = DwmSetWindowAttribute(
-                hwnd,
-                DWMWA_SYSTEMBACKDROP_TYPE,
-                &backdrop as *const i32 as *const std::ffi::c_void,
-                4,
-            )
-            .is_ok();
-            if backdrop_ok {
-                let margins = MARGINS {
-                    cxLeftWidth: -1,
-                    cxRightWidth: -1,
-                    cyTopHeight: -1,
-                    cyBottomHeight: -1,
-                };
-                material = DwmExtendFrameIntoClientArea(hwnd, &margins).is_ok();
-                let corner = DWMWCP_ROUND.0;
-                let _ = DwmSetWindowAttribute(
-                    hwnd,
-                    DWMWA_WINDOW_CORNER_PREFERENCE,
-                    &corner as *const i32 as *const std::ffi::c_void,
-                    4,
-                );
-                let immersive_dark = if LIGHT_THEME.load(Ordering::Relaxed) == 0 {
-                    1i32
-                } else {
-                    0i32
-                };
-                let _ = DwmSetWindowAttribute(
-                    hwnd,
-                    DWMWA_USE_IMMERSIVE_DARK_MODE,
-                    &immersive_dark as *const i32 as *const std::ffi::c_void,
-                    4,
-                );
-            } else {
-                log_event("WARN", "menu backdrop attribute rejected; painting opaque");
-            }
-        }
-
-        let content_class = utf16("SysVitalsMenuContent");
-        // A top-level, owned, click-through overlay rather than a WS_CHILD:
-        // layered child creation fails on some hosts (CreateWindowExW returns
-        // NULL with ERROR_SUCCESS), while the same surface works as a popup
-        // here (the indicator is one). Ownership keeps it above the material
-        // window, and WS_EX_TRANSPARENT forwards every click to the menu.
-        let content = match CreateWindowExW(
-            WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST,
-            windows::core::PCWSTR(content_class.as_ptr()),
-            windows::core::PCWSTR(title.as_ptr()),
-            WS_POPUP,
-            x,
-            menu_y,
-            width,
-            height,
-            Some(hwnd),
-            None,
-            Some(module.into()),
-            None,
-        ) {
-            Ok(content) => content,
-            Err(e) => {
-                log_event(
-                    "WARN",
-                    &format!(
-                        "menu content create failed: {e} (class atom={}, material={material}, \
-                         dpi={scale}, size={width}x{height})",
-                        MENU_CONTENT_CLASS_ATOM.load(Ordering::Relaxed)
-                    ),
-                );
-                let _ = DestroyWindow(hwnd);
-                return None;
-            }
-        };
-
-        MENU_CHOICE.store(0, Ordering::Relaxed);
-        MENU_STATE.with(|slot| {
-            *slot.borrow_mut() = Some(MenuState {
-                owner,
-                content,
-                entries: entries.to_vec(),
-                rows,
-                scale,
-                hover: None,
-                material,
-                active_once: false,
-                closing: false,
-            });
-        });
-
-        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-        if !render_menu_content(hwnd) {
-            let _ = DestroyWindow(hwnd);
-            let _ = MENU_STATE.with(|slot| slot.borrow_mut().take());
-            return None;
-        }
-        let _ = ShowWindow(content, SW_SHOWNOACTIVATE);
-        if !MENU_ACTIVE_LOGGED.swap(true, Ordering::Relaxed) {
-            log_event(
-                "INFO",
-                &format!(
-                    "custom menu active (dpi={scale}, material={material}, size={width}x{height})"
-                ),
-            );
-        }
-        let _ = SetForegroundWindow(hwnd);
-        let _ = SetFocus(Some(hwnd));
-        SetCapture(hwnd);
-        let _ = SetTimer(Some(hwnd), TIMER_MENU_ESC, 60, None);
-
-        let mut msg = MSG::default();
-        let mut quit_after = false;
-        loop {
-            let result = GetMessageW(&mut msg, None, 0, 0);
-            if result.0 <= 0 {
-                quit_after = result.0 == 0;
-                break;
-            }
-            if msg.message == WM_APP_MENU_DONE {
-                break;
-            }
-            let _ = TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
-        if IsWindow(Some(hwnd)).as_bool() {
-            let _ = DestroyWindow(hwnd);
-        }
-        // A WM_QUIT can end the loop before WM_DESTROY reaches the menu.
-        let _ = MENU_STATE.with(|slot| slot.borrow_mut().take());
-        if quit_after {
-            PostQuitMessage(msg.wParam.0 as i32);
-        }
-        Some(MENU_CHOICE.load(Ordering::Relaxed))
-    }
-
-    /// Classic `TrackPopupMenu` fallback for the unlikely case the custom
-    /// menu window cannot be created. It keeps the menu usable instead of
-    /// silently doing nothing on an older/odd host.
+    /// The context menu is the system popup menu. It is the only menu
+    /// surface the shell renders natively, so it keeps system theming,
+    /// hit-testing and dismissal semantics without a second message loop.
     unsafe fn show_native_menu(owner: HWND, entries: &[MenuEntry]) -> Option<usize> {
         let menu = CreatePopupMenu().ok()?;
         for entry in entries {
@@ -3045,15 +2219,12 @@ mod win {
         // Keep maintain_topmost from lifting the overlay above the menu while
         // it is open (the modal loop still dispatches our WM_TIMER).
         MENU_TRACKING.store(true, Ordering::Relaxed);
-        let choice = match show_custom_menu(hwnd, &entries) {
+        let choice = match show_native_menu(hwnd, &entries) {
             Some(choice) => choice,
-            None => match show_native_menu(hwnd, &entries) {
-                Some(choice) => choice,
-                None => {
-                    log_event("WARN", "menu: both the custom and classic menus failed");
-                    0
-                }
-            },
+            None => {
+                log_event("WARN", "menu: the system menu could not be created");
+                0
+            }
         };
         MENU_TRACKING.store(false, Ordering::Relaxed);
         perform_menu_choice(hwnd, choice);
@@ -3490,11 +2661,10 @@ mod win {
             log_event(
                 "INFO",
                 &format!(
-                    "environment: win11_centered_taskbar={} dpi={} build={:?} menu_material={}",
+                    "environment: win11_centered_taskbar={} dpi={} build={:?}",
                     centered,
                     GetDpiForSystem(),
-                    os_build_number(),
-                    menu_material_available()
+                    os_build_number()
                 ),
             );
 
@@ -3518,37 +2688,6 @@ mod win {
             };
             if RegisterClassExW(&wc) == 0 {
                 return;
-            }
-
-            // The context menu is its own top-level popup so it can ask DWM
-            // for the acrylic backdrop; classic HMENUs have no such channel.
-            let menu_class_name = utf16("SysVitalsMenu");
-            let menu_wc = WNDCLASSEXW {
-                cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
-                style: CS_HREDRAW | CS_VREDRAW,
-                lpfnWndProc: Some(menu_wndproc),
-                hInstance: hmodule.into(),
-                lpszClassName: windows::core::PCWSTR(menu_class_name.as_ptr()),
-                ..Default::default()
-            };
-            if RegisterClassExW(&menu_wc) == 0 {
-                log_event("WARN", "custom menu class registration failed");
-            }
-            // The overlay receives no messages: it is click-through and its
-            // surface is driven exclusively by UpdateLayeredWindow.
-            let content_class_name = utf16("SysVitalsMenuContent");
-            let content_wc = WNDCLASSEXW {
-                cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
-                lpfnWndProc: Some(menu_content_wndproc),
-                hInstance: hmodule.into(),
-                lpszClassName: windows::core::PCWSTR(content_class_name.as_ptr()),
-                ..Default::default()
-            };
-            let content_atom = RegisterClassExW(&content_wc);
-            if content_atom == 0 {
-                log_event("WARN", "menu content class registration failed");
-            } else {
-                MENU_CONTENT_CLASS_ATOM.store(content_atom as usize, Ordering::Relaxed);
             }
 
             // The sentinel is a hidden top-level window that is deliberately
