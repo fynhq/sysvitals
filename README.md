@@ -85,22 +85,28 @@ SysVitals has no built-in auto-update; install a newer release manually.
 
 ### Verify the download
 
-Each zip has a matching `.sha256` file.
+Each release provides a single `SHA256SUMS` file covering all archives. Download it and the archive(s) you want to check into the same folder.
 
 **Windows (PowerShell)**
 
 ```powershell
-Get-FileHash .\SysVitals_Windows_x64_v<version>.zip -Algorithm SHA256
-Get-Content .\SysVitals_Windows_x64_v<version>.zip.sha256
+Get-Content .\SHA256SUMS | ForEach-Object {
+  $hash, $file = $_ -split '\s+', 2
+  $file = $file.Trim()
+  if (Test-Path ".\$file") {
+    $actual = (Get-FileHash ".\$file" -Algorithm SHA256).Hash.ToLower()
+    "{0}: {1}" -f $file, $(if ($actual -eq $hash) { "OK" } else { "MISMATCH" })
+  }
+}
 ```
 
 **macOS**
 
 ```sh
-shasum -a 256 -c SysVitals_macOS_arm64_v<version>.zip.sha256
+shasum -a 256 -c --ignore-missing SHA256SUMS
 ```
 
-Checksums verify download integrity, not a signature.
+Archives you did not download are skipped. Checksums verify download integrity, not a signature.
 
 ### Data and uninstall
 
@@ -230,22 +236,28 @@ SysVitals 没有内置自动更新；需要手动安装新版。
 
 ### 校验下载
 
-每个 zip 都有同名 `.sha256`。
+每次发布提供一个 `SHA256SUMS`，覆盖全部压缩包。把它与要校验的压缩包下载到同一目录。
 
 **Windows（PowerShell）**
 
 ```powershell
-Get-FileHash .\SysVitals_Windows_x64_v<version>.zip -Algorithm SHA256
-Get-Content .\SysVitals_Windows_x64_v<version>.zip.sha256
+Get-Content .\SHA256SUMS | ForEach-Object {
+  $hash, $file = $_ -split '\s+', 2
+  $file = $file.Trim()
+  if (Test-Path ".\$file") {
+    $actual = (Get-FileHash ".\$file" -Algorithm SHA256).Hash.ToLower()
+    "{0}: {1}" -f $file, $(if ($actual -eq $hash) { "OK" } else { "MISMATCH" })
+  }
+}
 ```
 
 **macOS**
 
 ```sh
-shasum -a 256 -c SysVitals_macOS_arm64_v<version>.zip.sha256
+shasum -a 256 -c --ignore-missing SHA256SUMS
 ```
 
-校验只保证下载完整，不代表签名。
+未下载的压缩包会被跳过。校验只保证下载完整，不代表签名。
 
 ### 数据与卸载
 

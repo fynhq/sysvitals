@@ -220,9 +220,9 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # Release gate: tag pushes only. The four build legs have already produced
-  # the formal zips; this job validates their contents, writes the per-archive
-  # .sha256 files, creates a draft Release, uploads and re-downloads the assets
-  # to verify them, then publishes the Release.
+  # the formal zips; this job validates their contents, writes a single sorted
+  # SHA256SUMS manifest, creates a draft Release, uploads and re-downloads the
+  # assets to verify them, then publishes the Release.
   #
   # Versions containing a suffix are still marked --prerelease for
   # compatibility, but the current release flow publishes final versions only;
@@ -326,10 +326,12 @@ jobs:
           print(f"plist ok: {base} / {plist['CFBundleVersion']}")
           PY
 
+          : > SHA256SUMS
           for zip in "${expected[@]}"; do
-            sha256sum "$zip" > "$zip.sha256"
+            sha256sum "$zip" >> SHA256SUMS
           done
-          echo "checksums written for ${#expected[@]} archives"
+          LC_ALL=C sort -k 2,2 SHA256SUMS -o SHA256SUMS
+          echo "SHA256SUMS written for ${#expected[@]} archives"
       - name: Create draft release
         shell: bash
         env:
@@ -344,9 +346,6 @@ jobs:
             if [ "$is_draft" != "true" ]; then
               echo "release $TAG is already published" >&2
               exit 1
-            fi
-            if gh release view "$TAG" --json assets --jq '.assets[].name' | grep -Fxq SHA256SUMS; then
-              gh release delete-asset "$TAG" SHA256SUMS --yes
             fi
             gh release upload "$TAG" release-assets/* --clobber
           else
@@ -366,14 +365,15 @@ jobs:
           mkdir -p verify
           gh release download "$TAG" --dir verify
           cd verify
-          if [ -e SHA256SUMS ]; then
-            echo "SHA256SUMS must not be published" >&2
+          test -f SHA256SUMS || { echo "missing asset: SHA256SUMS" >&2; exit 1; }
+          if compgen -G '*.sha256' > /dev/null; then
+            echo "per-archive .sha256 files must not be published" >&2
             exit 1
           fi
-          for f in SysVitals_*.zip; do
-            test -f "$f.sha256"
-            sha256sum -c "$f.sha256"
-          done
+          awk '{print $2}' SHA256SUMS | LC_ALL=C sort > /tmp/sums-zips
+          printf '%s\n' SysVitals_*.zip | LC_ALL=C sort > /tmp/published-zips
+          diff -u /tmp/sums-zips /tmp/published-zips
+          sha256sum -c --strict SHA256SUMS
           echo "uploaded assets verified"
       - name: Publish release
         shell: bash
