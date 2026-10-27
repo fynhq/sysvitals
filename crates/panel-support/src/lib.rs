@@ -26,6 +26,14 @@ pub enum PanelSurface {
     History,
 }
 
+/// Corner radius shared by every panel control (buttons, inputs, dropdowns).
+/// Windows uses WinUI's `ControlCornerRadius` (4px), which also stays visually
+/// nested inside its 8px cards; macOS keeps the library's 6px.
+#[cfg(windows)]
+pub const CONTROL_RADIUS: f32 = 4.0;
+#[cfg(not(windows))]
+pub const CONTROL_RADIUS: f32 = 6.0;
+
 /// The Windows OS build number, or `None` if the version probe fails.
 ///
 /// `RtlGetVersion` is the documented way to read the real build (the classic

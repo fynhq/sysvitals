@@ -48,7 +48,9 @@ use sysvitals_core::i18n::{t, Language};
 use sysvitals_core::store::{floor_to_grid, spread_label_indices, Bucket, Store};
 #[cfg(windows)]
 use sysvitals_panel::panel_font_family;
-use sysvitals_panel::{backdrop_for, detect_material, system_accent_hex, PanelSurface};
+use sysvitals_panel::{
+    backdrop_for, detect_material, system_accent_hex, PanelSurface, CONTROL_RADIUS,
+};
 
 /// Screen rectangle of the indicator, passed by the overlay in GPUI's
 /// global logical pixel space (top-left origin, y growing downward).
@@ -1133,6 +1135,7 @@ impl Render for HistoryView {
             let label = r.label(lang).to_string();
             let btn = Button::new(format!("range-{:?}", r))
                 .small()
+                .rounded(px(CONTROL_RADIUS))
                 .when(is_active, |b| b.primary())
                 .label(label)
                 .on_click(cx.listener(move |this: &mut Self, _: &ClickEvent, _, cx| {
@@ -1156,6 +1159,7 @@ impl Render for HistoryView {
 
         let copy_btn = Button::new("copy-csv")
             .small()
+            .rounded(px(CONTROL_RADIUS))
             .tooltip(copy_tip)
             .when(copied, |b| {
                 b.icon(IconName::CircleCheck)
@@ -1358,7 +1362,7 @@ impl Render for HistoryView {
 // ---------------------------------------------------------------------------
 
 /// Re-apply the shared theme/accent/material stack, then the history-only
-/// chart-grid and font overrides.
+/// chart-grid, button-state and font overrides.
 fn apply_theme_and_accent(cx: &mut App) {
     sysvitals_panel::apply_theme_and_accent(cx, PanelSurface::History);
     // The library's `chart_grid` falls back to `border.opacity(0.6)`, and
@@ -1367,6 +1371,23 @@ fn apply_theme_and_accent(cx: &mut App) {
     // light hairlines on dark, dark hairlines on light.
     UiTheme::update(cx, |theme| {
         theme.colors.chart_grid = theme.foreground.opacity(0.12);
+    });
+    // The button hover/active fills are translucent neutral layers. Windows'
+    // renderer accumulates alpha across nested translucent layers, so over
+    // this popup's material-tinted page the hover surface renders as a mid
+    // gray. Use the opaque equivalents of what the settings window shows
+    // over its opaque cards, so hovering a range or copy button reads the
+    // same in both panels. macOS composites alpha correctly and keeps the
+    // library colors.
+    #[cfg(windows)]
+    UiTheme::update(cx, |theme| {
+        let (hover, active) = if theme.mode.is_dark() {
+            (hsla(0., 0., 0.176, 1.), hsla(0., 0., 0.173, 1.))
+        } else {
+            (hsla(0., 0., 0.941, 1.), hsla(0., 0., 0.957, 1.))
+        };
+        theme.colors.button_hover = hover;
+        theme.colors.button_active = active;
     });
     // Win11's Segoe UI Variable has an optical-size axis tuned for UI text;
     // the palette reload above may reset the family, so re-apply it here.

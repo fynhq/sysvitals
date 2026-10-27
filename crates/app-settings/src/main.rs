@@ -42,7 +42,9 @@ use sysvitals_core::config::{
     ALLOWED_INTERVAL_MS, ALLOWED_ITEM_SPACING_PX, ALLOWED_LEFT_MARGIN_PX,
 };
 use sysvitals_core::{Anchor, Config, Language, Theme, t};
-use sysvitals_panel::{PanelSurface, backdrop_for, detect_material, system_accent_hex};
+use sysvitals_panel::{
+    CONTROL_RADIUS, PanelSurface, backdrop_for, detect_material, system_accent_hex,
+};
 #[cfg(windows)]
 use sysvitals_panel::{hkcu_dword, panel_font_family};
 
@@ -777,15 +779,6 @@ impl SettingsView {
 fn section_label(text: String, dim: Hsla) -> impl IntoElement {
     div().text_xs().font_semibold().text_color(dim).child(text)
 }
-
-/// Windows uses WinUI's `ControlCornerRadius` (4px) inside its 8px card
-/// (`OverlayCornerRadius`), so the nested corners keep a clear hierarchy
-/// instead of competing with the card's radius. macOS keeps the library's 6px
-/// controls inside its 10px card.
-#[cfg(windows)]
-const CONTROL_RADIUS: f32 = 4.0;
-#[cfg(not(windows))]
-const CONTROL_RADIUS: f32 = 6.0;
 
 /// A grouped option surface. Windows keeps the WinUI card (8px radius plus
 /// an optional hairline when the opaque light fill would melt into a bright
