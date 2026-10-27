@@ -727,6 +727,7 @@ mod win {
     static CLOAK_MOVE_FAIL_LOGGED: AtomicBool = AtomicBool::new(false);
     static LAYERED_FAIL_LOGGED: AtomicBool = AtomicBool::new(false);
     static MENU_RENDER_FAIL_LOGGED: AtomicBool = AtomicBool::new(false);
+    static MENU_ACTIVE_LOGGED: AtomicBool = AtomicBool::new(false);
 
     /// The Windows virtual-desktop manager, created on demand. The overlay is
     /// a top-level window, so Windows cloaks it when the user switches to
@@ -2165,8 +2166,8 @@ mod win {
 
     struct MenuState {
         owner: HWND,
-        /// Layered child that draws the text and hover state over the parent
-        /// material. Being a child, it moves and clips with the menu for free.
+        /// Layered click-through overlay owned by the menu that draws the
+        /// text and hover state over the parent material.
         content: HWND,
         entries: Vec<MenuEntry>,
         rows: Vec<RECT>,
@@ -2304,7 +2305,7 @@ mod win {
         }
     }
 
-    /// Render text and hover/separator accents into the layered child
+    /// Render text and hover/separator accents into the layered content
     /// window. The parent only carries the DWM material, so this surface can
     /// be updated at any time without ever covering the backdrop.
     unsafe fn render_menu_content(owner: HWND) -> bool {
@@ -2335,11 +2336,6 @@ mod win {
 
         let dark = LIGHT_THEME.load(Ordering::Relaxed) == 0;
         let pad_x = (MENU_PAD_X_PX as f32 * scale).round() as i32;
-        // WinUI draws flyout dividers inside the presenter's 1px border, so
-        // the line stops just short of both window edges. At fractional DPI
-        // the border rounds to the nearest device pixel, matching the rest of
-        // the menu's physical-pixel layout.
-        let separator_inset = (scale.round() as i32).max(1);
         let item_margin_x = (MENU_ITEM_MARGIN_X_PX as f32 * scale).round() as i32;
         let item_margin_y = (MENU_ITEM_MARGIN_Y_PX as f32 * scale).round() as i32;
         let item_radius = (MENU_ITEM_RADIUS_PX as f32 * scale).round() as i32;
@@ -2435,8 +2431,6 @@ mod win {
         // light. The old 30/24 values were darker than the system flyouts and
         // read as a hard rule instead of a hairline.
         let separator_alpha = if dark { 0x15u32 } else { 0x0F };
-        let separator_left = separator_inset.min(w / 2);
-        let separator_right = (w - separator_inset).max(separator_left);
         let separator_lines: Vec<i32> = entries
             .iter()
             .enumerate()
@@ -2506,7 +2500,7 @@ mod win {
                     a = hover_a + a * (255 - hover_a) / 255;
                 }
 
-                if separator_lines.contains(&y) && x >= separator_left && x < separator_right {
+                if separator_lines.contains(&y) {
                     r = (ink_r * separator_alpha + r * (255 - separator_alpha)) / 255;
                     g = (ink_g * separator_alpha + g * (255 - separator_alpha)) / 255;
                     b = (ink_b * separator_alpha + b * (255 - separator_alpha)) / 255;
@@ -2713,6 +2707,11 @@ mod win {
                 let _ = ReleaseCapture();
                 let state = MENU_STATE.with(|slot| slot.borrow_mut().take());
                 if let Some(state) = state {
+                    // Owned windows die with the menu, but destroy the overlay
+                    // first so it cannot linger above the desktop for a frame.
+                    if !state.content.is_invalid() && IsWindow(Some(state.content)).as_bool() {
+                        let _ = DestroyWindow(state.content);
+                    }
                     if !state.owner.is_invalid() {
                         let _ =
                             PostMessageW(Some(state.owner), WM_APP_MENU_DONE, WPARAM(0), LPARAM(0));
@@ -2724,11 +2723,12 @@ mod win {
         }
     }
 
-    /// Message proc for the layered content child. The child is click-through
-    /// and paints only through `UpdateLayeredWindow`, so all messages can go
-    /// straight to the default handler. A wrapper is required because the
-    /// windows crate exposes `DefWindowProcW` as a Rust-ABI function, which is
-    /// not itself the `extern "system"` proc-pointer type `WNDCLASS` wants.
+    /// Message proc for the layered content window. The window is
+    /// click-through and paints only through `UpdateLayeredWindow`, so all
+    /// messages can go straight to the default handler. A wrapper is required
+    /// because the windows crate exposes `DefWindowProcW` as a Rust-ABI
+    /// function, which is not itself the `extern "system"` proc-pointer type
+    /// `WNDCLASS` wants.
     unsafe extern "system" fn menu_content_wndproc(
         hwnd: HWND,
         msg: u32,
@@ -2738,8 +2738,9 @@ mod win {
         DefWindowProcW(hwnd, msg, wparam, lparam)
     }
 
-    /// A DWM-material popup menu. Returns `None` only when the window could
-    /// not be created, so the caller can fall back to the classic menu.
+    /// A DWM-material popup menu. Returns `None` only when the menu or its
+    /// content overlay could not be created, so the caller can fall back to
+    /// the classic menu.
     unsafe fn show_custom_menu(owner: HWND, entries: &[MenuEntry]) -> Option<usize> {
         let scale = GetDpiForWindow(owner).max(96) as f32 / 96.0;
         let row_h = (MENU_ROW_PX as f32 * scale).round() as i32;
@@ -2874,13 +2875,18 @@ mod win {
         }
 
         let content_class = utf16("SysVitalsMenuContent");
+        // A top-level, owned, click-through overlay rather than a WS_CHILD:
+        // layered child creation fails on some hosts (CreateWindowExW returns
+        // NULL with ERROR_SUCCESS), while the same surface works as a popup
+        // here (the indicator is one). Ownership keeps it above the material
+        // window, and WS_EX_TRANSPARENT forwards every click to the menu.
         let content = match CreateWindowExW(
-            WS_EX_LAYERED | WS_EX_TRANSPARENT,
+            WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TOPMOST,
             windows::core::PCWSTR(content_class.as_ptr()),
             windows::core::PCWSTR(title.as_ptr()),
-            WS_CHILD,
-            0,
-            0,
+            WS_POPUP,
+            x,
+            menu_y,
             width,
             height,
             Some(hwnd),
@@ -2918,6 +2924,9 @@ mod win {
             return None;
         }
         let _ = ShowWindow(content, SW_SHOWNOACTIVATE);
+        if !MENU_ACTIVE_LOGGED.swap(true, Ordering::Relaxed) {
+            log_event("INFO", "custom menu active");
+        }
         let _ = SetForegroundWindow(hwnd);
         let _ = SetFocus(Some(hwnd));
         SetCapture(hwnd);
@@ -3479,7 +3488,7 @@ mod win {
             if RegisterClassExW(&menu_wc) == 0 {
                 log_event("WARN", "custom menu class registration failed");
             }
-            // The child receives no messages: it is click-through and its
+            // The overlay receives no messages: it is click-through and its
             // surface is driven exclusively by UpdateLayeredWindow.
             let content_class_name = utf16("SysVitalsMenuContent");
             let content_wc = WNDCLASSEXW {
