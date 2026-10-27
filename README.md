@@ -19,7 +19,7 @@ A lightweight CPU / memory / network monitor for the Windows taskbar and macOS m
 
 Measured with the release build running normally (all groups on, default 2 s sampling, no popup):
 
-- Windows 11 taskbar: **~17 MB** resident
+- Windows 11 taskbar: **~9 MB** resident
 - macOS 27 (Apple Silicon) menu bar: **~18 MB** resident
 
 ### Install
@@ -164,7 +164,7 @@ Released under the MIT License. See [LICENSE](LICENSE).
 
 真机实测，release 构建正常运行（指标全开、默认 2 秒采样、无弹窗）：
 
-- Windows 11 任务栏：常驻 **约 17 MB**
+- Windows 11 任务栏：常驻 **约 9 MB**
 - macOS 27（Apple Silicon）菜单栏：常驻 **约 18 MB**
 
 ### 安装
