@@ -91,7 +91,7 @@ jobs:
       # Portable (green) distribution: one SysVitals/ directory containing the
       # overlay, settings and history executables, LICENSE and the generated
       # third-party notices. Tag builds use the exact tag version, e.g.
-      # SysVitals_Windows_{arch}_v0.1.0-rc.1.zip; main builds keep the dev name
+      # SysVitals_Windows_{arch}_v0.1.0.zip; main builds keep the dev name
       # with the workspace version, short commit hash and `_dev` suffix.
       - name: Package Windows portable zip
         shell: pwsh
@@ -198,7 +198,7 @@ jobs:
           cp THIRD_PARTY_NOTICES.md "$app/Contents/Resources/THIRD_PARTY_NOTICES.md"
           # The plist is a template; substitute the numeric base version and a
           # numeric build number so Finder/Get Info never shows a stale 0.0.0.
-          # rc tags keep the rc suffix in the zip/tag/settings footer, while
+          # Any version suffix stays in the zip/tag/settings footer, while
           # CFBundleShortVersionString stays a plain numeric version.
           # `github.run_number` is monotonic even on the default shallow clone;
           # `git rev-list --count HEAD` would always be 1 there.
@@ -224,10 +224,11 @@ jobs:
   # .sha256 files, creates a draft Release, uploads and re-downloads the assets
   # to verify them, then publishes the Release.
   #
-  # rc tags are marked --prerelease and are published as pre-releases once the
-  # assets are verified. The final 0.1.0 tag follows the same path without
-  # --prerelease. A failed verification leaves the Release as a draft so a
-  # re-run can complete it without exposing partial assets.
+  # Versions containing a suffix are still marked --prerelease for
+  # compatibility, but the current release flow publishes final versions only;
+  # the 0.1.0 tag follows the path without --prerelease. A failed verification
+  # leaves the Release as a draft so a re-run can complete it without exposing
+  # partial assets.
   # ---------------------------------------------------------------------------
   release:
     name: Release
