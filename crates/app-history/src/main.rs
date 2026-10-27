@@ -1607,16 +1607,14 @@ fn run_resident(cx: &mut App) {
                     let retry_due = last_activation_attempt
                         .is_none_or(|last| last.elapsed() > Duration::from_millis(100));
                     if (ready || timed_out) && retry_due {
-                        let active = cx
-                            .update(|app| {
-                                handle
-                                    .update(app, |_view, window, _| {
-                                        window.activate_window();
-                                        window.is_window_active()
-                                    })
-                                    .unwrap_or(false)
-                            })
-                            .unwrap_or(false);
+                        let active = cx.update(|app| {
+                            handle
+                                .update(app, |_view, window, _| {
+                                    window.activate_window();
+                                    window.is_window_active()
+                                })
+                                .unwrap_or(false)
+                        });
                         last_activation_attempt = Some(Instant::now());
                         if active {
                             activated = true;
