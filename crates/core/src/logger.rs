@@ -14,10 +14,11 @@
 //! Logging must never break the indicator, so every public function swallows
 //! I/O errors silently.
 
+use std::borrow::Cow;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 /// Default number of daily log files to keep.
 pub const DEFAULT_RETENTION_DAYS: u32 = 7;
@@ -30,6 +31,54 @@ pub fn log_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("logs")
 }
 
+/// `Component[pid]` prefix shared by every line from this process. Multiple
+/// SysVitals processes append to the same daily file, so a line without an
+/// owner is ambiguous. Cached because every log line uses it.
+fn process_tag() -> &'static str {
+    static TAG: OnceLock<String> = OnceLock::new();
+    TAG.get_or_init(|| {
+        let mut name = std::env::current_exe()
+            .ok()
+            .and_then(|path| {
+                path.file_stem()
+                    .map(|stem| stem.to_string_lossy().into_owned())
+            })
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| "sysvitals".to_string());
+        // The macOS bundle's main binary is `sysvitals`; the panels use the
+        // exported `SysVitalsSettings` / `SysVitalsHistory` names. Normalize
+        // the main binary so every platform reads the same.
+        if name.eq_ignore_ascii_case("sysvitals") {
+            name = "SysVitals".to_string();
+        }
+        format!("{name}[{}]", std::process::id())
+    })
+}
+
+/// Collapse CR/LF so one event stays one log line. Panic backtraces and
+/// multi-line `anyhow` errors otherwise break the `timestamp [LEVEL]` prefix
+/// contract and produce fake entries.
+fn one_line(message: &str) -> Cow<'_, str> {
+    if !message.contains('\n') && !message.contains('\r') {
+        return Cow::Borrowed(message);
+    }
+    let mut out = String::with_capacity(message.len());
+    let mut chars = message.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\r' => {
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                out.push(' ');
+            }
+            '\n' => out.push(' '),
+            _ => out.push(ch),
+        }
+    }
+    Cow::Owned(out)
+}
+
 /// Open (or roll to) the log file for the given local date. Returns the file
 /// handle, or `None` if the directory cannot be created.
 fn open_for_date(dir: &Path, date: &str) -> Option<File> {
@@ -39,9 +88,9 @@ fn open_for_date(dir: &Path, date: &str) -> Option<File> {
 }
 
 /// Append one line. `date` is the local date `YYYY-MM-DD` and `time` the local
-/// time `HH:MM:SS`, both supplied by the caller from the platform clock.
-/// `level` is a short tag like `INFO` / `WARN` / `ERROR`. Rolls to a new file
-/// when the date changes. Never panics.
+/// time (`HH:MM:SS` or `HH:MM:SS.mmm`), both supplied by the caller from the
+/// platform clock. `level` is a short tag like `INFO` / `WARN` / `ERROR`.
+/// Rolls to a new file when the date changes. Never panics.
 pub fn log_line(data_dir: &Path, date: &str, time: &str, level: &str, message: &str) {
     let mut file_guard = LOG_FILE.lock().unwrap_or_else(|e| e.into_inner());
     let mut date_guard = LOG_DATE.lock().unwrap_or_else(|e| e.into_inner());
@@ -55,7 +104,8 @@ pub fn log_line(data_dir: &Path, date: &str, time: &str, level: &str, message: &
         prune_logs(data_dir, date, DEFAULT_RETENTION_DAYS);
     }
     if let Some(file) = file_guard.as_mut() {
-        let _ = writeln!(file, "{date} {time} [{level}] {message}");
+        let message = one_line(message);
+        let _ = writeln!(file, "{date} {time} [{level}] {} {message}", process_tag());
     }
 }
 
@@ -149,6 +199,21 @@ mod tests {
     }
 
     #[test]
+    fn one_line_flattens_crlf_and_lf() {
+        assert_eq!(&*one_line("plain"), "plain");
+        assert_eq!(&*one_line("first\nsecond"), "first second");
+        assert_eq!(&*one_line("first\r\nsecond\rthird"), "first second third");
+    }
+
+    #[test]
+    fn process_tag_has_component_and_pid() {
+        let tag = process_tag();
+        assert!(tag.ends_with(&format!("[{}]", std::process::id())));
+        assert!(!tag.starts_with('['));
+        assert!(tag.len() > 2);
+    }
+
+    #[test]
     fn prune_removes_only_old_matching_files() {
         let dir = std::env::temp_dir().join(format!("sysvitals-logtest-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
@@ -202,8 +267,14 @@ mod tests {
         log_line(&dir, "2026-10-19", "13:01:00", "WARN", "world");
         let f1 = log_dir(&dir).join("sysvitals-2026-10-19.log");
         let content = fs::read_to_string(&f1).unwrap();
-        assert!(content.contains("2026-10-19 13:00:00 [INFO] hello"));
-        assert!(content.contains("2026-10-19 13:01:00 [WARN] world"));
+        assert!(content.contains("2026-10-19 13:00:00 [INFO]"));
+        assert!(content.contains("hello"));
+        assert!(content.contains("2026-10-19 13:01:00 [WARN]"));
+        assert!(content.contains("world"));
+        assert!(
+            content.contains(&format!("[{}]", std::process::id())),
+            "every line carries the process tag: {content}"
+        );
         // Rolling to the next day creates a second file and prunes the file
         // that has just crossed the seven-day boundary.
         log_line(&dir, "2026-10-20", "09:00:00", "INFO", "next day");

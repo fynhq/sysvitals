@@ -61,7 +61,7 @@ mod macos {
         let now = Local::now();
         (
             now.format("%Y-%m-%d").to_string(),
-            now.format("%H:%M:%S").to_string(),
+            now.format("%H:%M:%S%.3f").to_string(),
         )
     }
 
@@ -106,7 +106,15 @@ mod macos {
                 .location()
                 .map(|l| format!("{}:{}", l.file(), l.line()))
                 .unwrap_or_else(|| "unknown location".to_string());
-            log_event("FATAL", &format!("panic at {loc}: {msg}"));
+            let thread = std::thread::current()
+                .name()
+                .unwrap_or("unnamed")
+                .to_string();
+            let backtrace = std::backtrace::Backtrace::force_capture();
+            log_event(
+                "FATAL",
+                &format!("panic in thread {thread} at {loc}: {msg} | backtrace: {backtrace}"),
+            );
         }));
     }
 
@@ -1307,7 +1315,7 @@ mod macos {
         // leaked (see `acquire_single_instance`).
         install_panic_hook();
         if !acquire_single_instance() {
-            eprintln!("app-mac: another instance is already running; exiting");
+            log_event("INFO", "another instance is already running; exiting");
             return;
         }
 
@@ -1375,7 +1383,13 @@ mod macos {
         // log, so a user can just send this file when something looks wrong).
         prune_old_logs();
         let cfg = CONFIG.with(|c| c.borrow().clone());
-        log_event("INFO", "SysVitals (mac) starting");
+        log_event(
+            "INFO",
+            &format!(
+                "SysVitals (mac) starting (version={})",
+                env!("CARGO_PKG_VERSION")
+            ),
+        );
         log_event(
             "INFO",
             &format!(

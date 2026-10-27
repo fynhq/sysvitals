@@ -293,3 +293,52 @@ pub fn apply_theme_and_accent(cx: &mut App, surface: PanelSurface) {
     apply_accent(cx);
     apply_material(cx, surface);
 }
+
+/// Append one line to the shared daily log with millisecond precision.
+///
+/// The GPUI panels are windowed-subsystem binaries: `eprintln!` has no visible
+/// destination unless a developer attaches a console, so diagnostics that only
+/// go to stderr are effectively lost. Every panel event worth keeping goes
+/// through this helper instead.
+pub fn log_event(level: &str, message: &str) {
+    let Ok(dir) = sysvitals_core::config::data_dir() else {
+        return;
+    };
+    let now = chrono::Local::now();
+    sysvitals_core::logger::log_line(
+        &dir,
+        &now.format("%Y-%m-%d").to_string(),
+        &now.format("%H:%M:%S%.3f").to_string(),
+        level,
+        message,
+    );
+}
+
+/// Install the crash logger shared by both GPUI panels. A panic hook is the
+/// only way to turn a silent GUI-process death into a diagnosable log entry;
+/// the backtrace is included because GPUI panics rarely reproduce outside the
+/// user's session.
+pub fn install_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        let message = if let Some(text) = info.payload().downcast_ref::<&str>() {
+            (*text).to_string()
+        } else if let Some(text) = info.payload().downcast_ref::<String>() {
+            text.clone()
+        } else {
+            "unknown panic".to_string()
+        };
+        let location = info
+            .location()
+            .map(|loc| format!("{}:{}:{}", loc.file(), loc.line(), loc.column()))
+            .unwrap_or_else(|| "unknown location".to_string());
+        let thread = std::thread::current()
+            .name()
+            .unwrap_or("unnamed")
+            .to_string();
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        log_event(
+            "FATAL",
+            &format!("panic in thread {thread} at {location}: {message} | backtrace: {backtrace}"),
+        );
+    }));
+}

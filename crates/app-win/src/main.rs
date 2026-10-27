@@ -92,8 +92,8 @@ mod win {
     };
     use windows::Win32::System::SystemInformation::{GetLocalTime, OSVERSIONINFOW};
     use windows::Win32::System::Threading::{
-        CreateMutexW, CreateProcessW, GetCurrentProcessId, TerminateProcess, WaitForSingleObject,
-        PROCESS_INFORMATION, STARTUPINFOW,
+        CreateMutexW, CreateProcessW, GetCurrentProcessId, GetExitCodeProcess, TerminateProcess,
+        WaitForSingleObject, PROCESS_INFORMATION, STARTUPINFOW,
     };
     use windows::Win32::UI::Controls::MARGINS;
     use windows::Win32::UI::HiDpi::{
@@ -334,7 +334,10 @@ mod win {
         let st = unsafe { GetLocalTime() };
         (
             format!("{:04}-{:02}-{:02}", st.wYear, st.wMonth, st.wDay),
-            format!("{:02}:{:02}:{:02}", st.wHour, st.wMinute, st.wSecond),
+            format!(
+                "{:02}:{:02}:{:02}.{:03}",
+                st.wHour, st.wMinute, st.wSecond, st.wMilliseconds
+            ),
         )
     }
 
@@ -728,6 +731,9 @@ mod win {
     static LAYERED_FAIL_LOGGED: AtomicBool = AtomicBool::new(false);
     static MENU_RENDER_FAIL_LOGGED: AtomicBool = AtomicBool::new(false);
     static MENU_ACTIVE_LOGGED: AtomicBool = AtomicBool::new(false);
+    /// Atom returned by `RegisterClassExW` for the menu content class. Stored
+    /// so a creation failure can say whether the class itself was registered.
+    static MENU_CONTENT_CLASS_ATOM: AtomicUsize = AtomicUsize::new(0);
 
     /// The Windows virtual-desktop manager, created on demand. The overlay is
     /// a top-level window, so Windows cloaks it when the user switches to
@@ -1894,6 +1900,14 @@ mod win {
         if unsafe { WaitForSingleObject(handle, 0) } == WAIT_TIMEOUT {
             true
         } else {
+            if !QUITTING.load(Ordering::Relaxed) {
+                let mut code = 0u32;
+                let _ = unsafe { GetExitCodeProcess(handle, &mut code) };
+                log_event(
+                    "WARN",
+                    &format!("history resident exited unexpectedly (exit code {code})"),
+                );
+            }
             let _ = unsafe { CloseHandle(handle) };
             *slot = None;
             false
@@ -2896,7 +2910,14 @@ mod win {
         ) {
             Ok(content) => content,
             Err(e) => {
-                log_event("WARN", &format!("menu content create failed: {e}"));
+                log_event(
+                    "WARN",
+                    &format!(
+                        "menu content create failed: {e} (class atom={}, material={material}, \
+                         dpi={scale}, size={width}x{height})",
+                        MENU_CONTENT_CLASS_ATOM.load(Ordering::Relaxed)
+                    ),
+                );
                 let _ = DestroyWindow(hwnd);
                 return None;
             }
@@ -2925,7 +2946,12 @@ mod win {
         }
         let _ = ShowWindow(content, SW_SHOWNOACTIVATE);
         if !MENU_ACTIVE_LOGGED.swap(true, Ordering::Relaxed) {
-            log_event("INFO", "custom menu active");
+            log_event(
+                "INFO",
+                &format!(
+                    "custom menu active (dpi={scale}, material={material}, size={width}x{height})"
+                ),
+            );
         }
         let _ = SetForegroundWindow(hwnd);
         let _ = SetFocus(Some(hwnd));
@@ -3021,7 +3047,13 @@ mod win {
         MENU_TRACKING.store(true, Ordering::Relaxed);
         let choice = match show_custom_menu(hwnd, &entries) {
             Some(choice) => choice,
-            None => show_native_menu(hwnd, &entries).unwrap_or(0),
+            None => match show_native_menu(hwnd, &entries) {
+                Some(choice) => choice,
+                None => {
+                    log_event("WARN", "menu: both the custom and classic menus failed");
+                    0
+                }
+            },
         };
         MENU_TRACKING.store(false, Ordering::Relaxed);
         perform_menu_choice(hwnd, choice);
@@ -3168,7 +3200,15 @@ mod win {
                 .location()
                 .map(|l| format!("{}:{}", l.file(), l.line()))
                 .unwrap_or_else(|| "unknown location".to_string());
-            log_event("FATAL", &format!("panic at {loc}: {msg}"));
+            let thread = std::thread::current()
+                .name()
+                .unwrap_or("unnamed")
+                .to_string();
+            let backtrace = std::backtrace::Backtrace::force_capture();
+            log_event(
+                "FATAL",
+                &format!("panic in thread {thread} at {loc}: {msg} | backtrace: {backtrace}"),
+            );
         }));
         unsafe {
             SetUnhandledExceptionFilter(Some(unhandled_exception_filter));
@@ -3402,6 +3442,7 @@ mod win {
                     if windows::Win32::Foundation::GetLastError()
                         == windows::Win32::Foundation::ERROR_ALREADY_EXISTS
                     {
+                        log_event("INFO", "another instance is already running; exiting");
                         return;
                     }
                     h
@@ -3424,7 +3465,10 @@ mod win {
 
             // Daily-file logging: prune stale logs once at startup.
             prune_old_logs();
-            log_event("INFO", "SysVitals starting");
+            log_event(
+                "INFO",
+                &format!("SysVitals starting (version={})", env!("CARGO_PKG_VERSION")),
+            );
             log_event(
                 "INFO",
                 &format!(
@@ -3446,9 +3490,11 @@ mod win {
             log_event(
                 "INFO",
                 &format!(
-                    "environment: win11_centered_taskbar={} dpi={}",
+                    "environment: win11_centered_taskbar={} dpi={} build={:?} menu_material={}",
                     centered,
-                    GetDpiForSystem()
+                    GetDpiForSystem(),
+                    os_build_number(),
+                    menu_material_available()
                 ),
             );
 
@@ -3498,8 +3544,11 @@ mod win {
                 lpszClassName: windows::core::PCWSTR(content_class_name.as_ptr()),
                 ..Default::default()
             };
-            if RegisterClassExW(&content_wc) == 0 {
+            let content_atom = RegisterClassExW(&content_wc);
+            if content_atom == 0 {
                 log_event("WARN", "menu content class registration failed");
+            } else {
+                MENU_CONTENT_CLASS_ATOM.store(content_atom as usize, Ordering::Relaxed);
             }
 
             // The sentinel is a hidden top-level window that is deliberately

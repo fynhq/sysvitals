@@ -441,11 +441,13 @@ fn watch_parent(cx: &mut App) {
     let Some(pid) = parse_parent_pid() else {
         return;
     };
+    log_event("INFO", &format!("history: watching parent pid {pid}"));
     cx.spawn(async move |cx| loop {
         cx.background_executor().timer(Duration::from_secs(1)).await;
         if unsafe { libc::kill(pid as i32, 0) } != 0
             && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
         {
+            log_event("INFO", "history: parent process gone; exiting");
             cx.update(|app| app.quit());
             break;
         }
@@ -475,6 +477,9 @@ struct HistoryView {
     /// three seconds re-ran WAL/schema setup and contended with the
     /// indicator's writer for no benefit.
     store: Option<Store>,
+    /// One alert per failure streak: a corrupt database would otherwise log
+    /// every refresh tick (3 s), drowning the useful history.
+    data_error_logged: bool,
     csv_scope: CsvScope,
     copied: bool,
     copy_failed: bool,
@@ -535,6 +540,7 @@ impl HistoryView {
             range: TimeRange::Hour1,
             buckets: Vec::new(),
             store: None,
+            data_error_logged: false,
             csv_scope,
             copied: false,
             copy_failed: false,
@@ -717,7 +723,7 @@ impl HistoryView {
                 // Retry only when the file changes again, and keep the last
                 // good values in the meantime.
                 self.config_mtime = mtime;
-                eprintln!("app-history: config reload failed: {e}");
+                log_event("WARN", &format!("history: config reload failed: {e}"));
                 false
             }
         }
@@ -798,8 +804,12 @@ impl HistoryView {
         if self.store.is_some() {
             return true;
         }
-        let Ok(path) = history_path() else {
-            return false;
+        let path = match history_path() {
+            Ok(path) => path,
+            Err(e) => {
+                self.log_data_error(format!("history: cannot resolve the store path: {e}"));
+                return false;
+            }
         };
         match Store::open(&path) {
             Ok(store) => {
@@ -807,9 +817,19 @@ impl HistoryView {
                 true
             }
             Err(e) => {
-                eprintln!("app-history: history store open failed: {e}");
+                self.log_data_error(format!(
+                    "history: store open failed: {}: {e}",
+                    path.display()
+                ));
                 false
             }
+        }
+    }
+
+    fn log_data_error(&mut self, message: String) {
+        if !self.data_error_logged {
+            log_event("WARN", &message);
+            self.data_error_logged = true;
         }
     }
 
@@ -831,9 +851,12 @@ impl HistoryView {
                 .as_ref()
                 .map(|store| store.buckets_offset(from, to, bucket, offset));
             match result {
-                Some(Ok(loaded)) => buckets = loaded,
+                Some(Ok(loaded)) => {
+                    buckets = loaded;
+                    self.data_error_logged = false;
+                }
                 Some(Err(e)) => {
-                    eprintln!("app-history: history query failed: {e}");
+                    self.log_data_error(format!("history: query failed: {e}"));
                     // A broken connection should be retried on the next
                     // refresh rather than kept forever.
                     self.store = None;
@@ -939,7 +962,7 @@ impl HistoryView {
             let _ = this.update(cx, |view: &mut HistoryView, cx| match loaded {
                 Ok(buckets) => view.finish_copy(buckets, lang, cx),
                 Err(e) => {
-                    eprintln!("app-history: CSV query failed: {e}");
+                    log_event("WARN", &format!("history: CSV query failed: {e}"));
                     view.copied = false;
                     view.copy_failed = true;
                     view.schedule_copied_reset(cx);
@@ -978,17 +1001,21 @@ impl HistoryView {
                 Ok(()) => {
                     self.copied = true;
                     self.copy_failed = false;
+                    log_event(
+                        "INFO",
+                        &format!("history: CSV copied ({} rows)", buckets.len()),
+                    );
                 }
                 Err(e) => {
                     self.copied = false;
                     self.copy_failed = true;
-                    eprintln!("app-history: clipboard write failed: {e}");
+                    log_event("WARN", &format!("history: clipboard write failed: {e}"));
                 }
             },
             Err(e) => {
                 self.copied = false;
                 self.copy_failed = true;
-                eprintln!("app-history: clipboard unavailable: {e}");
+                log_event("WARN", &format!("history: clipboard unavailable: {e}"));
             }
         }
         self.schedule_copied_reset(cx);
@@ -1088,17 +1115,7 @@ fn elapsed_ms() -> u128 {
 /// Append one milestone line to the shared daily log. The log path never
 /// fails the popup: errors are swallowed inside `logger::log_line`.
 fn log_event(level: &str, message: &str) {
-    let Ok(dir) = sysvitals_core::config::data_dir() else {
-        return;
-    };
-    let now = Local::now();
-    sysvitals_core::logger::log_line(
-        &dir,
-        &now.format("%Y-%m-%d").to_string(),
-        &now.format("%H:%M:%S").to_string(),
-        level,
-        message,
-    );
+    sysvitals_panel::log_event(level, message);
 }
 
 impl Render for HistoryView {
@@ -1416,7 +1433,10 @@ fn open_history_window(
     let cfg = match config_path().and_then(|p| Config::load(&p).map(|(c, _)| c)) {
         Ok(cfg) => cfg,
         Err(e) => {
-            eprintln!("app-history: config load failed: {e}; using defaults");
+            log_event(
+                "WARN",
+                &format!("history: config load failed: {e}; using defaults"),
+            );
             Config::default()
         }
     };
@@ -1514,7 +1534,7 @@ fn open_history_window(
     let (window_handle, _view) = match opened {
         Ok(opened) => opened,
         Err(e) => {
-            eprintln!("app-history: open window failed: {e}");
+            log_event("WARN", &format!("history: open window failed: {e}"));
             return None;
         }
     };
@@ -1529,7 +1549,10 @@ fn open_history_window(
 #[cfg(windows)]
 fn run_resident(cx: &mut App) {
     let Some(state) = open_history_state() else {
-        eprintln!("app-history: resident state mapping unavailable; exiting");
+        log_event(
+            "WARN",
+            "history: resident state mapping unavailable; exiting",
+        );
         cx.quit();
         return;
     };
@@ -1537,7 +1560,10 @@ fn run_resident(cx: &mut App) {
     let parent =
         parent_pid.and_then(|pid| unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, pid).ok() });
     if parent.is_none() {
-        eprintln!("app-history: resident parent process unavailable; exiting");
+        log_event(
+            "WARN",
+            "history: resident parent process unavailable; exiting",
+        );
         cx.quit();
         return;
     }
@@ -1545,7 +1571,10 @@ fn run_resident(cx: &mut App) {
     let shared = Arc::new(HistoryShared { state });
     log_event(
         "INFO",
-        &format!("history: resident started (parent pid {parent_pid:?})"),
+        &format!(
+            "history: resident started (version={}, parent pid {parent_pid:?})",
+            env!("CARGO_PKG_VERSION")
+        ),
     );
 
     cx.spawn(async move |cx| {
@@ -1575,6 +1604,7 @@ fn run_resident(cx: &mut App) {
             let snapshot = cx.update(|_app| unsafe { shared.snapshot() });
             let parent_dead = unsafe { WaitForSingleObject(parent, 0) != WAIT_TIMEOUT };
             if parent_dead {
+                log_event("INFO", "history: parent process gone; exiting");
                 cx.update(|app| app.quit());
                 break;
             }
@@ -1584,6 +1614,7 @@ fn run_resident(cx: &mut App) {
                 // Blur/Esc and external closes remove the window behind the
                 // loop's back; the request flag normally arrives first.
                 if !windows.contains(&handle) {
+                    log_event("INFO", "history: window dismissed");
                     dismissed_generation = Some(open_generation);
                     window = None;
                     first_load = None;
@@ -1603,6 +1634,7 @@ fn run_resident(cx: &mut App) {
                     // visible window was asked to close by the indicator.
                     dismissed_generation = Some(snapshot.generation);
                     if snapshot.visible != 0 {
+                        log_event("INFO", "history: window closed by indicator");
                         let _ = cx.update(|app| {
                             let _ = handle.update(app, |_, window, _| window.remove_window());
                         });
@@ -1726,6 +1758,7 @@ fn run_resident(cx: &mut App) {
 }
 
 fn main() {
+    sysvitals_panel::install_panic_hook();
     let _ = START.set(Instant::now());
 
     // GPUI does not declare DPI awareness itself. Without this the process
@@ -1796,8 +1829,17 @@ fn main() {
         watch_parent(cx);
 
         let anchor = parse_anchor();
+        log_event(
+            "INFO",
+            &format!(
+                "history: popup starting (version={}, anchor={:?})",
+                env!("CARGO_PKG_VERSION"),
+                anchor.as_ref().map(|a| (a.left, a.top, a.right, a.bottom))
+            ),
+        );
         if open_history_window(cx, anchor, false, None).is_none() {
             cx.quit();
         }
     });
+    log_event("INFO", "history: exited");
 }

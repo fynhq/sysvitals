@@ -48,6 +48,13 @@ use sysvitals_panel::{
 #[cfg(windows)]
 use sysvitals_panel::{hkcu_dword, panel_font_family};
 
+/// File logger for this windowed-subsystem binary. `eprintln!` has no visible
+/// destination in normal use, so every diagnostic goes to the shared daily
+/// file instead (see core::logger for rotation/retention).
+fn log_event(level: &str, message: &str) {
+    sysvitals_panel::log_event(level, message);
+}
+
 // ---------------------------------------------------------------------------
 // Platform gate for the layout section
 // ---------------------------------------------------------------------------
@@ -190,11 +197,11 @@ mod macos_select {
         let mtm = MainThreadMarker::new()?;
         let app = NSApplication::sharedApplication(mtm);
         let Some(window) = app.keyWindow().or_else(|| app.mainWindow()) else {
-            eprintln!("app-settings: native select menu has no window");
+            crate::log_event("WARN", "settings: native select menu has no window");
             return None;
         };
         let Some(view) = window.contentView() else {
-            eprintln!("app-settings: native select menu has no content view");
+            crate::log_event("WARN", "settings: native select menu has no content view");
             return None;
         };
 
@@ -724,18 +731,30 @@ impl SettingsView {
     fn save(&mut self, cx: &App) {
         let mut cfg = self.collect_config(cx);
         let Ok(path) = sysvitals_core::config::config_path() else {
+            log_event(
+                "WARN",
+                "settings: cannot resolve the config path; save skipped",
+            );
             self.save_failed.set(true);
             return;
         };
-        if let Ok((disk, _)) = Config::load(&path) {
-            cfg.history = disk.history;
-            cfg.sample.cpu_smoothing = disk.sample.cpu_smoothing;
-            cfg.windows.auto_start = disk.windows.auto_start;
+        match Config::load(&path) {
+            Ok((disk, _)) => {
+                cfg.history = disk.history;
+                cfg.sample.cpu_smoothing = disk.sample.cpu_smoothing;
+                cfg.windows.auto_start = disk.windows.auto_start;
+            }
+            Err(e) => {
+                log_event(
+                    "WARN",
+                    &format!("settings: config merge read failed: {e}; keeping UI values"),
+                );
+            }
         }
         let text = match cfg.to_toml_string() {
             Ok(text) => text,
             Err(e) => {
-                eprintln!("app-settings: config serialize failed: {e}");
+                log_event("WARN", &format!("settings: config serialize failed: {e}"));
                 self.save_failed.set(true);
                 return;
             }
@@ -745,8 +764,22 @@ impl SettingsView {
         }
         let result = cfg.save(&path);
         if let Err(e) = &result {
-            eprintln!("app-settings: config save failed: {e}");
+            log_event("WARN", &format!("settings: config save failed: {e}"));
         } else {
+            log_event(
+                "INFO",
+                &format!(
+                    "settings: config saved (interval={}ms, language={:?}, theme={:?}, \
+                     dual_row={}, show_resources={}, show_network={}, item_spacing={}px)",
+                    cfg.sample.interval_ms,
+                    cfg.display.language,
+                    cfg.display.theme,
+                    cfg.display.dual_row,
+                    cfg.display.show_resources,
+                    cfg.display.show_network,
+                    cfg.display.item_spacing,
+                ),
+            );
             self.cfg = cfg;
             self.last_saved_toml = Some(text);
         }
@@ -1441,22 +1474,44 @@ fn prefix_cell(
 /// user's (hand-edited) file with defaults.
 fn load_config_with_backup() -> Config {
     let Ok(path) = sysvitals_core::config::config_path() else {
+        log_event(
+            "WARN",
+            "settings: cannot resolve the config path; using defaults",
+        );
         return Config::default();
     };
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Config::default(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            log_event(
+                "INFO",
+                &format!(
+                    "settings: config not found at {}; using defaults",
+                    path.display()
+                ),
+            );
+            return Config::default();
+        }
         Err(e) => {
             // A sharing violation/permission error is transient: do not move
             // the user's file aside (the next save would then overwrite the
             // canonical path with defaults). Only a malformed file is backed
             // up below.
-            eprintln!("app-settings: config read failed: {e}; using defaults");
+            log_event(
+                "WARN",
+                &format!("settings: config read failed: {e}; using defaults"),
+            );
             return Config::default();
         }
     };
     match Config::from_toml_str(&text) {
-        Ok((cfg, _)) => cfg,
+        Ok((cfg, _)) => {
+            log_event(
+                "INFO",
+                &format!("settings: config loaded from {}", path.display()),
+            );
+            cfg
+        }
         Err(e) => {
             let stamp = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1464,9 +1519,12 @@ fn load_config_with_backup() -> Config {
                 .unwrap_or(0);
             let backup = path.with_file_name(format!("config.toml.corrupt-{stamp}"));
             let _ = std::fs::rename(&path, &backup);
-            eprintln!(
-                "app-settings: config parse failed: {e}; backed up to {}",
-                backup.display()
+            log_event(
+                "WARN",
+                &format!(
+                    "settings: config parse failed: {e}; backed up to {}; using defaults",
+                    backup.display()
+                ),
             );
             Config::default()
         }
@@ -1493,7 +1551,13 @@ fn acquire_single_instance() -> bool {
         }
         // A mutex failure must not keep the panel from opening; the parent
         // launch slot remains the primary duplicate guard.
-        Err(_) => true,
+        Err(e) => {
+            log_event(
+                "WARN",
+                &format!("settings: instance mutex unavailable: {e}; continuing"),
+            );
+            true
+        }
     }
 }
 
@@ -1501,6 +1565,10 @@ fn acquire_single_instance() -> bool {
 fn acquire_single_instance() -> bool {
     use std::os::fd::AsRawFd;
     let Ok(dir) = sysvitals_core::config::data_dir() else {
+        log_event(
+            "WARN",
+            "settings: cannot resolve the data directory; instance guard disabled",
+        );
         return true;
     };
     let _ = std::fs::create_dir_all(&dir);
@@ -1510,9 +1578,23 @@ fn acquire_single_instance() -> bool {
         .write(true)
         .open(dir.join("settings.lock"))
     else {
+        log_event(
+            "WARN",
+            &format!(
+                "settings: cannot open {}; instance guard disabled",
+                dir.join("settings.lock").display()
+            ),
+        );
         return true;
     };
     if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(libc::EWOULDBLOCK) {
+            log_event(
+                "WARN",
+                &format!("settings: instance lock failed: {error}; exiting"),
+            );
+        }
         return false;
     }
     *SETTINGS_INSTANCE_FILE
@@ -1558,11 +1640,15 @@ fn watch_parent(cx: &mut App) {
     let raw = match unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, pid) } {
         Ok(handle) => handle.0 as isize,
         Err(e) => {
-            eprintln!("app-settings: parent process unavailable: {e}");
+            log_event(
+                "WARN",
+                &format!("settings: parent process unavailable: {e}; exiting"),
+            );
             cx.quit();
             return;
         }
     };
+    log_event("INFO", &format!("settings: watching parent pid {pid}"));
     cx.spawn(async move |cx| {
         loop {
             cx.background_executor()
@@ -1571,6 +1657,7 @@ fn watch_parent(cx: &mut App) {
             let exited = unsafe { WaitForSingleObject(HANDLE(raw as *mut std::ffi::c_void), 0) }
                 != WAIT_TIMEOUT;
             if exited {
+                log_event("INFO", "settings: parent process gone; exiting");
                 cx.update(|app| app.quit());
                 break;
             }
@@ -1585,6 +1672,7 @@ fn watch_parent(cx: &mut App) {
     let Some(pid) = parse_parent_pid() else {
         return;
     };
+    log_event("INFO", &format!("settings: watching parent pid {pid}"));
     cx.spawn(async move |cx| {
         loop {
             cx.background_executor()
@@ -1593,6 +1681,7 @@ fn watch_parent(cx: &mut App) {
             if unsafe { libc::kill(pid as i32, 0) } != 0
                 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
             {
+                log_event("INFO", "settings: parent process gone; exiting");
                 cx.update(|app| app.quit());
                 break;
             }
@@ -1605,10 +1694,32 @@ fn watch_parent(cx: &mut App) {
 fn watch_parent(_cx: &mut App) {}
 
 fn main() {
+    sysvitals_panel::install_panic_hook();
     if !acquire_single_instance() {
-        eprintln!("app-settings: another settings window is already running; exiting");
+        log_event(
+            "WARN",
+            "settings: another settings window is already running; exiting",
+        );
         return;
     }
+    log_event(
+        "INFO",
+        &format!(
+            "settings: starting (version={}, build={}, parent_pid={:?})",
+            env!("CARGO_PKG_VERSION"),
+            SV_BUILD_ID,
+            parse_parent_pid()
+        ),
+    );
+    #[cfg(windows)]
+    log_event(
+        "INFO",
+        &format!(
+            "settings: taskbar vertical={} win11_centered={}",
+            taskbar_is_vertical(),
+            layout_available()
+        ),
+    );
     // GPUI does not declare DPI awareness itself. Without this the process
     // is treated as DPI-unaware and Windows bitmap-stretches the whole window
     // on a scaled display, which is what makes the text look soft.
@@ -1739,4 +1850,5 @@ fn main() {
         #[cfg(not(target_os = "macos"))]
         let _ = window_handle;
     });
+    log_event("INFO", "settings: exited");
 }
