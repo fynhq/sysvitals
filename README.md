@@ -78,6 +78,7 @@ SysVitals has no built-in auto-update; install a newer release manually.
   - macOS: Activity Monitor, Settings, Restart, Quit.
 - Settings save immediately; there is no Apply button. Quit closes the indicator and any open panels.
 - Configure language, sampling interval (1/2/3 s; default 2 s), layout, spacing, prefixes, indicator theme (Windows), and Windows taskbar anchor/margin. Vertical taskbars are supported.
+- Launch at login can be enabled in Settings and is off by default. On macOS the first enable may need approval in **System Settings → General → Login Items & Extensions**.
 - Settings and history follow system appearance and accent color; the Windows indicator theme can be auto/light/dark.
 - History ranges: 5 minutes, 1 hour, 1 day, 1 month; up to one month is retained.
 - The copy button exports the visible range as tab-separated rows with a UTF-8 BOM.
@@ -122,10 +123,6 @@ Archives you did not download are skipped. Checksums verify download integrity, 
 - Uninstall: quit SysVitals, move `SysVitals.app` to the Trash, and remove the data folder.
 
 History is kept for up to one month; logs older than 7 days are removed.
-
-### Known limitations
-
-- Launch at login is not implemented.
 
 ### Build from source
 
@@ -228,6 +225,7 @@ SysVitals 没有内置自动更新；需要手动安装新版。
   - macOS：活动监视器、设置、重启、退出。
 - 设置即时保存，没有应用按钮。退出会关闭指示器及所有打开的窗口。
 - 可配置语言、采样间隔（1/2/3 秒，默认 2 秒）、布局、间距、前缀、指示器主题（Windows）、Windows 任务栏锚位/边距。支持垂直任务栏。
+- 设置中可开启开机自启，默认关闭。macOS 首次开启时可能需要在“系统设置 → 通用 → 登录项与扩展”中允许。
 - 设置与走势图跟随系统亮暗与强调色；Windows 指示器主题可选自动/亮色/暗色。
 - 走势图范围：5 分钟、1 小时、1 天、1 个月；历史最多保留一个月。
 - 复制按钮导出当前可视范围，Tab 分隔 + UTF-8 BOM。
@@ -272,10 +270,6 @@ shasum -a 256 -c --ignore-missing SHA256SUMS
 - 卸载：退出 SysVitals，把 `SysVitals.app` 移到废纸篓；如需清除数据，再删除数据目录。
 
 历史最多保留一个月；日志超过 7 天自动清理。
-
-### 已知限制
-
-- 尚未实现开机自启。
 
 ### 从源码构建
 

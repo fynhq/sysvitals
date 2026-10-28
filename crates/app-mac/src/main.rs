@@ -22,7 +22,7 @@ mod macos {
 
     use chrono::Local;
     use objc2::rc::Retained;
-    use objc2::runtime::{AnyObject, Bool};
+    use objc2::runtime::{AnyClass, AnyObject, Bool};
     use objc2::{define_class, msg_send, sel, ClassType, MainThreadMarker, MainThreadOnly};
     use objc2_app_kit::{
         NSAppearanceCustomization, NSApplication, NSApplicationActivationPolicy,
@@ -39,6 +39,12 @@ mod macos {
     use sysvitals_core::config::{config_path, history_path};
     use sysvitals_core::format::{format_frame, join_prefix};
     use sysvitals_core::{t, Config, FormattedRow, Metric, NetSelection, Sampler};
+
+    // `SMAppService` lives in ServiceManagement.framework. Linking it keeps the
+    // class registered for the runtime lookup below; no typed bindings are
+    // needed for the three calls we make.
+    #[link(name = "ServiceManagement", kind = "framework")]
+    extern "C" {}
 
     /// Font-size factor for the dual-row layout: the menu bar has a fixed
     /// height, so two lines only fit with the system menu-bar font scaled
@@ -171,6 +177,9 @@ mod macos {
         /// Interval currently in effect on the timer; the first tick primes
         /// it (0) and schedules the real timer from there.
         static APPLIED_INTERVAL_MS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+        /// Login-startup value last applied through `SMAppService`; `None`
+        /// means it has not been applied in this process yet.
+        static APPLIED_AUTO_START: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
         // Child process handles, kept so a still-running instance is not
         // duplicated (a second spawn is a no-op until the first exits).
         static SETTINGS_CHILD: RefCell<Option<Child>> = const { RefCell::new(None) };
@@ -276,16 +285,18 @@ mod macos {
                 CONFIG_MTIME.with(|m| *m.borrow_mut() = mtime);
                 CONFIG_ERROR_MTIME.set(0);
                 CONFIG.with(|c| *c.borrow_mut() = cfg.clone());
+                apply_auto_start(&cfg);
                 log_event(
                     "INFO",
                     &format!(
                         "config reloaded: interval={}ms dual_row={} show_resources={} \
-                         show_network={} item_spacing={}px",
+                         show_network={} item_spacing={}px auto_start={}",
                         cfg.sample.interval_ms,
                         cfg.display.dual_row,
                         cfg.display.show_resources,
                         cfg.display.show_network,
                         cfg.display.item_spacing,
+                        cfg.startup.auto_start,
                     ),
                 );
             }
@@ -297,6 +308,80 @@ mod macos {
                     log_event("WARN", &format!("config reload failed: {e}"));
                 }
             }
+        }
+    }
+
+    /// Ask `SMAppService` for the current login-item state. Returns the new
+    /// status when a call was made, `None` when the desired state already held.
+    /// Status values: 0 not registered, 1 enabled, 2 requires approval,
+    /// 3 not found (macOS 13+).
+    fn set_launch_at_login(enabled: bool) -> Result<Option<isize>, String> {
+        let cls = AnyClass::get(c"SMAppService")
+            .ok_or_else(|| "SMAppService unavailable (requires macOS 13)".to_string())?;
+        let service: *mut AnyObject = unsafe { msg_send![cls, mainApp] };
+        if service.is_null() {
+            return Err("SMAppService.mainApp unavailable".to_string());
+        }
+        let status: isize = unsafe { msg_send![service, status] };
+        if enabled {
+            // Already enabled, or waiting for the user's approval in System
+            // Settings; registering again would only produce an error.
+            if status == 1 {
+                return Ok(None);
+            }
+            if status == 2 {
+                return Ok(Some(status));
+            }
+        } else if status == 0 || status == 3 {
+            // Nothing registered, or the app is not a bundle (e.g. a dev
+            // binary): unregistering would only fail.
+            return Ok(None);
+        }
+
+        let mut error: *mut AnyObject = std::ptr::null_mut();
+        let ok: Bool = unsafe {
+            if enabled {
+                msg_send![service, registerAndReturnError: &mut error]
+            } else {
+                msg_send![service, unregisterAndReturnError: &mut error]
+            }
+        };
+        let new_status: isize = unsafe { msg_send![service, status] };
+        if ok.as_bool() {
+            Ok(Some(new_status))
+        } else {
+            Err(format!("SMAppService status={new_status}"))
+        }
+    }
+
+    /// Apply the login-startup preference once per value change. The settings
+    /// window writes the config; this process owns the ServiceManagement call.
+    fn apply_auto_start(cfg: &Config) {
+        let desired = cfg.startup.auto_start;
+        if APPLIED_AUTO_START.with(|c| c.get()) == Some(desired) {
+            return;
+        }
+        APPLIED_AUTO_START.with(|c| c.set(Some(desired)));
+        match set_launch_at_login(desired) {
+            Ok(Some(2)) if desired => log_event(
+                "INFO",
+                "auto-start requires approval in System Settings > Login Items",
+            ),
+            Ok(Some(status)) => log_event(
+                "INFO",
+                &format!(
+                    "auto-start {} (status={status})",
+                    if desired { "enabled" } else { "disabled" }
+                ),
+            ),
+            Ok(None) => {}
+            Err(e) => log_event(
+                "WARN",
+                &format!(
+                    "auto-start {} failed: {e}",
+                    if desired { "enable" } else { "disable" }
+                ),
+            ),
         }
     }
 
@@ -860,6 +945,13 @@ mod macos {
         });
         DRAW_SIGNATURE.with(|s| *s.borrow_mut() = sig);
         apply_status_image();
+        let accessible = texts
+            .iter()
+            .filter(|text| !text.is_empty())
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        apply_accessibility(&accessible);
     }
 
     /// Sample metrics, record the history row, and update the indicator.
@@ -1291,6 +1383,32 @@ mod macos {
         });
     }
 
+    /// Expose the live values to VoiceOver and as the status item's native
+    /// tooltip. The template image itself has no accessible text, so without
+    /// this the menu-bar item reads as an unlabeled button.
+    fn apply_accessibility(value: &str) {
+        if value.is_empty() {
+            return;
+        }
+        let mtm = mtm();
+        STATUS_ITEM.with(|si| {
+            let si_borrow = si.borrow();
+            let Some(item) = si_borrow.as_ref() else {
+                return;
+            };
+            let Some(button) = item.button(mtm) else {
+                return;
+            };
+            let label = NSString::from_str("SysVitals");
+            let value = NSString::from_str(value);
+            unsafe {
+                let _: () = msg_send![&*button, setAccessibilityLabel: &*label];
+                let _: () = msg_send![&*button, setAccessibilityValue: &*value];
+                let _: () = msg_send![&*button, setToolTip: &*value];
+            }
+        });
+    }
+
     /// Suppress AppKit's own status-button highlight. The system draws a
     /// pressed/selected backdrop through the button cell; clearing both cell
     /// style masks (`NSNoCellMask`) stops it from entering that drawing mode,
@@ -1379,10 +1497,12 @@ mod macos {
         // Load initial config and seed the mtime cache with the same read.
         // Without the seed the first tick reloads the file and logs a
         // spurious "config reloaded" line on every normal launch.
+        let mut initial_config_ok = false;
         if let Ok(path) = config_path() {
             if let Ok((cfg, _)) = Config::load(&path) {
                 CONFIG.with(|c| *c.borrow_mut() = cfg);
                 CONFIG_MTIME.with(|m| *m.borrow_mut() = config_mtime());
+                initial_config_ok = true;
             }
         }
 
@@ -1402,7 +1522,7 @@ mod macos {
             "INFO",
             &format!(
                 "config loaded: interval={}ms language={:?} theme={:?} dual_row={} \
-                 show_resources={} show_network={} item_spacing={}px",
+                 show_resources={} show_network={} item_spacing={}px auto_start={}",
                 cfg.sample.interval_ms,
                 cfg.display.language,
                 cfg.display.theme,
@@ -1410,8 +1530,14 @@ mod macos {
                 cfg.display.show_resources,
                 cfg.display.show_network,
                 cfg.display.item_spacing,
+                cfg.startup.auto_start,
             ),
         );
+        // A malformed config must not silently remove a login item the user
+        // enabled earlier; only apply after a successful initial read.
+        if initial_config_ok {
+            apply_auto_start(&cfg);
+        }
 
         // Start the background SQLite writer before the first sample, so the
         // main RunLoop never touches the database.

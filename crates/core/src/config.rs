@@ -50,6 +50,7 @@ pub struct Config {
     pub sample: SampleConfig,
     pub display: DisplayConfig,
     pub history: HistoryConfig,
+    pub startup: StartupConfig,
     pub windows: WindowsConfig,
 }
 
@@ -109,12 +110,21 @@ pub enum CsvScope {
     Last30d,
 }
 
+/// Login-startup preference, shared by both platforms. The settings window
+/// owns it; the platform layer (Windows Run key / macOS `SMAppService`) applies
+/// it. The legacy `[windows] auto_start` key is deliberately not read: it had
+/// no consumer and defaulted to `true`, so honoring it would silently enable
+/// auto-start for existing configs after this feature lands.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StartupConfig {
+    pub auto_start: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WindowsConfig {
     pub anchor: Anchor,
-    /// Reserved for the login-startup feature; currently has no consumer.
-    pub auto_start: bool,
     /// Offset (pixels) between the taskbar's far end and the indicator. On a
     /// horizontal bar under the far-left anchor this measures from the bar's
     /// left edge; on a vertical (left/right) bar it measures from the bar's
@@ -183,7 +193,6 @@ impl Default for WindowsConfig {
     fn default() -> Self {
         WindowsConfig {
             anchor: Anchor::Right,
-            auto_start: true,
             left_margin_px: DEFAULT_LEFT_MARGIN_PX,
         }
     }
@@ -443,6 +452,7 @@ mod tests {
         assert_eq!(c.windows.anchor, Anchor::Right);
         assert!(c.display.dual_row);
         assert_eq!(c.history.retention_days, 30);
+        assert!(!c.startup.auto_start);
         assert_eq!(c.display.item_spacing, DEFAULT_ITEM_SPACING_PX);
         assert_eq!(c.windows.left_margin_px, DEFAULT_LEFT_MARGIN_PX);
     }
@@ -502,6 +512,7 @@ mod tests {
         let mut c = Config::default();
         c.display.language = Language::Zh;
         c.display.dual_row = true;
+        c.startup.auto_start = true;
         c.windows.anchor = Anchor::Left;
         c.history.csv_scope = CsvScope::Last7d;
         let text = c.to_toml_string().unwrap();
@@ -516,6 +527,14 @@ mod tests {
         assert_eq!(c.display.language, Language::Zh);
         assert_eq!(c.display.prefix.cpu, "CPU:");
         assert_eq!(c.sample.interval_ms, 2000);
+    }
+
+    #[test]
+    fn legacy_windows_auto_start_is_ignored() {
+        // The old key defaulted to true and had no consumer. Reading it now
+        // would turn auto-start on during an upgrade, so it must stay inert.
+        let (c, _) = Config::from_toml_str("[windows]\nauto_start = true\n").unwrap();
+        assert!(!c.startup.auto_start);
     }
 
     #[test]

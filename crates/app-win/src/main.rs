@@ -56,17 +56,19 @@ mod win {
         format_frame, format_frame_vertical, t, Config, Language, NetSelection, Sampler, Theme,
     };
     use windows::Wdk::System::SystemServices::RtlGetVersion;
-    use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE, WAIT_TIMEOUT};
+    use windows::Win32::Foundation::{
+        CloseHandle, ERROR_FILE_NOT_FOUND, HANDLE, INVALID_HANDLE_VALUE, WAIT_TIMEOUT,
+    };
     use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
     use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
     use windows::Win32::Graphics::Gdi::{
         CreateCompatibleDC, CreateDIBSection, CreateFontW, DeleteDC, DeleteObject, DrawTextW,
-        GetDC, GetMonitorInfoW, MonitorFromWindow, ReleaseDC, SelectObject, SetBkMode,
+        GetDC, GetMonitorInfoW, GetSysColor, MonitorFromWindow, ReleaseDC, SelectObject, SetBkMode,
         SetTextColor, AC_SRC_ALPHA, AC_SRC_OVER, ANTIALIASED_QUALITY, BITMAPINFO, BITMAPINFOHEADER,
-        BI_RGB, BLENDFUNCTION, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH, DIB_RGB_COLORS,
-        DT_CALCRECT, DT_CENTER, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, FF_SWISS,
-        FW_REGULAR, FW_SEMIBOLD, HFONT, MONITORINFO, MONITOR_DEFAULTTONEAREST, OUT_DEFAULT_PRECIS,
-        TRANSPARENT,
+        BI_RGB, BLENDFUNCTION, CLIP_DEFAULT_PRECIS, COLOR_WINDOWTEXT, DEFAULT_CHARSET,
+        DEFAULT_PITCH, DIB_RGB_COLORS, DT_CALCRECT, DT_CENTER, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE,
+        DT_VCENTER, FF_SWISS, FW_REGULAR, FW_SEMIBOLD, HFONT, MONITORINFO,
+        MONITOR_DEFAULTTONEAREST, OUT_DEFAULT_PRECIS, TRANSPARENT,
     };
     use windows::Win32::System::Com::{
         CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
@@ -87,14 +89,15 @@ mod win {
         CreateFileMappingW, MapViewOfFile, FILE_MAP_ALL_ACCESS, PAGE_READWRITE,
     };
     use windows::Win32::System::Registry::{
-        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, KEY_READ,
-        REG_VALUE_TYPE,
+        RegCloseKey, RegDeleteKeyValueW, RegOpenKeyExW, RegQueryValueExW, RegSetKeyValueW, HKEY,
+        HKEY_CURRENT_USER, KEY_READ, REG_SZ, REG_VALUE_TYPE,
     };
     use windows::Win32::System::SystemInformation::{GetLocalTime, OSVERSIONINFOW};
     use windows::Win32::System::Threading::{
         CreateMutexW, CreateProcessW, GetCurrentProcessId, GetExitCodeProcess, TerminateProcess,
         WaitForSingleObject, PROCESS_INFORMATION, STARTUPINFOW,
     };
+    use windows::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
     use windows::Win32::UI::HiDpi::{
         GetDpiForSystem, GetDpiForWindow, SetProcessDpiAwarenessContext,
         DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
@@ -110,11 +113,12 @@ mod win {
         SystemParametersInfoW, TrackPopupMenu, TranslateMessage, UpdateLayeredWindow,
         WindowFromPoint, CS_HREDRAW, CS_VREDRAW, GWL_EXSTYLE, HWND_TOPMOST, MF_SEPARATOR,
         MF_STRING, MSG, NONCLIENTMETRICSW, SM_CXSCREEN, SM_CXVIRTUALSCREEN, SM_CYSCREEN,
-        SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SPI_GETNONCLIENTMETRICS,
-        SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE, SW_SHOWNOACTIVATE, SW_SHOWNORMAL,
-        TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, ULW_ALPHA, WM_DESTROY, WM_DISPLAYCHANGE,
-        WM_DPICHANGED, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER,
-        WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+        SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SPI_GETHIGHCONTRAST,
+        SPI_GETNONCLIENTMETRICS, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE,
+        SW_SHOWNOACTIVATE, SW_SHOWNORMAL, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, ULW_ALPHA,
+        WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP,
+        WM_SETTINGCHANGE, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+        WS_EX_TOPMOST, WS_POPUP,
     };
 
     // ------------------------------------------------------------------ consts
@@ -167,6 +171,10 @@ mod win {
     const VERTICAL_WIDTH_SLACK_PX: i32 = 4;
     const THEME_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize";
     const THEME_VALUE: &str = "SystemUsesLightTheme";
+    /// Per-user login-startup list. The value is our executable path; the
+    /// default-off `[startup] auto_start` setting is applied here.
+    const RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+    const RUN_VALUE: &str = "SysVitals";
     const TASKBAR_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced";
     const TASKBAR_VALUE: &str = "TaskbarAl";
 
@@ -186,7 +194,19 @@ mod win {
     /// Glyph weight follows the taskbar theme, like the clock: semibold on
     /// the dark taskbar, regular on the light one.
     static TEXT_WEIGHT: AtomicI32 = AtomicI32::new(600);
+    /// High-contrast mode flag (0/1). When set, the indicator ignores the
+    /// light/dark override and paints with the system high-contrast text color.
+    static HIGH_CONTRAST: AtomicU32 = AtomicU32::new(0);
+    /// `GetSysColor(COLOR_WINDOWTEXT)` in high-contrast mode (0x00BBGGRR).
+    static HC_TEXT: AtomicU32 = AtomicU32::new(0);
+    /// Last applied login-startup value; `u32::MAX` means "not applied yet".
+    static APPLIED_AUTO_START: AtomicU32 = AtomicU32::new(u32::MAX);
     static CONFIG: OnceLock<RwLock<Config>> = OnceLock::new();
+    /// True when the initial config read fell back to defaults because the
+    /// file was unreadable or malformed. Auto-start is not applied in that
+    /// case: a broken file must not silently remove a login item the user
+    /// enabled earlier.
+    static CONFIG_LOAD_FAILED: AtomicBool = AtomicBool::new(false);
     /// Job object owning every panel child. Created once at startup with
     /// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`; the handle is deliberately kept
     /// for the process lifetime, so a crash or a quit during a slow
@@ -313,11 +333,13 @@ mod win {
                                     p.display()
                                 ),
                             );
+                            CONFIG_LOAD_FAILED.store(true, Ordering::Relaxed);
                             Config::default()
                         }
                     },
                     Err(e) => {
                         log_event("WARN", &format!("config path unavailable: {e}"));
+                        CONFIG_LOAD_FAILED.store(true, Ordering::Relaxed);
                         Config::default()
                     }
                 };
@@ -412,6 +434,115 @@ mod win {
         }
     }
 
+    /// Read a REG_SZ value from HKCU; `None` when absent or unreadable. Used
+    /// only to avoid rewriting/logging an unchanged Run entry.
+    unsafe fn hkcu_string(key: &str, value: &str) -> Option<String> {
+        let key = utf16(key);
+        let value = utf16(value);
+        let mut hkey = HKEY::default();
+        if RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            windows::core::PCWSTR(key.as_ptr()),
+            None,
+            KEY_READ,
+            &mut hkey,
+        )
+        .is_err()
+        {
+            return None;
+        }
+        let mut data = [0u16; 2048];
+        let mut size = (data.len() * 2) as u32;
+        let queried = RegQueryValueExW(
+            hkey,
+            windows::core::PCWSTR(value.as_ptr()),
+            None,
+            None,
+            Some(data.as_mut_ptr().cast()),
+            Some(&mut size),
+        );
+        let _ = RegCloseKey(hkey);
+        if queried.is_err() || size < 2 {
+            return None;
+        }
+        let wide = &data[..(size as usize / 2)];
+        let text = String::from_utf16_lossy(wide);
+        Some(text.trim_end_matches('\0').to_string())
+    }
+
+    /// Write or remove the per-user Run entry. Returns whether the registry
+    /// actually changed. The value is the quoted path to this executable, so
+    /// moving the folder and launching from the new copy repairs the entry on
+    /// the next start.
+    unsafe fn set_auto_start(enabled: bool) -> Result<bool, String> {
+        let key = utf16(RUN_KEY);
+        let value = utf16(RUN_VALUE);
+        if enabled {
+            let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+            let command = format!("\"{}\"", exe.display());
+            if hkcu_string(RUN_KEY, RUN_VALUE).as_deref() == Some(command.as_str()) {
+                return Ok(false);
+            }
+            let data: Vec<u16> = command.encode_utf16().chain(std::iter::once(0)).collect();
+            let result = RegSetKeyValueW(
+                HKEY_CURRENT_USER,
+                windows::core::PCWSTR(key.as_ptr()),
+                windows::core::PCWSTR(value.as_ptr()),
+                REG_SZ.0,
+                Some(data.as_ptr().cast()),
+                (data.len() * 2) as u32,
+            );
+            if result.is_ok() {
+                Ok(true)
+            } else {
+                Err(format!("registry write error {}", result.0))
+            }
+        } else {
+            if hkcu_string(RUN_KEY, RUN_VALUE).is_none() {
+                return Ok(false);
+            }
+            let result = RegDeleteKeyValueW(
+                HKEY_CURRENT_USER,
+                windows::core::PCWSTR(key.as_ptr()),
+                windows::core::PCWSTR(value.as_ptr()),
+            );
+            // No value is the desired end state, not a failure.
+            if result.is_ok() || result == ERROR_FILE_NOT_FOUND {
+                Ok(true)
+            } else {
+                Err(format!("registry delete error {}", result.0))
+            }
+        }
+    }
+
+    /// Apply the login-startup preference once per value change. The settings
+    /// window writes the config; this process owns the registry side effect.
+    fn apply_auto_start(cfg: &Config) {
+        let desired = cfg.startup.auto_start;
+        let desired_bits = desired as u32;
+        let previous = APPLIED_AUTO_START.swap(desired_bits, Ordering::Relaxed);
+        if previous == desired_bits {
+            return;
+        }
+        match unsafe { set_auto_start(desired) } {
+            Ok(true) => log_event(
+                "INFO",
+                &format!(
+                    "auto-start {}",
+                    if desired { "enabled" } else { "disabled" }
+                ),
+            ),
+            Ok(false) => {}
+            Err(e) => log_event(
+                "WARN",
+                &format!(
+                    "auto-start {} failed: {e}",
+                    if desired { "enable" } else { "disable" }
+                ),
+            ),
+        }
+    }
+
     unsafe fn refresh_theme() {
         LIGHT_THEME.store(
             hkcu_dword(THEME_KEY, THEME_VALUE).unwrap_or(0).min(1),
@@ -423,6 +554,26 @@ mod win {
             FW_SEMIBOLD.0 as i32
         };
         TEXT_WEIGHT.store(weight, Ordering::Relaxed);
+
+        // High contrast is an accessibility override: when it is on, the
+        // taskbar no longer follows the normal light/dark palette, so keep the
+        // system text color instead of our black/white choice.
+        let mut hc = HIGHCONTRASTW::default();
+        hc.cbSize = std::mem::size_of::<HIGHCONTRASTW>() as u32;
+        let queried = SystemParametersInfoW(
+            SPI_GETHIGHCONTRAST,
+            hc.cbSize,
+            Some(std::ptr::from_mut(&mut hc).cast::<std::ffi::c_void>()),
+            windows::Win32::UI::WindowsAndMessaging::SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        )
+        .is_ok();
+        let high_contrast = queried && hc.dwFlags.contains(HCF_HIGHCONTRASTON);
+        HIGH_CONTRAST.store(high_contrast as u32, Ordering::Relaxed);
+        if high_contrast {
+            HC_TEXT.store(GetSysColor(COLOR_WINDOWTEXT), Ordering::Relaxed);
+        } else {
+            HC_TEXT.store(0, Ordering::Relaxed);
+        }
     }
 
     /// The real Windows build number (`GetVersionEx` is version-helpered).
@@ -448,6 +599,19 @@ mod win {
             Theme::Auto => LIGHT_THEME.load(Ordering::Relaxed) == 1,
             Theme::Light => true,
             Theme::Dark => false,
+        }
+    }
+
+    /// Indicator glyph color. High contrast wins over both the system
+    /// light/dark flag and the user's `display.theme` override.
+    fn indicator_text_rgb() -> (u32, u32, u32) {
+        if HIGH_CONTRAST.load(Ordering::Relaxed) == 1 {
+            let bgr = HC_TEXT.load(Ordering::Relaxed);
+            (bgr & 0xFF, (bgr >> 8) & 0xFF, (bgr >> 16) & 0xFF)
+        } else if theme_is_light() {
+            (0, 0, 0)
+        } else {
+            (255, 255, 255)
         }
     }
 
@@ -1612,12 +1776,7 @@ mod win {
             return;
         };
 
-        let light_theme = theme_is_light();
-        let (tr, tg, tb) = if light_theme {
-            (0u32, 0u32, 0u32)
-        } else {
-            (255u32, 255u32, 255u32)
-        };
+        let (tr, tg, tb) = indicator_text_rgb();
         let px = bits as *mut u32;
         // Glyph-only composition. The indicator draws no hover/pressed/open
         // background at all: the whole rectangle keeps a minimal (but
@@ -1732,12 +1891,13 @@ mod win {
         CONFIG_MTIME.store(current, Ordering::Relaxed);
         CONFIG_ERROR_MTIME.store(0, Ordering::Relaxed);
         store_config(loaded.clone());
+        apply_auto_start(&loaded);
         log_event(
             "INFO",
             &format!(
                 "config file change detected: interval={}ms language={:?} theme={:?} \
                  dual_row={} show_resources={} show_network={} item_spacing={}px \
-                 anchor={:?} left_margin={}px",
+                 anchor={:?} left_margin={}px auto_start={}",
                 loaded.sample.interval_ms,
                 loaded.display.language,
                 loaded.display.theme,
@@ -1747,6 +1907,7 @@ mod win {
                 loaded.display.item_spacing,
                 loaded.windows.anchor,
                 loaded.windows.left_margin_px,
+                loaded.startup.auto_start,
             ),
         );
         // Re-seed the sample timer in case the interval changed.
@@ -2525,10 +2686,18 @@ mod win {
                 // previous code repainted with the old width, clipping the
                 // new weight/size until the next sample tick.
                 let old_light = LIGHT_THEME.load(Ordering::Relaxed);
+                let old_hc = HIGH_CONTRAST.load(Ordering::Relaxed);
                 refresh_theme();
                 let new_light = LIGHT_THEME.load(Ordering::Relaxed);
+                let new_hc = HIGH_CONTRAST.load(Ordering::Relaxed);
                 if old_light != new_light {
                     log_event("INFO", &format!("theme changed: light={}", new_light == 1));
+                }
+                if old_hc != new_hc {
+                    log_event(
+                        "INFO",
+                        &format!("high contrast changed: enabled={}", new_hc == 1),
+                    );
                 }
                 invalidate_ui_font();
                 reset_width(hwnd);
@@ -2918,7 +3087,7 @@ mod win {
                 &format!(
                     "config loaded: interval={}ms language={:?} theme={:?} dual_row={} \
                      show_resources={} show_network={} item_spacing={}px anchor={:?} \
-                     left_margin={}px",
+                     left_margin={}px auto_start={}",
                     cfg.sample.interval_ms,
                     cfg.display.language,
                     cfg.display.theme,
@@ -2928,8 +3097,12 @@ mod win {
                     cfg.display.item_spacing,
                     cfg.windows.anchor,
                     cfg.windows.left_margin_px,
+                    cfg.startup.auto_start,
                 ),
             );
+            if !CONFIG_LOAD_FAILED.load(Ordering::Relaxed) {
+                apply_auto_start(&cfg);
+            }
             let centered = win11_centered_taskbar();
             log_event(
                 "INFO",

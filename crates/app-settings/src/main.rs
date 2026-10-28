@@ -397,6 +397,7 @@ struct SettingsView {
     dual_row: bool,
     show_resources: bool,
     show_network: bool,
+    auto_start: bool,
     // Index-based selections
     lang_idx: usize,
     interval_idx: usize,
@@ -592,6 +593,7 @@ impl SettingsView {
             dual_row: cfg.display.dual_row,
             show_resources: cfg.display.show_resources,
             show_network: cfg.display.show_network,
+            auto_start: cfg.startup.auto_start,
             cfg,
             prefix_cpu,
             prefix_mem,
@@ -712,6 +714,7 @@ impl SettingsView {
         cfg.display.dual_row = self.dual_row;
         cfg.display.show_resources = self.show_resources;
         cfg.display.show_network = self.show_network;
+        cfg.startup.auto_start = self.auto_start;
         cfg.display.prefix.cpu = self.prefix_cpu.read(cx).value().to_string();
         cfg.display.prefix.mem = self.prefix_mem.read(cx).value().to_string();
         cfg.display.prefix.up = self.prefix_up.read(cx).value().to_string();
@@ -722,12 +725,11 @@ impl SettingsView {
 
     /// Persist the UI-owned fields. The settings model is a startup snapshot,
     /// so a blind whole-file write would silently revert fields this window
-    /// does not edit (`history.*`, `sample.cpu_smoothing`,
-    /// `windows.auto_start`) after a manual edit. Re-read the current file
-    /// and carry those fields forward; only UI-owned fields come from the
-    /// view. Also skip the write when the serialized result is unchanged, so
-    /// merely focusing away does not bump the mtime and make the indicator
-    /// reload/re-sample.
+    /// does not edit (`history.*`, `sample.cpu_smoothing`) after a manual edit.
+    /// Re-read the current file and carry those fields forward; only UI-owned
+    /// fields come from the view. Also skip the write when the serialized
+    /// result is unchanged, so merely focusing away does not bump the mtime
+    /// and make the indicator reload/re-sample.
     fn save(&mut self, cx: &App) {
         let mut cfg = self.collect_config(cx);
         let Ok(path) = sysvitals_core::config::config_path() else {
@@ -742,7 +744,6 @@ impl SettingsView {
             Ok((disk, _)) => {
                 cfg.history = disk.history;
                 cfg.sample.cpu_smoothing = disk.sample.cpu_smoothing;
-                cfg.windows.auto_start = disk.windows.auto_start;
             }
             Err(e) => {
                 log_event(
@@ -1214,6 +1215,17 @@ impl Render for SettingsView {
             .child(labeled_row(
                 t(lang, "settings.sample_interval").to_string(),
                 interval_row,
+            ))
+            .child(card_divider(dark, scale_factor))
+            .child(switch_row(
+                t(lang, "settings.auto_start").to_string(),
+                Switch::new("auto-start")
+                    .checked(self.auto_start)
+                    .on_click(cx.listener(|this, checked: &bool, _, cx| {
+                        this.auto_start = *checked;
+                        this.save(cx);
+                        cx.notify();
+                    })),
             ))
             .when(cfg!(not(target_os = "macos")), |this| {
                 // Offered only where the choice is actually honored. On

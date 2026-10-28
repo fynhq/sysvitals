@@ -52,6 +52,8 @@ pub fn t(lang: Language, key: &str) -> &str {
         (Language::Zh, "theme.dark") => "暗色",
         (Language::En, "settings.sample_interval") => "Sample interval",
         (Language::Zh, "settings.sample_interval") => "采样间隔",
+        (Language::En, "settings.auto_start") => "Launch at login",
+        (Language::Zh, "settings.auto_start") => "开机自启",
         (Language::En, "settings.prefixes") => "Prefixes",
         (Language::Zh, "settings.prefixes") => "前缀",
         (Language::En, "settings.prefix_hint") => "Independent of language; up to 8 characters.",
