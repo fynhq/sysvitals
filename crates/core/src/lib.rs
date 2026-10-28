@@ -27,13 +27,13 @@ pub const HISTORY_STATE_MAP: &str = "Local\\SysVitalsHistoryState";
 /// Layout marker written by the indicator before the history process starts.
 pub const HISTORY_STATE_MAGIC: u32 = 0x5348_5653;
 /// Bumped whenever [`HistoryState`] changes shape.
-pub const HISTORY_STATE_VERSION: u32 = 1;
+pub const HISTORY_STATE_VERSION: u32 = 2;
 
 /// Command/status block mapped by the indicator and the resident history
 /// process.
 ///
 /// Ownership:
-/// - the indicator owns `desired_open`, `anchor` and `generation`;
+/// - the indicator owns `desired_open`, `anchor`, `monitor` and `generation`;
 /// - the history process owns `visible`.
 ///
 /// `generation` is both the request sequence and a seqlock: the indicator
@@ -59,6 +59,11 @@ pub struct HistoryState {
     /// Indicator rect in GPUI global logical pixels (left, top, right,
     /// bottom), the same space the history window is placed in.
     pub anchor: [f32; 4],
+    /// Native display handle (HMONITOR on Windows) hosting the indicator.
+    /// Zero when unknown. The panel needs it to select the target display
+    /// explicitly: GPUI's logical coordinate space is scaled per display, so
+    /// on mixed-DPI setups a rectangle alone is ambiguous between monitors.
+    pub monitor: i64,
 }
 
 impl Default for HistoryState {
@@ -77,6 +82,7 @@ impl HistoryState {
             generation: 0,
             _reserved: 0,
             anchor: [0.0; 4],
+            monitor: 0,
         }
     }
 
@@ -126,6 +132,7 @@ impl HistoryState {
                     read_volatile(addr_of!((*ptr).anchor[2])),
                     read_volatile(addr_of!((*ptr).anchor[3])),
                 ],
+                monitor: read_volatile(addr_of!((*ptr).monitor)),
             };
             if read(addr_of!((*ptr).generation)) == g1 {
                 return state;
@@ -147,11 +154,12 @@ impl HistoryState {
                 read_volatile(addr_of!((*ptr).anchor[2])),
                 read_volatile(addr_of!((*ptr).anchor[3])),
             ],
+            monitor: read_volatile(addr_of!((*ptr).monitor)),
         }
     }
 
-    /// Publish one indicator request (`desired_open` plus an optional anchor)
-    /// under the generation seqlock.
+    /// Publish one indicator request (`desired_open` plus an optional anchor
+    /// and display handle) under the generation seqlock.
     ///
     /// # Safety
     /// `ptr` must point to a live, properly aligned `HistoryState` mapping
@@ -160,6 +168,7 @@ impl HistoryState {
         ptr: *mut HistoryState,
         desired_open: bool,
         anchor: Option<[f32; 4]>,
+        monitor: i64,
     ) {
         use std::ptr::{addr_of, addr_of_mut, read_volatile, write_volatile};
         use std::sync::atomic::{fence, Ordering};
@@ -172,6 +181,7 @@ impl HistoryState {
                 write_volatile(addr_of_mut!((*ptr).anchor[slot]), *value);
             }
         }
+        write_volatile(addr_of_mut!((*ptr).monitor), monitor);
         write_volatile(addr_of_mut!((*ptr).desired_open), u32::from(desired_open));
         fence(Ordering::SeqCst);
         write_volatile(addr_of_mut!((*ptr).generation), odd.wrapping_add(1));
@@ -196,7 +206,7 @@ impl HistoryState {
     /// Same contract as [`HistoryState::write_request`].
     pub unsafe fn clear(ptr: *mut HistoryState) {
         unsafe {
-            Self::write_request(ptr, false, None);
+            Self::write_request(ptr, false, None, 0);
             Self::write_visible(ptr, false);
         }
     }
@@ -242,12 +252,14 @@ mod tests {
     fn history_state_request_roundtrip_uses_the_seqlock() {
         let mut state = HistoryState::new();
         let ptr = &mut state as *mut HistoryState;
+        let monitor = 0x0000_0000_0001_2345i64;
         unsafe {
-            HistoryState::write_request(ptr, true, Some([10.0, 20.0, 110.0, 60.0]));
+            HistoryState::write_request(ptr, true, Some([10.0, 20.0, 110.0, 60.0]), monitor);
             let read = HistoryState::read_consistent(ptr);
             assert_eq!(read.generation & 1, 0, "a published write is even");
             assert_eq!(read.desired_open, 1);
             assert_eq!(read.anchor, [10.0, 20.0, 110.0, 60.0]);
+            assert_eq!(read.monitor, monitor);
             assert!(read.anchor_is_valid());
 
             HistoryState::write_visible(ptr, true);
@@ -255,15 +267,17 @@ mod tests {
             assert_eq!(read.visible, 1);
             assert_eq!(read.generation, state.generation);
 
-            HistoryState::write_request(ptr, false, None);
+            HistoryState::write_request(ptr, false, None, 0);
             let read = HistoryState::read_consistent(ptr);
             assert_eq!(read.desired_open, 0);
+            assert_eq!(read.monitor, 0, "a close request drops the display hint");
             assert_eq!(read.visible, 1, "a close request leaves visibility alone");
 
             HistoryState::clear(ptr);
             let read = HistoryState::read_consistent(ptr);
             assert_eq!(read.desired_open, 0);
             assert_eq!(read.visible, 0);
+            assert_eq!(read.monitor, 0);
         }
     }
 }

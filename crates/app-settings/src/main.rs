@@ -1645,6 +1645,111 @@ fn parse_parent_pid() -> Option<u32> {
     None
 }
 
+/// The indicator rect in GPUI logical pixels, passed with `--anchor` so the
+/// settings window can open on the same monitor as the indicator that opened
+/// it (multi-monitor).
+struct AnchorRect {
+    left: f32,
+    top: f32,
+    right: f32,
+    bottom: f32,
+}
+
+/// Parse `--anchor L T R B` from the process arguments. Absent, malformed, or
+/// degenerate rectangles yield `None`, which keeps the default centered
+/// placement — a bad argument must never prevent the window from opening.
+fn parse_anchor() -> Option<AnchorRect> {
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if arg != "--anchor" {
+            continue;
+        }
+        let mut nums = [0f32; 4];
+        for slot in nums.iter_mut() {
+            *slot = args.next()?.trim().parse().ok()?;
+        }
+        if !nums.iter().all(|n| n.is_finite()) {
+            return None;
+        }
+        let [left, top, right, bottom] = nums;
+        return (right > left && bottom > top).then_some(AnchorRect {
+            left,
+            top,
+            right,
+            bottom,
+        });
+    }
+    None
+}
+
+/// Parse `--anchor-monitor <handle>` from the process arguments: the native
+/// display handle (HMONITOR on Windows) that hosted the indicator. `None`
+/// when absent, zero, or malformed.
+fn parse_anchor_monitor() -> Option<DisplayId> {
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if arg != "--anchor-monitor" {
+            continue;
+        }
+        let raw: u64 = args.next()?.trim().parse().ok()?;
+        return (raw != 0).then(|| DisplayId::new(raw));
+    }
+    None
+}
+
+/// Center the settings window on the display that contains the anchor (the
+/// indicator that opened it), so it follows the indicator across monitors.
+/// Falls back to the rectangle probe, then to the default centered placement.
+///
+/// The native display handle is preferred: GPUI scales each monitor's logical
+/// space by its own factor, so on mixed-DPI setups the anchor rectangle can
+/// fall inside two displays' bounds and the probe would pick the wrong one.
+fn settings_window_bounds(
+    anchor: Option<&AnchorRect>,
+    monitor: Option<DisplayId>,
+    // `Size` is ambiguous between `gpui::Size<Pixels>` (from `gpui_kit::*`)
+    // and the `gpui_component::Size` enum (from `gpui_kit::component::*`);
+    // the layout size is the generic geometry type.
+    size: gpui_kit::Size<Pixels>,
+    cx: &App,
+) -> WindowBounds {
+    let Some(anchor) = anchor else {
+        return WindowBounds::centered(size, cx);
+    };
+    if let Some(monitor) = monitor {
+        if let Some(display) = cx.displays().into_iter().find(|d| d.id() == monitor) {
+            let work = display.visible_bounds();
+            let center = point(
+                px(f32::from(work.origin.x) + f32::from(work.size.width) * 0.5),
+                px(f32::from(work.origin.y) + f32::from(work.size.height) * 0.5),
+            );
+            return WindowBounds::Windowed(Bounds::centered_at(center, size));
+        }
+    }
+    let probe = point(
+        px((anchor.left + anchor.right) * 0.5),
+        px((anchor.top + anchor.bottom) * 0.5),
+    );
+    let display = cx
+        .displays()
+        .into_iter()
+        .find(|d| d.bounds().contains(&probe))
+        .or_else(|| {
+            cx.displays()
+                .into_iter()
+                .find(|d| d.visible_bounds().contains(&probe))
+        });
+    let Some(display) = display else {
+        return WindowBounds::centered(size, cx);
+    };
+    let work = display.visible_bounds();
+    let center = point(
+        px(f32::from(work.origin.x) + f32::from(work.size.width) * 0.5),
+        px(f32::from(work.origin.y) + f32::from(work.size.height) * 0.5),
+    );
+    WindowBounds::Windowed(Bounds::centered_at(center, size))
+}
+
 /// Quit when the indicator that launched this panel disappears without
 /// running its quit path (crash, Force Quit). The job object covers Windows
 /// ordinary exits, but a monitored parent also catches a child launched
@@ -1794,6 +1899,12 @@ fn main() {
         apply_theme_and_accent(cx);
         watch_parent(cx);
 
+        // The indicator passes its rect so the window opens on the same
+        // monitor (multi-monitor); an absent or invalid anchor keeps the
+        // default centered placement.
+        let anchor = parse_anchor();
+        let monitor = parse_anchor_monitor();
+
         let titlebar = {
             #[cfg(target_os = "macos")]
             {
@@ -1829,7 +1940,16 @@ fn main() {
         };
 
         let window_options = WindowOptions {
-            window_bounds: Some(WindowBounds::centered(size(px(400.), px(680.)), cx)),
+            window_bounds: Some(settings_window_bounds(
+                anchor.as_ref(),
+                monitor,
+                size(px(400.), px(680.)),
+                cx,
+            )),
+            // Select the indicator's display explicitly; see
+            // `settings_window_bounds` for why the rectangle alone is not
+            // enough on mixed-DPI setups.
+            display_id: monitor,
             titlebar: Some(titlebar),
             // System backdrop material (Win11 Mica / Win10-era acrylic blur /
             // macOS window blur, with an opaque fallback on anything older or

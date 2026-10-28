@@ -1,4 +1,5 @@
-//! Windows display layer: a topmost layered overlay parked over the taskbar.
+//! Windows display layer: one topmost layered overlay per taskbar, so every
+//! monitor that shows a taskbar also shows the indicator.
 //!
 //! Why an overlay and not a `SetParent` child of `Shell_TrayWnd`: on current
 //! Windows 11 builds the taskbar's own content is composited by a XAML Islands
@@ -10,9 +11,15 @@
 //! visual result through a mechanism the compositor actually honors.
 //!
 //! Consequences handled here:
+//! - One overlay exists per taskbar: `Shell_TrayWnd` (the main bar) plus every
+//!   `Shell_SecondaryTrayWnd`. Each overlay is owned by its own taskbar so it
+//!   follows that bar's z-band, and each measures/renders at its monitor's own
+//!   DPI. A hidden sentinel window owns the shared timers (one sample per tick
+//!   drives every overlay) and reconciles the overlay set whenever taskbars or
+//!   monitors appear/disappear.
 //! - The overlay does not share the taskbar's z-order or visibility, so each
-//!   tick re-checks whether the taskbar is present (auto-hide). The indicator
-//!   hides only when the taskbar itself leaves the screen; no foreground-window
+//!   tick re-checks whether its taskbar is present (auto-hide). The indicator
+//!   hides only when that taskbar leaves the screen; no foreground-window
 //!   heuristics are involved.
 //! - Nothing is embedded, so there is no explorer-side state to roll back on
 //!   exit; destroying the window is the whole teardown.
@@ -40,9 +47,7 @@
 #[cfg(windows)]
 mod win {
     use std::cell::RefCell;
-    use std::sync::atomic::{
-        AtomicBool, AtomicI32, AtomicIsize, AtomicU32, AtomicU64, AtomicUsize, Ordering,
-    };
+    use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, AtomicU32, AtomicU64, Ordering};
     use std::sync::{Mutex, OnceLock, RwLock};
     use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -94,26 +99,22 @@ mod win {
         GetDpiForSystem, GetDpiForWindow, SetProcessDpiAwarenessContext,
         DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
     };
-    use windows::Win32::UI::Shell::{
-        IVirtualDesktopManager, SHAppBarMessage, ShellExecuteW, VirtualDesktopManager, ABE_LEFT,
-        ABE_RIGHT, ABM_GETSTATE, ABM_GETTASKBARPOS, ABS_AUTOHIDE, APPBARDATA,
-    };
+    use windows::Win32::UI::Shell::{IVirtualDesktopManager, ShellExecuteW, VirtualDesktopManager};
     use windows::Win32::UI::WindowsAndMessaging::{
         AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
         DispatchMessageW, FindWindowExW, FindWindowW, GetClassNameW, GetCursorPos,
         GetForegroundWindow, GetMessageW, GetShellWindow, GetSystemMetrics, GetWindowLongPtrW,
         GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow,
         IsWindowVisible, KillTimer, MoveWindow, PostMessageW, PostQuitMessage, RegisterClassExW,
-        RegisterWindowMessageW, SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowPos,
-        ShowWindow, SystemParametersInfoW, TrackPopupMenu, TranslateMessage, UpdateLayeredWindow,
-        WindowFromPoint, CS_HREDRAW, CS_VREDRAW, GWLP_HWNDPARENT, GWL_EXSTYLE, HWND_TOPMOST,
-        MF_SEPARATOR, MF_STRING, MSG, NONCLIENTMETRICSW, SM_CXSCREEN, SM_CXVIRTUALSCREEN,
-        SM_CYSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
-        SPI_GETNONCLIENTMETRICS, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE,
-        SW_SHOWNOACTIVATE, SW_SHOWNORMAL, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, ULW_ALPHA,
-        WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP,
-        WM_SETTINGCHANGE, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-        WS_EX_TOPMOST, WS_POPUP,
+        RegisterWindowMessageW, SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow,
+        SystemParametersInfoW, TrackPopupMenu, TranslateMessage, UpdateLayeredWindow,
+        WindowFromPoint, CS_HREDRAW, CS_VREDRAW, GWL_EXSTYLE, HWND_TOPMOST, MF_SEPARATOR,
+        MF_STRING, MSG, NONCLIENTMETRICSW, SM_CXSCREEN, SM_CXVIRTUALSCREEN, SM_CYSCREEN,
+        SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SPI_GETNONCLIENTMETRICS,
+        SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE, SW_SHOWNOACTIVATE, SW_SHOWNORMAL,
+        TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, ULW_ALPHA, WM_DESTROY, WM_DISPLAYCHANGE,
+        WM_DPICHANGED, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER,
+        WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
     };
 
     // ------------------------------------------------------------------ consts
@@ -125,10 +126,6 @@ mod win {
     const MOVE_MS: u32 = 1_000;
     /// How often (ms) we poll the config file's mtime for external changes.
     const CONFIG_POLL_MS: u32 = 500;
-    /// Custom message posted to the overlay to apply a config change. The
-    /// overlay re-samples, resizes and re-renders in its own wndproc at top
-    /// level, which is always safe (no reentrant rendering).
-    const WM_APP_APPLY: u32 = 0x8000 + 1;
     /// Posted by the background history-launch thread once the resident
     /// process handle is stored (or the launch failed).
     const WM_APP_HISTORY_READY: u32 = 0x8000 + 3;
@@ -183,8 +180,6 @@ mod win {
 
     // ----------------------------------------------------------------- statics
 
-    static WIN_W: AtomicI32 = AtomicI32::new(0);
-    static WIN_H: AtomicI32 = AtomicI32::new(0);
     /// Cached `SystemUsesLightTheme` (1 = light taskbar). Refreshed on
     /// `WM_SETTINGCHANGE` so a live theme switch repaints correctly.
     static LIGHT_THEME: AtomicU32 = AtomicU32::new(0);
@@ -192,9 +187,6 @@ mod win {
     /// the dark taskbar, regular on the light one.
     static TEXT_WEIGHT: AtomicI32 = AtomicI32::new(600);
     static CONFIG: OnceLock<RwLock<Config>> = OnceLock::new();
-    /// Track whether the taskbar is currently vertical so we can reset the
-    /// grow-only width when orientation flips.
-    static TASKBAR_VERTICAL: AtomicBool = AtomicBool::new(false);
     /// Job object owning every panel child. Created once at startup with
     /// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`; the handle is deliberately kept
     /// for the process lifetime, so a crash or a quit during a slow
@@ -207,13 +199,24 @@ mod win {
     /// True from the moment the background launch is requested until the
     /// worker finishes; a click during startup must not spawn a second child.
     static HISTORY_LAUNCHING: AtomicBool = AtomicBool::new(false);
+    /// Monitor (HMONITOR as isize) the live settings window was opened on.
+    /// A Settings click on a different indicator moves the window there by
+    /// closing and relaunching it; a click on the same screen is a no-op
+    /// (there is no IPC to raise an existing GPUI window).
+    static SETTINGS_MONITOR: AtomicIsize = AtomicIsize::new(0);
     /// The process is shutting down intentionally: the overlay's `WM_DESTROY`
     /// must quit rather than wait for a shell-driven rebind.
     static QUITTING: AtomicBool = AtomicBool::new(false);
-    /// Current overlay window, needed by the hidden sentinel that receives
-    /// `TaskbarCreated` broadcasts (the overlay itself is owned by the
-    /// taskbar and is destroyed with it).
-    static OVERLAY_HWND: AtomicIsize = AtomicIsize::new(0);
+    /// Hidden sentinel window handle. It owns every periodic timer (sample,
+    /// move, config poll, history sync, watchdog) and receives the
+    /// `TaskbarCreated` broadcast, so the timers survive explorer restarts and
+    /// drive every overlay at once instead of one window driving itself.
+    static SENTINEL_HWND: AtomicIsize = AtomicIsize::new(0);
+    /// Monitor (HMONITOR) of the overlay whose indicator currently anchors the
+    /// open history popup. A click on the same monitor's indicator closes the
+    /// popup (toggle); a click on a different monitor's indicator moves it
+    /// there instead.
+    static HISTORY_ANCHOR_MONITOR: AtomicIsize = AtomicIsize::new(0);
     /// `RegisterWindowMessageW("TaskbarCreated")`; 0 until registered.
     static TASKBAR_CREATED: OnceLock<u32> = OnceLock::new();
     /// Last observed config mtime in nanoseconds since UNIX_EPOCH. Nanosecond
@@ -228,13 +231,53 @@ mod win {
     /// full disk does not spam the log every tick.
     static STORE_WRITE_ERROR_LOGGED: AtomicBool = AtomicBool::new(false);
 
+    /// Per-taskbar overlay state. One entry per visible taskbar: the main bar
+    /// plus one per extra monitor. Everything that used to be a process-wide
+    /// global (window size, orientation) lives here so mixed-DPI multi-monitor
+    /// setups measure and render each indicator independently. All access is on
+    /// the message thread.
+    #[derive(Clone, Copy)]
+    struct Overlay {
+        hwnd: HWND,
+        /// The taskbar window that owns this overlay (its z-band follows it).
+        taskbar: HWND,
+        /// Monitor hosting the taskbar (HMONITOR as isize). Identifies the
+        /// indicator for the history popup's move-to-screen decision.
+        monitor: isize,
+        vertical: bool,
+        left_edge: bool,
+        /// Measured content size in physical pixels at this overlay's DPI.
+        /// Width only grows; a config/orientation/DPI change resets it.
+        win_w: i32,
+        win_h: i32,
+    }
+
+    fn overlay_by_hwnd(hwnd: HWND) -> Option<Overlay> {
+        OVERLAYS.with(|slot| slot.borrow().iter().find(|o| o.hwnd == hwnd).copied())
+    }
+
+    /// Reset one overlay's grow-only width so a fresh measurement takes effect
+    /// (config change, DPI change, orientation flip).
+    fn reset_width(hwnd: HWND) {
+        OVERLAYS.with(|slot| {
+            if let Some(ov) = slot.borrow_mut().iter_mut().find(|o| o.hwnd == hwnd) {
+                ov.win_w = 0;
+            }
+        });
+    }
+
+    fn sentinel_hwnd() -> HWND {
+        HWND(SENTINEL_HWND.load(Ordering::Relaxed) as *mut std::ffi::c_void)
+    }
+
     thread_local! {
         static SAMPLER: RefCell<Option<Sampler>> = const { RefCell::new(None) };
-        static LAST_ROW: RefCell<Option<FormattedRow>> = const { RefCell::new(None) };
-        /// Raw sample paired with `LAST_ROW`, so a config/DPI/theme change
-        /// can rebuild the layout without taking another reading (which used
-        /// to inject a millisecond-scale network spike on every save).
+        /// Raw sample shared by every overlay, so a config/DPI/theme change can
+        /// rebuild each layout without taking another reading (which used to
+        /// inject a millisecond-scale network spike on every save).
         static LAST_SNAPSHOT: RefCell<Option<sysvitals_core::Snapshot>> = const { RefCell::new(None) };
+        /// One entry per visible taskbar; the registry the sentinel drives.
+        static OVERLAYS: RefCell<Vec<Overlay>> = const { RefCell::new(Vec::new()) };
         // History store. Lazily opened on the first sample so a missing
         // data dir never blocks the indicator itself.
         static STORE: RefCell<Option<sysvitals_core::Store>> = const { RefCell::new(None) };
@@ -469,28 +512,28 @@ mod win {
         UI_FONT.with(|slot| *slot.borrow_mut() = None);
     }
 
-    /// DPI of the monitor currently hosting the overlay. `GetDpiForSystem`
-    /// is only a fallback for the pre-window startup path.
-    fn current_dpi() -> u32 {
-        let raw = OVERLAY_HWND.load(Ordering::Relaxed);
-        let dpi = if raw == 0 {
+    /// DPI of the monitor hosting `hwnd`. `GetDpiForSystem` is only a fallback
+    /// when the window handle is unavailable.
+    fn dpi_for(hwnd: HWND) -> u32 {
+        let dpi = unsafe { GetDpiForWindow(hwnd) };
+        (if dpi == 0 {
             unsafe { GetDpiForSystem() }
         } else {
-            unsafe { GetDpiForWindow(HWND(raw as *mut std::ffi::c_void)) }
-        };
-        dpi.max(96)
+            dpi
+        })
+        .max(96)
     }
 
-    /// Effective glyph height in physical pixels for the current taskbar
+    /// Effective glyph height in physical pixels for one overlay's taskbar
     /// orientation. The cached system font height is expressed at the system
-    /// DPI; scale it to the overlay's monitor and then apply the vertical
+    /// DPI; scale it to the overlay's own monitor and then apply the vertical
     /// reduction, so mixed-DPI setups and live text-size changes both work.
-    fn effective_font_height() -> i32 {
+    fn effective_font_height_for(hwnd: HWND, vertical: bool) -> i32 {
         let (height, _) = ui_font();
         let system_dpi = (unsafe { GetDpiForSystem() }).max(96) as i32;
-        let window_dpi = current_dpi() as i32;
+        let window_dpi = dpi_for(hwnd) as i32;
         let height = height * window_dpi / system_dpi;
-        if TASKBAR_VERTICAL.load(Ordering::Relaxed) {
+        if vertical {
             // `height` is a negative character height; clamp the reduction so a
             // tiny system font can never produce 0 (which CreateFontW would
             // silently interpret as "default font").
@@ -500,18 +543,18 @@ mod win {
         }
     }
 
-    /// Horizontal padding for the current orientation.
-    fn pad_px() -> i32 {
-        if TASKBAR_VERTICAL.load(Ordering::Relaxed) {
+    /// Horizontal padding for the given orientation.
+    fn pad_px(vertical: bool) -> i32 {
+        if vertical {
             VERTICAL_PAD_PX
         } else {
             PAD_PX
         }
     }
 
-    /// Width slack for the current orientation.
-    fn width_slack_px() -> i32 {
-        if TASKBAR_VERTICAL.load(Ordering::Relaxed) {
+    /// Width slack for the given orientation.
+    fn width_slack_px(vertical: bool) -> i32 {
+        if vertical {
             VERTICAL_WIDTH_SLACK_PX
         } else {
             WIDTH_SLACK_PX
@@ -521,10 +564,10 @@ mod win {
     /// Overlay font: the system UI face at the system UI size, grayscale AA.
     /// Antialiased (not ClearType) because the glyphs are composited
     /// per-pixel-alpha over the taskbar.
-    unsafe fn make_font() -> HFONT {
+    unsafe fn make_font_for(hwnd: HWND, vertical: bool) -> HFONT {
         let (_, face) = ui_font();
         CreateFontW(
-            effective_font_height(),
+            effective_font_height_for(hwnd, vertical),
             0,
             0,
             0,
@@ -543,10 +586,10 @@ mod win {
 
     /// Overlay font at an integer supersample multiplier. Used to render at a
     /// supersampled scale (2x) before downsampling.
-    unsafe fn make_font_at(scale: i32) -> HFONT {
+    unsafe fn make_font_at_for(hwnd: HWND, scale: i32, vertical: bool) -> HFONT {
         let (_, face) = ui_font();
         CreateFontW(
-            effective_font_height() * scale.max(1),
+            effective_font_height_for(hwnd, vertical) * scale.max(1),
             0,
             0,
             0,
@@ -573,34 +616,36 @@ mod win {
         /// placement code uses it to pick which edge the indicator must never
         /// run past when its column is wider than the bar's thickness.
         left_edge: bool,
+        /// Monitor hosting this taskbar (HMONITOR as isize).
+        monitor: isize,
     }
 
-    /// Taskbar geometry, or `None` when the taskbar is not currently on screen
-    /// (auto-hidden, or shell not ready).
-    unsafe fn taskbar_info() -> Option<TaskbarInfo> {
-        let mut abd = APPBARDATA {
-            cbSize: std::mem::size_of::<APPBARDATA>() as u32,
-            ..Default::default()
-        };
-        if SHAppBarMessage(ABM_GETTASKBARPOS, &mut abd) == 0 {
+    /// Geometry for one specific taskbar window, or `None` when that bar is
+    /// not currently on screen (auto-hidden, or shell not ready).
+    ///
+    /// The main bar's rect used to come from `ABM_GETTASKBARPOS`, but that call
+    /// only reports the main taskbar; secondary bars (`Shell_SecondaryTrayWnd`)
+    /// must be measured with `GetWindowRect`, so every bar uses the same path.
+    /// Orientation is inferred from the rect: a taskbar is always far longer
+    /// along its docked edge than it is thick.
+    unsafe fn taskbar_info_for(bar: HWND) -> Option<TaskbarInfo> {
+        let mut r = RECT::default();
+        if GetWindowRect(bar, &mut r).is_err() {
             return None;
         }
-        let r = abd.rc;
-        // With auto-hide enabled the shell parks the bar off screen while it
-        // is hidden. The rect alone is not a reliable signal on every build:
-        // also ask the shell for the autohide flag and require the tray window
-        // to be visible while the flag is set.
-        if SHAppBarMessage(ABM_GETSTATE, &mut abd) & ABS_AUTOHIDE as usize != 0 {
-            let cls = utf16("Shell_TrayWnd");
-            let tray = FindWindowW(windows::core::PCWSTR(cls.as_ptr()), None).ok();
-            if tray.map_or(true, |h| !IsWindowVisible(h).as_bool()) {
-                return None;
-            }
+        if r.right <= r.left || r.bottom <= r.top {
+            return None;
         }
-        // The main taskbar can live on a secondary monitor (Windows 10 lets
-        // the user drag it there), where its rect may be entirely outside the
-        // primary screen or use negative virtual coordinates. Validate against
-        // the virtual screen, never `SM_CXSCREEN`/`SM_CYSCREEN` (primary only).
+        // A taskbar window that is not visible has no indicator. This covers
+        // auto-hide (the shell slides the bar away and hides it) and a
+        // secondary bar that still exists as a window after the user turns
+        // off "show taskbar on all displays". A visible bar parked off its
+        // monitor is rejected by the intersection checks below.
+        if !IsWindowVisible(bar).as_bool() {
+            return None;
+        }
+        // The bar can live on any monitor, including negative virtual
+        // coordinates. Validate against the virtual screen, never the primary.
         let virtual_rect = virtual_screen_rect();
         let on_screen = r.bottom > virtual_rect.top
             && r.top < virtual_rect.bottom
@@ -609,11 +654,32 @@ mod win {
         if !on_screen {
             return None;
         }
-        let vertical = abd.uEdge == ABE_LEFT || abd.uEdge == ABE_RIGHT;
+        let monitor = MonitorFromWindow(bar, MONITOR_DEFAULTTONEAREST);
+        let mut mi = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        let mon_rect = if GetMonitorInfoW(monitor, &mut mi).as_bool() {
+            mi.rcMonitor
+        } else {
+            virtual_rect
+        };
+        // A hidden bar is parked just off its own monitor edge; require the
+        // rect to still intersect the monitor that hosts it.
+        let intersects = r.bottom > mon_rect.top
+            && r.top < mon_rect.bottom
+            && r.right > mon_rect.left
+            && r.left < mon_rect.right;
+        if !intersects {
+            return None;
+        }
+        let vertical = (r.bottom - r.top) > (r.right - r.left);
+        let left_edge = vertical && r.left <= mon_rect.left;
         Some(TaskbarInfo {
             rect: r,
             vertical,
-            left_edge: abd.uEdge == ABE_LEFT,
+            left_edge,
+            monitor: monitor.0 as isize,
         })
     }
 
@@ -637,15 +703,12 @@ mod win {
         }
     }
 
-    /// Monitor that hosts the main taskbar, or the virtual desktop when the
-    /// shell window cannot be resolved. The indicator must be clamped to this
+    /// Monitor that hosts a given taskbar, or the virtual desktop when the
+    /// monitor cannot be resolved. The indicator must be clamped to this
     /// monitor, not the primary one, for secondary/negative-coordinate bars.
-    unsafe fn taskbar_monitor_rect() -> RECT {
+    unsafe fn taskbar_monitor_rect_for(bar: HWND) -> RECT {
         let fallback = virtual_screen_rect();
-        let Some(tray) = find_taskbar() else {
-            return fallback;
-        };
-        let monitor = MonitorFromWindow(tray, MONITOR_DEFAULTTONEAREST);
+        let monitor = MonitorFromWindow(bar, MONITOR_DEFAULTTONEAREST);
         if monitor.is_invalid() {
             return fallback;
         }
@@ -658,6 +721,66 @@ mod win {
         } else {
             fallback
         }
+    }
+
+    /// Left edge of one visible direct child of a taskbar, if present.
+    unsafe fn visible_child_left(bar: HWND, class: &str) -> Option<i32> {
+        let cls = utf16(class);
+        let child =
+            FindWindowExW(Some(bar), None, windows::core::PCWSTR(cls.as_ptr()), None).ok()?;
+        if child.is_invalid() || !IsWindowVisible(child).as_bool() {
+            return None;
+        }
+        let mut rect = RECT::default();
+        if GetWindowRect(child, &mut rect).is_err() || rect.right <= rect.left {
+            return None;
+        }
+        Some(rect.left)
+    }
+
+    /// Horizontal anchor for an indicator inside one taskbar: the left edge of
+    /// its notification area when the bar shows tray icons, otherwise the left
+    /// edge of the show-desktop button, otherwise the bar's right edge.
+    ///
+    /// Secondary bars have no `TrayNotifyWnd` until "show tray icons on all
+    /// displays" is enabled. Anchoring such a bar to its raw right edge would
+    /// put the indicator on top of the show-desktop button, so that button —
+    /// when present — is the better boundary.
+    unsafe fn taskbar_anchor_left(bar: HWND) -> i32 {
+        if let Some(left) = visible_child_left(bar, "TrayNotifyWnd") {
+            return left;
+        }
+        if let Some(left) = visible_child_left(bar, "TrayShowDesktopButtonWClass") {
+            return left;
+        }
+        let mut rect = RECT::default();
+        if GetWindowRect(bar, &mut rect).is_ok() {
+            rect.right
+        } else {
+            0
+        }
+    }
+
+    /// Every taskbar window: the main bar plus one per extra monitor. All
+    /// secondary bars share the class name `Shell_SecondaryTrayWnd`, so they
+    /// are enumerated with `FindWindowExW`.
+    unsafe fn taskbar_windows() -> Vec<HWND> {
+        let mut out = Vec::new();
+        if let Some(main) = find_taskbar() {
+            out.push(main);
+        }
+        let cls = utf16("Shell_SecondaryTrayWnd");
+        let mut prev: Option<HWND> = None;
+        loop {
+            match FindWindowExW(None, prev, windows::core::PCWSTR(cls.as_ptr()), None) {
+                Ok(h) if !h.is_invalid() => {
+                    out.push(h);
+                    prev = Some(h);
+                }
+                _ => break,
+            }
+        }
+        out
     }
 
     /// How many times the topmost band was found lost between two ticks.
@@ -681,6 +804,9 @@ mod win {
     static CLOAK_LOGGED: AtomicBool = AtomicBool::new(false);
     static CLOAK_MOVE_FAIL_LOGGED: AtomicBool = AtomicBool::new(false);
     static LAYERED_FAIL_LOGGED: AtomicBool = AtomicBool::new(false);
+    /// De-duplicates the "overlay creation failed" warning: reconcile retries
+    /// every second, so a persistent failure must not log on every attempt.
+    static OVERLAY_CREATE_FAIL_LOGGED: AtomicBool = AtomicBool::new(false);
 
     /// The Windows virtual-desktop manager, created on demand. The overlay is
     /// a top-level window, so Windows cloaks it when the user switches to
@@ -868,12 +994,16 @@ mod win {
         );
     }
 
-    /// Move-only placement. Visibility follows the taskbar alone: as long as
-    /// the taskbar is on screen the indicator stays visible. It hides only
-    /// when the taskbar itself is gone (auto-hide or a true fullscreen app
-    /// pushing it off screen). No foreground-window heuristics involved.
-    unsafe fn reposition(hwnd: HWND) {
-        let Some(info) = taskbar_info() else {
+    /// Move-only placement for one overlay. Visibility follows that overlay's
+    /// taskbar alone: as long as the taskbar is on screen the indicator stays
+    /// visible. It hides only when the taskbar itself is gone (auto-hide or a
+    /// true fullscreen app pushing it off screen). No foreground-window
+    /// heuristics involved.
+    unsafe fn reposition_overlay(hwnd: HWND) {
+        let Some(ov) = overlay_by_hwnd(hwnd) else {
+            return;
+        };
+        let Some(info) = taskbar_info_for(ov.taskbar) else {
             if IsWindowVisible(hwnd).as_bool() {
                 log_event(
                     "INFO",
@@ -887,29 +1017,52 @@ mod win {
             return;
         };
         maintain_visibility(hwnd);
-        // Track orientation changes: reset grow-only width when the taskbar
-        // flips between horizontal and vertical. Re-sampling here rebuilds the
-        // stacked/dual layout; the sample path also places the window with the
-        // new size, so this branch returns instead of positioning again.
-        let was_vertical = TASKBAR_VERTICAL.swap(info.vertical, Ordering::Relaxed);
-        if was_vertical != info.vertical {
-            log_event(
-                "INFO",
-                &format!("taskbar orientation changed: vertical={}", info.vertical),
-            );
-            WIN_W.store(0, Ordering::Relaxed);
-            rerender_from_last(hwnd);
+        // Keep the cached monitor/edge fresh (a Windows 10 bar can be dragged
+        // to another monitor or docked edge between ticks) and detect an
+        // orientation flip, which resets the grow-only width and re-layouts.
+        let orientation_changed = ov.vertical != info.vertical;
+        // The taskbar can move to another monitor (Windows 10 drag, or a
+        // display reconfiguration). Re-measure instead of keeping the width
+        // grown at the old monitor's DPI; the hidden-overlay case does not
+        // always deliver WM_DPICHANGED.
+        let monitor_changed = ov.monitor != info.monitor;
+        OVERLAYS.with(|slot| {
+            if let Some(o) = slot.borrow_mut().iter_mut().find(|o| o.hwnd == hwnd) {
+                o.monitor = info.monitor;
+                o.left_edge = info.left_edge;
+                if orientation_changed {
+                    o.vertical = info.vertical;
+                }
+                if orientation_changed || monitor_changed {
+                    o.win_w = 0;
+                }
+            }
+        });
+        if orientation_changed || monitor_changed {
+            if orientation_changed {
+                log_event(
+                    "INFO",
+                    &format!("taskbar orientation changed: vertical={}", info.vertical),
+                );
+            }
+            if monitor_changed {
+                log_event("INFO", "taskbar moved to another monitor; re-measuring");
+            }
+            relayout_overlay(hwnd);
             return;
         }
         apply_position_with_info(hwnd, info);
     }
 
-    /// Place the current window at its anchor using the latest `WIN_W`/`WIN_H`.
-    /// Called both by the once-per-second geometry tick and immediately after
-    /// a measured resize: growing the width while keeping the old left edge
-    /// would push a right-anchored overlay into the tray until the next tick.
+    /// Place one overlay at its anchor using its measured size. Called both by
+    /// the once-per-second geometry tick and immediately after a measured
+    /// resize: growing the width while keeping the old left edge would push a
+    /// right-anchored overlay into the tray until the next tick.
     unsafe fn apply_position(hwnd: HWND) {
-        let Some(info) = taskbar_info() else {
+        let Some(ov) = overlay_by_hwnd(hwnd) else {
+            return;
+        };
+        let Some(info) = taskbar_info_for(ov.taskbar) else {
             if IsWindowVisible(hwnd).as_bool() {
                 log_event(
                     "INFO",
@@ -930,10 +1083,16 @@ mod win {
         // Taskbar is on screen: keep the indicator in the topmost band (it can
         // be re-banded below shell flyouts between ticks; see maintain_topmost).
         maintain_topmost(hwnd);
+        let Some(ov) = overlay_by_hwnd(hwnd) else {
+            return;
+        };
         let bar = info.rect;
         let cfg = config();
-        let w = WIN_W.load(Ordering::Relaxed);
-        let h = WIN_H.load(Ordering::Relaxed);
+        let w = ov.win_w;
+        let h = ov.win_h;
+        if w <= 0 || h <= 0 {
+            return; // not measured yet
+        }
 
         let (x, y) = if info.vertical {
             // Vertical taskbar: horizontally centered within the bar thickness.
@@ -943,7 +1102,7 @@ mod win {
             // desktop instead: keep the left edge on-screen for a left-docked
             // bar, the right edge on-screen for a right-docked bar.
             let center_x = bar.left + (bar.right - bar.left - w) / 2;
-            let monitor = taskbar_monitor_rect();
+            let monitor = taskbar_monitor_rect_for(ov.taskbar);
             let x = if info.left_edge {
                 center_x.max(monitor.left)
             } else {
@@ -961,29 +1120,9 @@ mod win {
             let x = if left_anchor {
                 bar.left + cfg.windows.left_margin_px as i32
             } else {
-                let cls = utf16("Shell_TrayWnd");
-                let Ok(tray) = FindWindowW(windows::core::PCWSTR(cls.as_ptr()), None) else {
-                    return;
-                };
-                let notify_cls = utf16("TrayNotifyWnd");
-                let notify = FindWindowExW(
-                    Some(tray),
-                    None,
-                    windows::core::PCWSTR(notify_cls.as_ptr()),
-                    None,
-                )
-                .unwrap_or_else(|_| HWND::default());
-                let anchor_x = if notify.is_invalid() {
-                    bar.right
-                } else {
-                    let mut nr = RECT::default();
-                    if GetWindowRect(notify, &mut nr).is_err() {
-                        bar.right
-                    } else {
-                        nr.left
-                    }
-                };
-                anchor_x - w
+                // Anchor to this bar's own notification area (or its
+                // show-desktop button when the bar has no tray icons).
+                taskbar_anchor_left(ov.taskbar) - w
             };
             let y = bar.top + (bar.bottom - bar.top - h) / 2;
             (x, y)
@@ -997,7 +1136,7 @@ mod win {
             // Negative virtual coordinates are legitimate on a monitor placed
             // left of/above the primary one; clamp to that monitor instead of
             // treating every negative number as off-screen.
-            let monitor = taskbar_monitor_rect();
+            let monitor = taskbar_monitor_rect_for(ov.taskbar);
             if x < monitor.left
                 || y < monitor.top
                 || x + w > monitor.right
@@ -1139,16 +1278,15 @@ mod win {
         }
     }
 
-    /// Measure the formatted rows and grow the window to fit. Width only
+    /// Measure the formatted rows and grow one overlay to fit. Width only
     /// ever grows; height follows the row count, and in the vertical layout
     /// the per-line slot heights from [`measure_frame`] (separator lines
     /// sized to `item_spacing`, not a full text line).
-    unsafe fn resize_to_content(hwnd: HWND, row: &FormattedRow) {
+    unsafe fn resize_overlay(hwnd: HWND, row: &FormattedRow, vertical: bool) {
         let cfg = config();
         let spacing_px = cfg.display.item_spacing as i32;
-        let vertical = TASKBAR_VERTICAL.load(Ordering::Relaxed);
         let hdc = GetDC(Some(hwnd));
-        let font = make_font();
+        let font = make_font_for(hwnd, vertical);
         let old = SelectObject(hdc, font.into());
         let m = measure_frame(hdc, row, spacing_px, vertical, 2);
         SelectObject(hdc, old);
@@ -1157,17 +1295,25 @@ mod win {
         if m.line_h == 0 {
             return;
         }
-        let want_w = m.want_w + pad_px() * 2 + width_slack_px();
+        let want_w = m.want_w + pad_px(vertical) * 2 + width_slack_px(vertical);
         let want_h = if m.line_heights.is_empty() {
             (m.line_h + 2) * row.lines.len() as i32 + 2
         } else {
             m.line_heights.iter().sum::<i32>() + 2
         };
-        WIN_W.fetch_max(want_w, Ordering::Relaxed);
-        WIN_H.store(want_h, Ordering::Relaxed);
+        OVERLAYS.with(|slot| {
+            if let Some(ov) = slot.borrow_mut().iter_mut().find(|o| o.hwnd == hwnd) {
+                ov.win_w = ov.win_w.max(want_w);
+                ov.win_h = want_h;
+            }
+        });
     }
 
-    unsafe fn sample_now(hwnd: HWND) {
+    /// One sampling tick: take a single reading, store it, write it to the
+    /// history database and re-layout every overlay from it. All overlays
+    /// share this one sample so network rates are computed over the full
+    /// interval regardless of how many taskbars are showing.
+    unsafe fn sample_tick() {
         let cfg = config();
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1181,31 +1327,42 @@ mod win {
         });
         LAST_SNAPSHOT.with(|s| *s.borrow_mut() = Some(snapshot));
         record_history(&cfg, now, &snapshot);
-        rerender_from_last(hwnd);
+        relayout_all();
     }
 
-    /// Rebuild the frame from the last sample with the current config,
-    /// orientation and font. Config hot-reload, DPI/text-size changes and
-    /// theme flips all use this: taking a fresh sample for an unrelated
-    /// setting change used to compute network rates over a few milliseconds
-    /// and paint a bogus spike. Only the periodic timer (and startup) samples.
-    unsafe fn rerender_from_last(hwnd: HWND) {
+    /// Re-layout and redraw every overlay from the last sample.
+    fn relayout_all() {
+        let hwnds: Vec<HWND> = OVERLAYS.with(|slot| slot.borrow().iter().map(|o| o.hwnd).collect());
+        for hwnd in hwnds {
+            unsafe { relayout_overlay(hwnd) };
+        }
+    }
+
+    /// Rebuild one overlay's frame from the last sample with the current
+    /// config, its own orientation and font. Config hot-reload, DPI/text-size
+    /// changes and theme flips all use this: taking a fresh sample for an
+    /// unrelated setting change used to compute network rates over a few
+    /// milliseconds and paint a bogus spike. Only the periodic timer (and
+    /// startup) samples.
+    unsafe fn relayout_overlay(hwnd: HWND) {
         let Some(snapshot) = LAST_SNAPSHOT.with(|s| *s.borrow()) else {
-            sample_now(hwnd);
+            sample_tick();
+            return;
+        };
+        let Some(ov) = overlay_by_hwnd(hwnd) else {
             return;
         };
         let cfg = config();
-        let row = if TASKBAR_VERTICAL.load(Ordering::Relaxed) {
+        let row = if ov.vertical {
             format_frame_vertical(&snapshot, &cfg)
         } else {
             format_frame(&snapshot, &cfg)
         };
-        resize_to_content(hwnd, &row);
-        LAST_ROW.with(|l| *l.borrow_mut() = Some(row));
+        resize_overlay(hwnd, &row, ov.vertical);
         // Re-place with the new size before painting: a right-anchored window
         // must not grow into the tray until the next one-second move tick.
         apply_position(hwnd);
-        render_layered(hwnd);
+        render_layered(hwnd, &row, ov.vertical);
     }
 
     /// Insert the current CPU/MEM sample into the history database and prune
@@ -1263,10 +1420,10 @@ mod win {
         });
     }
 
-    /// Render the cached row into a 32bpp premultiplied-alpha DIB and blit it
-    /// onto the layered window with `UpdateLayeredWindow`. Glyphs are rendered
-    /// at 2x supersampled resolution and box-filtered down.
-    unsafe fn render_layered(hwnd: HWND) {
+    /// Render a frame into a 32bpp premultiplied-alpha DIB and blit it onto
+    /// the layered window with `UpdateLayeredWindow`. Glyphs are rendered at
+    /// 2x supersampled resolution and box-filtered down.
+    unsafe fn render_layered(hwnd: HWND, row: &FormattedRow, vertical: bool) {
         let mut win_rc = RECT::default();
         if GetWindowRect(hwnd, &mut win_rc).is_err() {
             return;
@@ -1276,9 +1433,6 @@ mod win {
         if w <= 0 || h <= 0 {
             return;
         }
-        let Some(row) = LAST_ROW.with(|l| l.borrow().clone()) else {
-            return;
-        };
 
         let screen_dc = GetDC(None);
         let mem_dc = CreateCompatibleDC(Some(screen_dc));
@@ -1303,7 +1457,7 @@ mod win {
             return;
         };
         let old_ss_bmp = SelectObject(mem_dc, ss_bmp.into());
-        let ss_font = make_font_at(SS);
+        let ss_font = make_font_at_for(hwnd, SS, vertical);
         let old_ss_font = SelectObject(mem_dc, ss_font.into());
         SetBkMode(mem_dc, TRANSPARENT);
         SetTextColor(mem_dc, COLORREF(0x00FF_FFFF));
@@ -1318,9 +1472,8 @@ mod win {
         let spacing_px = config().display.item_spacing as i32;
         // Padding follows the orientation so the vertical layout can use its
         // tighter margin; measurement and rendering must agree on it.
-        let pad = pad_px() * SS;
-        let vertical = TASKBAR_VERTICAL.load(Ordering::Relaxed);
-        let fm = measure_frame(mem_dc, &row, spacing_px * SS, vertical, 2 * SS);
+        let pad = pad_px(vertical) * SS;
+        let fm = measure_frame(mem_dc, row, spacing_px * SS, vertical, 2 * SS);
         // Line slot tops in supersampled pixels. Uniform division works for
         // the horizontal layouts; the vertical layout has per-line heights
         // (separator lines sized to `item_spacing`, content lines sized to
@@ -1544,8 +1697,8 @@ mod win {
 
     /// Called on each TIMER_CONFIG tick. Compares the config file's mtime
     /// against the cached value; on change, reloads the config, re-seeds the
-    /// sample timer (interval may have changed), and posts WM_APP_APPLY.
-    fn poll_config_change(hwnd: HWND) {
+    /// sample timer (interval may have changed), and re-lays out every overlay.
+    fn poll_config_change() {
         let current = config_mtime();
         let previous = CONFIG_MTIME.load(Ordering::Relaxed);
         if current == previous {
@@ -1587,16 +1740,23 @@ mod win {
         );
         // Re-seed the sample timer in case the interval changed.
         unsafe {
-            let _ = KillTimer(Some(hwnd), TIMER_SAMPLE);
+            let sentinel = sentinel_hwnd();
+            let _ = KillTimer(Some(sentinel), TIMER_SAMPLE);
             SetTimer(
-                Some(hwnd),
+                Some(sentinel),
                 TIMER_SAMPLE,
                 loaded.sample.interval_ms.clamp(500, 5000) as u32,
                 None,
             );
         }
-        // Post the apply message so the overlay re-renders at top level.
-        let _ = unsafe { PostMessageW(Some(hwnd), WM_APP_APPLY, WPARAM(0), LPARAM(0)) };
+        // Reset the grow-only widths so a narrower layout takes effect, then
+        // re-lay out every overlay from the last sample (no re-sample spike).
+        OVERLAYS.with(|slot| {
+            for ov in slot.borrow_mut().iter_mut() {
+                ov.win_w = 0;
+            }
+        });
+        relayout_all();
     }
 
     // ------------------------------------------------------- child process launch
@@ -1624,8 +1784,14 @@ mod win {
 
     /// Terminate the process behind `slot` if it is still running. The handle
     /// is closed and the slot cleared either way. Returns `true` only when a
-    /// live process was terminated.
-    fn terminate_child(slot: &std::cell::RefCell<Option<HANDLE>>, label: &str) -> bool {
+    /// live process was terminated. `wait_for_exit` blocks briefly until the
+    /// process object is signaled, which also guarantees that a child's named
+    /// single-instance mutex has been released before a replacement starts.
+    fn terminate_child(
+        slot: &std::cell::RefCell<Option<HANDLE>>,
+        label: &str,
+        wait_for_exit: bool,
+    ) -> bool {
         let mut borrow = slot.borrow_mut();
         let Some(handle) = borrow.as_ref() else {
             return false;
@@ -1641,6 +1807,16 @@ mod win {
             return false;
         }
         let _ = unsafe { TerminateProcess(*handle, 0) };
+        if wait_for_exit {
+            // Waits for the process object, which is signaled only after the
+            // child's handles are closed — including its single-instance
+            // mutex. Without this, a replacement launched immediately could
+            // see the dying instance and exit.
+            let wait = unsafe { WaitForSingleObject(*handle, 2_000) };
+            if wait == WAIT_TIMEOUT {
+                log_event("WARN", &format!("{label} did not exit within 2s"));
+            }
+        }
         let _ = unsafe { CloseHandle(*handle) };
         *borrow = None;
         log_event("INFO", &format!("{label} process closed by indicator"));
@@ -1675,7 +1851,9 @@ mod win {
     fn close_children() {
         let _ = history_terminate();
         SETTINGS_PROCESS.with(|slot| {
-            let _ = terminate_child(slot, "settings window");
+            // Quit/restart: the relaunch is delayed by the caller, so there is
+            // no single-instance race to wait out here.
+            let _ = terminate_child(slot, "settings window", false);
         });
     }
 
@@ -1816,14 +1994,38 @@ mod win {
     /// launch is synchronous (`CreateProcessW` does not pump messages), so
     /// the slot liveness check alone is enough; there is no in-flight window
     /// to guard. Pass the parent pid so the panel can close itself if the
-    /// indicator dies without running its quit path.
-    fn launch_settings() {
-        let args = format!("--parent-pid {}", unsafe { GetCurrentProcessId() });
+    /// indicator dies without running its quit path, and the clicked
+    /// indicator's rect so the window opens on that indicator's monitor.
+    fn launch_settings(hwnd: HWND) {
+        let mut args = format!("--parent-pid {}", unsafe { GetCurrentProcessId() });
+        if let Some(anchor) = window_anchor_logical(hwnd) {
+            args.push_str(&format!(
+                " --anchor {} {} {} {}",
+                anchor[0], anchor[1], anchor[2], anchor[3]
+            ));
+            // The rectangle alone is ambiguous on mixed-DPI setups: GPUI's
+            // logical space is scaled per display, so the panel also gets the
+            // native display handle to select the target monitor explicitly.
+            let monitor = window_monitor_id(hwnd);
+            if monitor != 0 {
+                args.push_str(&format!(" --anchor-monitor {monitor}"));
+            }
+        }
+        let monitor = window_monitor_id(hwnd) as isize;
         SETTINGS_PROCESS.with(|slot| {
             if child_alive(slot) {
-                log_event("INFO", "settings launch skipped: already running");
-                return;
+                if SETTINGS_MONITOR.load(Ordering::Relaxed) == monitor {
+                    log_event("INFO", "settings launch skipped: already on this monitor");
+                    return;
+                }
+                // GPUI cannot move an existing window, so a Settings click on
+                // another screen closes the window and reopens it there.
+                // Every setting is persisted on change, so nothing is lost
+                // except transient scroll/focus state.
+                log_event("INFO", "settings: moving window to the clicked monitor");
+                let _ = terminate_child(slot, "settings window", true);
             }
+            SETTINGS_MONITOR.store(monitor, Ordering::Relaxed);
             let _ = launch_child_inner("SysVitalsSettings.exe", Some(&args), slot);
         });
     }
@@ -1912,7 +2114,7 @@ mod win {
             return;
         };
         unsafe {
-            sysvitals_core::HistoryState::write_request(ptr, false, None);
+            sysvitals_core::HistoryState::write_request(ptr, false, None, 0);
         }
     }
 
@@ -1928,6 +2130,35 @@ mod win {
         }
     }
 
+    /// Native display handle (HMONITOR) hosting a window, carried as `i64`
+    /// through the shared history state and the settings command line.
+    /// The overlay registry is refreshed every move tick, so it is the
+    /// preferred source; a live query covers windows not in the registry.
+    fn window_monitor_id(hwnd: HWND) -> i64 {
+        if let Some(ov) = overlay_by_hwnd(hwnd) {
+            return ov.monitor as i64;
+        }
+        unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST).0 as i64 }
+    }
+
+    /// A window's rect converted to GPUI global logical pixels (physical
+    /// pixels divided by the window's own monitor DPI). Used as the history
+    /// popup anchor and as the settings window's monitor hint.
+    fn window_anchor_logical(hwnd: HWND) -> Option<[f32; 4]> {
+        let mut rect = RECT::default();
+        if unsafe { GetWindowRect(hwnd, &mut rect) }.is_err() {
+            return None;
+        }
+        let dpi = unsafe { GetDpiForWindow(hwnd) };
+        let scale = if dpi == 0 { 1.0 } else { dpi as f32 / 96.0 };
+        Some([
+            rect.left as f32 / scale,
+            rect.top as f32 / scale,
+            rect.right as f32 / scale,
+            rect.bottom as f32 / scale,
+        ])
+    }
+
     /// Publish an open request: the indicator's rect plus `desired_open=1`
     /// under one generation write. `GetWindowRect` reports physical pixels;
     /// the child lays its window out in GPUI's global logical pixel space
@@ -1936,20 +2167,16 @@ mod win {
         let Some(ptr) = history_state_ptr() else {
             return false;
         };
-        let mut rect = RECT::default();
-        if unsafe { GetWindowRect(hwnd, &mut rect) }.is_err() {
+        let Some(anchor) = window_anchor_logical(hwnd) else {
             return false;
-        }
-        let dpi = unsafe { GetDpiForWindow(hwnd) };
-        let scale = if dpi == 0 { 1.0 } else { dpi as f32 / 96.0 };
-        let anchor = [
-            rect.left as f32 / scale,
-            rect.top as f32 / scale,
-            rect.right as f32 / scale,
-            rect.bottom as f32 / scale,
-        ];
+        };
         unsafe {
-            sysvitals_core::HistoryState::write_request(ptr, true, Some(anchor));
+            sysvitals_core::HistoryState::write_request(
+                ptr,
+                true,
+                Some(anchor),
+                window_monitor_id(hwnd),
+            );
         }
         true
     }
@@ -1958,7 +2185,7 @@ mod win {
     /// has been measured at 190 ms – 5.4 s on loaded hosts; doing it here keeps
     /// the indicator's message loop responsive. The child has no window until
     /// the user opens the chart, so this only pays the GPUI/DirectX warm-up.
-    fn ensure_history_resident(hwnd: HWND) {
+    fn ensure_history_resident() {
         if history_busy() {
             return;
         }
@@ -1985,7 +2212,7 @@ mod win {
         let args = format!("--resident --parent-pid {parent_pid}");
         log_event("INFO", &format!("launching SysVitalsHistory.exe {args}"));
         HISTORY_LAUNCHING.store(true, Ordering::SeqCst);
-        let hwnd_raw = hwnd.0 as isize;
+        let sentinel_raw = sentinel_hwnd().0 as isize;
         std::thread::spawn(move || {
             let started = Instant::now();
             match spawn_process(&exe_path, &dir, Some(&args)) {
@@ -2017,10 +2244,10 @@ mod win {
             }
             HISTORY_LAUNCHING.store(false, Ordering::SeqCst);
             // Wake the UI so the launch handle converges without waiting for
-            // the 250 ms sync timer. A destroyed hwnd makes this a no-op.
+            // the 250 ms sync timer. A destroyed sentinel makes this a no-op.
             let _ = unsafe {
                 PostMessageW(
-                    Some(HWND(hwnd_raw as *mut std::ffi::c_void)),
+                    Some(HWND(sentinel_raw as *mut std::ffi::c_void)),
                     WM_APP_HISTORY_READY,
                     WPARAM(0),
                     LPARAM(0),
@@ -2058,7 +2285,7 @@ mod win {
 
     /// Restart the overlay: schedule a delayed relaunch of the current exe
     /// (after the single-instance mutex is released on exit), then exit.
-    fn restart_self(hwnd: HWND) {
+    fn restart_self() {
         let mut buf = [0u16; 1024];
         let n = unsafe { GetModuleFileNameW(None, &mut buf) };
         if n == 0 {
@@ -2085,15 +2312,7 @@ mod win {
                 windows::core::PCWSTR::null(),
                 SW_HIDE,
             );
-        }
-        // Exit the current instance.
-        QUITTING.store(true, Ordering::Relaxed);
-        unsafe {
-            let _ = KillTimer(Some(hwnd), TIMER_SAMPLE);
-            let _ = KillTimer(Some(hwnd), TIMER_MOVE);
-            let _ = KillTimer(Some(hwnd), TIMER_CONFIG);
-            let _ = KillTimer(Some(hwnd), TIMER_HISTORY);
-            let _ = DestroyWindow(hwnd);
+            shutdown_and_quit();
         }
     }
 
@@ -2199,19 +2418,34 @@ mod win {
     unsafe fn perform_menu_choice(hwnd: HWND, choice: usize) {
         match choice {
             id if id == IDM_TASKMGR => launch_taskmgr(),
-            id if id == IDM_SETTINGS => launch_settings(),
-            id if id == IDM_RESTART => restart_self(hwnd),
+            id if id == IDM_SETTINGS => launch_settings(hwnd),
+            id if id == IDM_RESTART => restart_self(),
             id if id == IDM_QUIT => {
-                QUITTING.store(true, Ordering::Relaxed);
                 close_children();
-                let _ = KillTimer(Some(hwnd), TIMER_SAMPLE);
-                let _ = KillTimer(Some(hwnd), TIMER_MOVE);
-                let _ = KillTimer(Some(hwnd), TIMER_CONFIG);
-                let _ = KillTimer(Some(hwnd), TIMER_HISTORY);
-                let _ = DestroyWindow(hwnd);
+                shutdown_and_quit();
             }
             _ => {}
         }
+    }
+
+    /// Destroy every overlay, stop the sentinel timers and exit the message
+    /// loop. Shared by Quit and Restart (which schedules a relaunch first).
+    /// `QUITTING` is set before the windows are torn down so their
+    /// `WM_DESTROY` handlers treat it as an intentional exit.
+    unsafe fn shutdown_and_quit() {
+        QUITTING.store(true, Ordering::Relaxed);
+        let hwnds: Vec<HWND> = OVERLAYS.with(|slot| slot.borrow().iter().map(|o| o.hwnd).collect());
+        for hwnd in hwnds {
+            let _ = DestroyWindow(hwnd);
+        }
+        OVERLAYS.with(|slot| slot.borrow_mut().clear());
+        let sentinel = sentinel_hwnd();
+        let _ = KillTimer(Some(sentinel), TIMER_SAMPLE);
+        let _ = KillTimer(Some(sentinel), TIMER_MOVE);
+        let _ = KillTimer(Some(sentinel), TIMER_CONFIG);
+        let _ = KillTimer(Some(sentinel), TIMER_HISTORY);
+        let _ = KillTimer(Some(sentinel), TIMER_WATCH);
+        PostQuitMessage(0);
     }
 
     unsafe fn show_context_menu(hwnd: HWND) {
@@ -2232,6 +2466,41 @@ mod win {
 
     // ----------------------------------------------------------------- wndproc
 
+    /// Left-click toggle. Opens the popup anchored at this indicator when it
+    /// is closed. When it is open, a click on the same monitor's indicator
+    /// closes it (toggle); a click on a different monitor's indicator moves it
+    /// there. `visible` (owned by the child) is the actual open state;
+    /// `desired_open` alone is not (it stays 1 after a blur/Esc dismissal).
+    fn handle_history_click(hwnd: HWND) {
+        if !history_child_alive() {
+            history_mark_stopped();
+            HISTORY_ANCHOR_MONITOR.store(0, Ordering::Relaxed);
+        }
+        let visible = history_snapshot().is_some_and(|state| state.visible != 0);
+        let this_monitor = overlay_by_hwnd(hwnd).map(|o| o.monitor).unwrap_or(0);
+        if !visible {
+            ensure_history_resident();
+            if history_open_request(hwnd) {
+                HISTORY_ANCHOR_MONITOR.store(this_monitor, Ordering::Relaxed);
+            }
+        } else if HISTORY_ANCHOR_MONITOR.load(Ordering::Relaxed) == this_monitor {
+            history_close_request();
+            HISTORY_ANCHOR_MONITOR.store(0, Ordering::Relaxed);
+        } else {
+            // A different monitor's indicator was clicked while the popup is
+            // open: republish the open request with this indicator's anchor.
+            // The resident loop sees the generation change while a window is
+            // open and reopens it there.
+            log_event(
+                "INFO",
+                "history: moving popup to the clicked indicator's screen",
+            );
+            if history_open_request(hwnd) {
+                HISTORY_ANCHOR_MONITOR.store(this_monitor, Ordering::Relaxed);
+            }
+        }
+    }
+
     unsafe extern "system" fn wndproc(
         hwnd: HWND,
         msg: u32,
@@ -2239,34 +2508,6 @@ mod win {
         lparam: LPARAM,
     ) -> LRESULT {
         match msg {
-            WM_TIMER => {
-                match wparam.0 {
-                    id if id == TIMER_SAMPLE => sample_now(hwnd),
-                    id if id == TIMER_MOVE => reposition(hwnd),
-                    id if id == TIMER_CONFIG => poll_config_change(hwnd),
-                    id if id == TIMER_HISTORY => sync_history_state(),
-                    _ => {}
-                }
-                LRESULT(0)
-            }
-            WM_APP_HISTORY_READY => {
-                sync_history_state();
-                LRESULT(0)
-            }
-            WM_APP_APPLY => {
-                // Config changed (from the file watcher): rebuild the frame
-                // from the last sample. Sampling again here produced a
-                // network rate over a millisecond-scale gap (a visible
-                // spike) on every settings click. Reset grow-only width so a
-                // narrower layout takes effect.
-                log_event(
-                    "INFO",
-                    "WM_APP_APPLY received: re-laying out from the last sample",
-                );
-                WIN_W.store(0, Ordering::Relaxed);
-                rerender_from_last(hwnd);
-                LRESULT(0)
-            }
             WM_SETTINGCHANGE => {
                 // Theme, text-size and font changes arrive here. Re-read the
                 // theme, drop the cached font metrics and re-measure: the
@@ -2279,29 +2520,22 @@ mod win {
                     log_event("INFO", &format!("theme changed: light={}", new_light == 1));
                 }
                 invalidate_ui_font();
-                WIN_W.store(0, Ordering::Relaxed);
-                rerender_from_last(hwnd);
+                reset_width(hwnd);
+                relayout_overlay(hwnd);
                 LRESULT(0)
             }
             WM_DPICHANGED => {
                 log_event(
                     "INFO",
                     &format!(
-                        "WM_DPICHANGED: dpi={} (was {})",
+                        "WM_DPICHANGED: dpi={} (system {})",
                         GetDpiForWindow(hwnd),
-                        unsafe { GetDpiForSystem() }
+                        GetDpiForSystem()
                     ),
                 );
                 invalidate_ui_font();
-                WIN_W.store(0, Ordering::Relaxed);
-                rerender_from_last(hwnd);
-                LRESULT(0)
-            }
-            WM_DISPLAYCHANGE => {
-                log_event("INFO", "WM_DISPLAYCHANGE: display configuration changed");
-                invalidate_ui_font();
-                WIN_W.store(0, Ordering::Relaxed);
-                rerender_from_last(hwnd);
+                reset_width(hwnd);
+                relayout_overlay(hwnd);
                 LRESULT(0)
             }
             WM_LBUTTONUP => {
@@ -2310,22 +2544,7 @@ mod win {
                 // `WM_LBUTTONDBLCLK`, and Task Manager lives in the
                 // right-click menu. Any left click is a left click. A press
                 // paints nothing: the indicator has no pressed/hover backdrop.
-                //
-                // `visible` (owned by the child) is the actual open state.
-                // `desired_open` alone is not: after a blur/Esc dismissal it
-                // stays 1 while no window exists, so the next click must
-                // reopen instead of being treated as a close. Reap a dead
-                // child first so a stale `visible` cannot swallow the click.
-                if !history_child_alive() {
-                    history_mark_stopped();
-                }
-                let request_open = history_snapshot().is_some_and(|state| state.visible != 0);
-                if request_open {
-                    history_close_request();
-                } else {
-                    ensure_history_resident(hwnd);
-                    let _ = history_open_request(hwnd);
-                }
+                handle_history_click(hwnd);
                 LRESULT(0)
             }
             WM_RBUTTONUP => {
@@ -2333,18 +2552,15 @@ mod win {
                 LRESULT(0)
             }
             WM_DESTROY => {
-                if QUITTING.load(Ordering::Relaxed) {
-                    close_children();
-                    log_event("INFO", "SysVitals exiting");
-                    PostQuitMessage(0);
-                } else {
+                OVERLAYS.with(|slot| slot.borrow_mut().retain(|o| o.hwnd != hwnd));
+                if !QUITTING.load(Ordering::Relaxed) {
                     // The taskbar owns this window; explorer restarted and
-                    // destroyed us. The resident History process is independent;
-                    // the sentinel will recreate the overlay on TaskbarCreated.
-                    OVERLAY_HWND.store(0, Ordering::Relaxed);
+                    // destroyed it. The sentinel's reconcile recreates it
+                    // against the new taskbar. The resident History process is
+                    // independent and keeps running.
                     log_event(
                         "INFO",
-                        "overlay destroyed with the taskbar; waiting for TaskbarCreated",
+                        "overlay destroyed with its taskbar; reconcile will recreate",
                     );
                 }
                 LRESULT(0)
@@ -2477,89 +2693,96 @@ mod win {
         Some(hwnd)
     }
 
-    /// Finish a freshly created (or rebound) overlay: bind the taskbar owner,
-    /// reset per-window state, place it, show it and start every timer.
-    unsafe fn install_overlay(hwnd: HWND) {
-        OVERLAY_HWND.store(hwnd.0 as isize, Ordering::Relaxed);
-        if let Some(tray) = find_taskbar() {
-            let _ = SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, tray.0 as isize);
+    /// Bring the set of overlays in line with the set of taskbars: destroy
+    /// overlays whose taskbar is gone and create overlays for taskbars that do
+    /// not have one yet. Called at startup, on `TaskbarCreated`, on display
+    /// changes, and by the move tick (which also catches secondary bars that
+    /// appear a moment after the main one, and hot-plugged monitors).
+    unsafe fn reconcile_overlays() {
+        if QUITTING.load(Ordering::Relaxed) {
+            return;
         }
-        // Re-assert the topmost style after the owner change: the owner
-        // relationship controls the band, topmost controls the seat inside it.
-        let _ = SetWindowPos(
-            hwnd,
-            Some(HWND_TOPMOST),
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-        );
-        WIN_W.store(0, Ordering::Relaxed);
-        WIN_H.store(0, Ordering::Relaxed);
-        TASKBAR_VERTICAL.store(false, Ordering::Relaxed);
-        LAST_ROW.with(|slot| *slot.borrow_mut() = None);
-        LAST_SNAPSHOT.with(|slot| *slot.borrow_mut() = None);
-        // The taskbar (and therefore the overlay) may have moved to a
-        // different-DPI monitor while explorer was restarting.
-        invalidate_ui_font();
-        VISIBILITY_ANOMALY.store(false, Ordering::Relaxed);
-        OVERLAY_SHOWN_ONCE.store(false, Ordering::Relaxed);
-        CLOAK_LOGGED.store(false, Ordering::Relaxed);
-        CLOAK_MOVE_FAIL_LOGGED.store(false, Ordering::Relaxed);
-        MENU_TRACKING.store(false, Ordering::Relaxed);
-
-        let cfg = config();
-        let interval_ms = cfg.sample.interval_ms.clamp(500, 5000) as u32;
-        reposition(hwnd);
-        if LAST_ROW.with(|l| l.borrow().is_none()) {
-            sample_now(hwnd);
-        }
-        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-        SetTimer(Some(hwnd), TIMER_SAMPLE, interval_ms, None);
-        SetTimer(Some(hwnd), TIMER_MOVE, MOVE_MS, None);
-        SetTimer(Some(hwnd), TIMER_CONFIG, CONFIG_POLL_MS, None);
-        SetTimer(Some(hwnd), TIMER_HISTORY, HISTORY_SYNC_MS, None);
-        // The History framework is independent of the overlay window; after
-        // an explorer restart this is a no-op when it is still alive.
-        ensure_history_resident(hwnd);
-    }
-
-    /// Explorer restart path: revive the overlay against the new taskbar.
-    /// If the old window somehow survived, only rebind it; otherwise create a
-    /// new one and reinstall every timer/state hook.
-    unsafe fn rebuild_overlay() {
-        let current = OVERLAY_HWND.load(Ordering::Relaxed);
-        let old = HWND(current as *mut std::ffi::c_void);
-        if current != 0 && IsWindow(Some(old)).as_bool() {
-            if let Some(tray) = find_taskbar() {
-                let _ = SetWindowLongPtrW(old, GWLP_HWNDPARENT, tray.0 as isize);
+        let bars = taskbar_windows();
+        // Drop overlays whose taskbar no longer exists. Collect first and
+        // destroy after releasing the registry borrow: `DestroyWindow` sends
+        // `WM_DESTROY` synchronously, and that handler re-borrows `OVERLAYS`.
+        let mut to_destroy = Vec::new();
+        OVERLAYS.with(|slot| {
+            let mut overlays = slot.borrow_mut();
+            let mut i = 0;
+            while i < overlays.len() {
+                if IsWindow(Some(overlays[i].taskbar)).as_bool() {
+                    i += 1;
+                    continue;
+                }
+                let ov = overlays.remove(i);
+                to_destroy.push(ov.hwnd);
+                log_event("INFO", "overlay removed: its taskbar disappeared");
             }
-            let _ = SetWindowPos(
-                old,
-                Some(HWND_TOPMOST),
-                0,
-                0,
-                0,
-                0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-            );
-            let _ = ShowWindow(old, SW_SHOWNOACTIVATE);
-            reposition(old);
-            log_event("INFO", "overlay rebound to the recreated taskbar");
-            return;
+        });
+        for hwnd in to_destroy {
+            if IsWindow(Some(hwnd)).as_bool() {
+                let _ = DestroyWindow(hwnd);
+            }
         }
-        let Some(hwnd) = create_overlay(find_taskbar()) else {
-            log_event("WARN", "overlay recreation after taskbar restart failed");
-            return;
-        };
-        log_event("INFO", "overlay recreated after taskbar restart");
-        install_overlay(hwnd);
+        // Create overlays for taskbars that lack one.
+        for &bar in &bars {
+            let exists = OVERLAYS.with(|slot| slot.borrow().iter().any(|o| o.taskbar == bar));
+            if exists {
+                continue;
+            }
+            let Some(hwnd) = create_overlay(Some(bar)) else {
+                if !OVERLAY_CREATE_FAIL_LOGGED.swap(true, Ordering::Relaxed) {
+                    log_event("WARN", "overlay creation failed for a taskbar");
+                }
+                continue;
+            };
+            OVERLAY_CREATE_FAIL_LOGGED.store(false, Ordering::Relaxed);
+            let info = taskbar_info_for(bar);
+            let (vertical, left_edge, monitor) = match info {
+                Some(i) => (i.vertical, i.left_edge, i.monitor),
+                None => (
+                    false,
+                    false,
+                    MonitorFromWindow(bar, MONITOR_DEFAULTTONEAREST).0 as isize,
+                ),
+            };
+            OVERLAYS.with(|slot| {
+                slot.borrow_mut().push(Overlay {
+                    hwnd,
+                    taskbar: bar,
+                    monitor,
+                    vertical,
+                    left_edge,
+                    win_w: 0,
+                    win_h: 0,
+                })
+            });
+            log_event(
+                "INFO",
+                &format!("overlay created for a taskbar (vertical={vertical})"),
+            );
+            // Show before the first layout so the placement pass does not log
+            // a spurious "re-shown"; the window starts off-screen anyway.
+            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            relayout_overlay(hwnd);
+        }
     }
 
-    /// Hidden top-level window that survives explorer restarts. The overlay
-    /// itself is owned by the taskbar and dies with it, so it cannot be the
-    /// one listening for `TaskbarCreated`.
+    /// Re-place every overlay against its own taskbar. Per-overlay show/hide
+    /// follows each taskbar's visibility (auto-hide, fullscreen on that
+    /// monitor), so one hidden bar does not affect the others.
+    fn reposition_all() {
+        let hwnds: Vec<HWND> = OVERLAYS.with(|slot| slot.borrow().iter().map(|o| o.hwnd).collect());
+        for hwnd in hwnds {
+            unsafe { reposition_overlay(hwnd) };
+        }
+    }
+
+    /// Hidden top-level window that survives explorer restarts. It owns every
+    /// periodic timer and receives the `TaskbarCreated` broadcast, driving all
+    /// overlays at once (the overlays themselves are owned by their taskbars
+    /// and die with them, so they cannot be the ones holding the timers).
     unsafe extern "system" fn sentinel_wndproc(
         hwnd: HWND,
         msg: u32,
@@ -2567,33 +2790,72 @@ mod win {
         lparam: LPARAM,
     ) -> LRESULT {
         if TASKBAR_CREATED.get().is_some_and(|created| *created == msg) {
-            log_event("INFO", "TaskbarCreated received; rebinding indicator");
+            log_event("INFO", "TaskbarCreated received; reconciling overlays");
             let _ = KillTimer(Some(hwnd), TIMER_REBIND);
             if find_taskbar().is_some() {
-                rebuild_overlay();
+                reconcile_overlays();
+                reposition_all();
             } else {
                 let _ = SetTimer(Some(hwnd), TIMER_REBIND, REBIND_RETRY_MS, None);
             }
             return LRESULT(0);
         }
-        if msg == WM_TIMER && wparam.0 == TIMER_REBIND {
-            if find_taskbar().is_some() {
-                let _ = KillTimer(Some(hwnd), TIMER_REBIND);
-                rebuild_overlay();
-            }
+        if msg == WM_APP_HISTORY_READY {
+            sync_history_state();
             return LRESULT(0);
         }
-        if msg == WM_TIMER && wparam.0 == TIMER_WATCH {
-            if !QUITTING.load(Ordering::Relaxed) {
-                let current = OVERLAY_HWND.load(Ordering::Relaxed);
-                let alive = current != 0
-                    && IsWindow(Some(HWND(current as *mut std::ffi::c_void))).as_bool();
-                if !alive && find_taskbar().is_some() {
-                    log_event("WARN", "overlay missing; watchdog recreating it");
-                    rebuild_overlay();
+        if msg == WM_DISPLAYCHANGE {
+            log_event("INFO", "WM_DISPLAYCHANGE: display configuration changed");
+            // Monitor handles are not stable across a display reconfiguration;
+            // forget which screen anchors the popup so the next click opens
+            // or moves it again instead of being mistaken for a same-screen
+            // toggle.
+            HISTORY_ANCHOR_MONITOR.store(0, Ordering::Relaxed);
+            invalidate_ui_font();
+            OVERLAYS.with(|slot| {
+                for ov in slot.borrow_mut().iter_mut() {
+                    ov.win_w = 0;
                 }
-            }
+            });
+            reconcile_overlays();
+            relayout_all();
             return LRESULT(0);
+        }
+        if msg == WM_TIMER {
+            match wparam.0 {
+                TIMER_SAMPLE => {
+                    sample_tick();
+                    return LRESULT(0);
+                }
+                TIMER_MOVE => {
+                    reconcile_overlays();
+                    reposition_all();
+                    return LRESULT(0);
+                }
+                TIMER_CONFIG => {
+                    poll_config_change();
+                    return LRESULT(0);
+                }
+                TIMER_HISTORY => {
+                    sync_history_state();
+                    return LRESULT(0);
+                }
+                TIMER_REBIND => {
+                    if find_taskbar().is_some() {
+                        let _ = KillTimer(Some(hwnd), TIMER_REBIND);
+                        reconcile_overlays();
+                        reposition_all();
+                    }
+                    return LRESULT(0);
+                }
+                TIMER_WATCH => {
+                    if !QUITTING.load(Ordering::Relaxed) {
+                        reconcile_overlays();
+                    }
+                    return LRESULT(0);
+                }
+                _ => {}
+            }
         }
         DefWindowProcW(hwnd, msg, wparam, lparam)
     }
@@ -2713,7 +2975,7 @@ mod win {
                 log_event("WARN", "sentinel class registration failed");
             }
             let sentinel_title = utf16("SysVitalsSentinel");
-            let _sentinel = CreateWindowExW(
+            let sentinel = CreateWindowExW(
                 WS_EX_TOOLWINDOW,
                 windows::core::PCWSTR(sentinel_class.as_ptr()),
                 windows::core::PCWSTR(sentinel_title.as_ptr()),
@@ -2727,21 +2989,29 @@ mod win {
                 Some(hmodule.into()),
                 None,
             );
-            match _sentinel {
+            match sentinel {
                 Ok(sentinel) => {
+                    SENTINEL_HWND.store(sentinel.0 as isize, Ordering::Relaxed);
+                    let interval_ms = cfg.sample.interval_ms.clamp(500, 5000) as u32;
+                    let _ = SetTimer(Some(sentinel), TIMER_SAMPLE, interval_ms, None);
+                    let _ = SetTimer(Some(sentinel), TIMER_MOVE, MOVE_MS, None);
+                    let _ = SetTimer(Some(sentinel), TIMER_CONFIG, CONFIG_POLL_MS, None);
+                    let _ = SetTimer(Some(sentinel), TIMER_HISTORY, HISTORY_SYNC_MS, None);
                     let _ = SetTimer(Some(sentinel), TIMER_WATCH, WATCHDOG_MS, None);
                 }
                 Err(_) => log_event("WARN", "sentinel window creation failed"),
             }
 
-            // Create the overlay owned by the current taskbar and install every
-            // timer. `install_overlay` also starts the resident History
-            // framework on a worker thread.
-            let Some(hwnd) = create_overlay(find_taskbar()) else {
-                log_event("WARN", "overlay creation failed");
-                return;
-            };
-            install_overlay(hwnd);
+            // Create one overlay per existing taskbar, then paint the first
+            // sample. `reconcile_overlays` also runs every move tick, on
+            // `TaskbarCreated` and on display changes, so taskbars that appear
+            // later (secondary bars, hot-plug, explorer restart) get one too.
+            reconcile_overlays();
+            if LAST_SNAPSHOT.with(|s| s.borrow().is_none()) {
+                sample_tick();
+            }
+            // The resident History framework is independent of any overlay.
+            ensure_history_resident();
 
             let mut msg = MSG::default();
             while GetMessageW(&mut msg, None, 0, 0).0 > 0 {

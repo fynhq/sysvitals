@@ -90,9 +90,35 @@ fn parse_anchor() -> Option<AnchorRect> {
     None
 }
 
+/// Parse `--anchor-monitor <handle>` from the process arguments: the native
+/// display handle (HMONITOR on Windows) that hosted the indicator. `None`
+/// when absent, zero, or malformed.
+fn parse_anchor_monitor() -> Option<DisplayId> {
+    let mut args = env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if arg != "--anchor-monitor" {
+            continue;
+        }
+        let raw: u64 = args.next()?.trim().parse().ok()?;
+        return (raw != 0).then(|| DisplayId::new(raw));
+    }
+    None
+}
+
 /// The usable area of the display an anchor sits on (taskbar/dock excluded),
 /// used to flip and clamp the popup inside a screen the indicator is on.
-fn anchor_work_area(anchor: &AnchorRect, cx: &App) -> Bounds<Pixels> {
+///
+/// When the indicator passed its native display handle, that display is
+/// selected directly: GPUI scales each monitor's logical space by its own
+/// factor, so a rectangle alone can fall inside two displays' bounds on a
+/// mixed-DPI setup. The rectangle probe remains as the fallback for launches
+/// without the handle (older companion process, macOS).
+fn anchor_work_area(anchor: &AnchorRect, monitor: Option<DisplayId>, cx: &App) -> Bounds<Pixels> {
+    if let Some(monitor) = monitor {
+        if let Some(display) = cx.displays().into_iter().find(|d| d.id() == monitor) {
+            return display.visible_bounds();
+        }
+    }
     let probe = point(
         px((anchor.left + anchor.right) * 0.5),
         px((anchor.top + anchor.bottom) * 0.5),
@@ -1427,6 +1453,7 @@ fn apply_theme_and_accent(cx: &mut App) {
 fn open_history_window(
     cx: &mut App,
     anchor: Option<AnchorRect>,
+    monitor: Option<DisplayId>,
     hidden_start: bool,
     shared: Option<Arc<HistoryShared>>,
 ) -> Option<(AnyWindowHandle, Arc<AtomicBool>)> {
@@ -1453,7 +1480,7 @@ fn open_history_window(
     let popup_size = size(px(680.), px(390.));
     let window_bounds = match anchor.as_ref() {
         Some(a) => {
-            let work = anchor_work_area(a, cx);
+            let work = anchor_work_area(a, monitor, cx);
             let work_w = f32::from(work.size.width);
             let width = f32::from(popup_size.width).min((work_w - 2.0 * POPUP_GAP).max(1.0));
             let popup_size = size(px(width), popup_size.height);
@@ -1499,6 +1526,11 @@ fn open_history_window(
 
     let window_options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(window_bounds)),
+        // Select the indicator's display explicitly. Without this GPUI
+        // converts the logical bounds with the primary display's scale
+        // factor, which places a popup on the wrong screen (or falls back to
+        // the primary display) whenever the two monitors use different DPIs.
+        display_id: monitor,
         titlebar,
         kind: if anchored {
             WindowKind::PopUp
@@ -1650,6 +1682,53 @@ fn run_resident(cx: &mut App) {
                     trim_working_set();
                     continue;
                 }
+                // A new open request arrived while the window is open: the
+                // indicator was clicked on a different taskbar/monitor. GPUI
+                // windows cannot be repositioned after creation, so reopen the
+                // popup anchored at the new indicator.
+                if snapshot.generation != open_generation && snapshot.anchor_is_valid() {
+                    log_event(
+                        "INFO",
+                        "history: indicator moved; reopening at the new anchor",
+                    );
+                    let _ = cx.update(|app| {
+                        let _ = handle.update(app, |_, window, _| window.remove_window());
+                    });
+                    let anchor = AnchorRect {
+                        left: snapshot.anchor[0],
+                        top: snapshot.anchor[1],
+                        right: snapshot.anchor[2],
+                        bottom: snapshot.anchor[3],
+                    };
+                    let monitor =
+                        (snapshot.monitor != 0).then(|| DisplayId::new(snapshot.monitor as u64));
+                    let reopened = cx.update(|app| {
+                        apply_theme_and_accent(app);
+                        open_history_window(app, Some(anchor), monitor, true, Some(shared.clone()))
+                    });
+                    match reopened {
+                        Some((new_handle, ready)) => {
+                            window = Some(new_handle);
+                            first_load = Some(ready);
+                            activated = false;
+                            opened_at = Some(Instant::now());
+                            last_activation_attempt = None;
+                            open_generation = snapshot.generation;
+                            dismissed_generation = None;
+                            idle_since = None;
+                            trimmed = false;
+                            unsafe { shared.set_visible(true) };
+                        }
+                        None => {
+                            dismissed_generation = Some(snapshot.generation);
+                            unsafe { shared.mark_hidden() };
+                            window = None;
+                            first_load = None;
+                            log_event("WARN", "history: reopen at the new anchor failed");
+                        }
+                    }
+                    continue;
+                }
                 if !activated {
                     let ready = first_load
                         .as_ref()
@@ -1708,11 +1787,13 @@ fn run_resident(cx: &mut App) {
                     right: snapshot.anchor[2],
                     bottom: snapshot.anchor[3],
                 });
+                let monitor =
+                    (snapshot.monitor != 0).then(|| DisplayId::new(snapshot.monitor as u64));
                 let opened = cx.update(|app| {
                     // The OS accent may have changed while the popup was
                     // closed; re-apply before the first paint.
                     apply_theme_and_accent(app);
-                    open_history_window(app, anchor, true, Some(shared.clone()))
+                    open_history_window(app, anchor, monitor, true, Some(shared.clone()))
                 });
                 match opened {
                     Some((handle, ready)) => {
@@ -1829,15 +1910,17 @@ fn main() {
         watch_parent(cx);
 
         let anchor = parse_anchor();
+        let monitor = parse_anchor_monitor();
         log_event(
             "INFO",
             &format!(
-                "history: popup starting (version={}, anchor={:?})",
+                "history: popup starting (version={}, anchor={:?}, monitor={:?})",
                 env!("CARGO_PKG_VERSION"),
-                anchor.as_ref().map(|a| (a.left, a.top, a.right, a.bottom))
+                anchor.as_ref().map(|a| (a.left, a.top, a.right, a.bottom)),
+                monitor
             ),
         );
-        if open_history_window(cx, anchor, false, None).is_none() {
+        if open_history_window(cx, anchor, monitor, false, None).is_none() {
             cx.quit();
         }
     });
