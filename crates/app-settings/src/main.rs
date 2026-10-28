@@ -945,6 +945,10 @@ impl Render for SettingsView {
         // previous 0.5/0.4 pair read too light on the tinted page and cards.
         let dim = cx.theme().foreground.opacity(0.6);
         let faint = cx.theme().foreground.opacity(0.55);
+        // Hover color for the footer version link: the system accent is the
+        // only affordance this GPUI snapshot offers for link text (there is
+        // no underline styling on elements).
+        let link = cx.theme().primary;
 
         // --- Flattened (segmented) option rows for small choice sets: every
         // choice is a visible tile, the active one carries the primary style.
@@ -1376,15 +1380,27 @@ impl Render for SettingsView {
                 )
             })
             // Version footer: pinned to the bottom of the scrollable column
-            // and built from `SV_BUILD_ID` (see the const below).
+            // and built from `SV_BUILD_ID` (see the const below). The stamp
+            // doubles as a link to the project repository; only the text
+            // itself is interactive, so the surrounding footer stays inert.
             .child(
-                div()
-                    .mt_auto()
-                    .pt_2()
-                    .text_xs()
-                    .text_color(faint)
-                    .text_center()
-                    .child(SV_BUILD_ID),
+                h_flex().mt_auto().pt_2().justify_center().child(
+                    div()
+                        .id("version-link")
+                        .text_xs()
+                        .text_color(faint)
+                        .cursor_pointer()
+                        .hover(move |style| style.text_color(link))
+                        .on_click(cx.listener(
+                            |_: &mut Self,
+                             _: &ClickEvent,
+                             _: &mut Window,
+                             cx: &mut Context<Self>| {
+                                cx.open_url(REPO_URL);
+                            },
+                        ))
+                        .child(SV_BUILD_ID),
+                ),
             );
 
         // Both desktop panels draw into a transparent client area so the
@@ -1448,6 +1464,11 @@ const SV_BUILD_ID: &str = match option_env!("SV_BUILD_ID") {
     Some(id) => id,
     None => concat!("v", env!("CARGO_PKG_VERSION")),
 };
+
+/// Where the footer version link points. Taken from the manifest's
+/// `repository` field (inherited from the workspace) so the URL cannot drift
+/// from the crate metadata.
+const REPO_URL: &str = env!("CARGO_PKG_REPOSITORY");
 
 /// One prefix cell of the settings 2x2 grid: a dim caption above a flexible
 /// text input. Takes the entity by reference so the render borrow survives
