@@ -365,9 +365,17 @@ mod macos {
                                 }
                                 match sysvitals_core::Store::open(&path) {
                                     Ok(opened) => {
+                                        let rollup = if opened.rollup_ready() {
+                                            "ready"
+                                        } else {
+                                            "unavailable, raw-only fallback"
+                                        };
                                         log_event(
                                             "INFO",
-                                            &format!("history store opened: {}", path.display()),
+                                            &format!(
+                                                "history store opened: {} (rollup {rollup})",
+                                                path.display()
+                                            ),
                                         );
                                         store = Some(opened);
                                     }

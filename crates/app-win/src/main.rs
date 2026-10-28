@@ -1386,7 +1386,18 @@ mod win {
                     }
                     match sysvitals_core::Store::open(&path) {
                         Ok(store) => {
-                            log_event("INFO", &format!("history store opened: {}", path.display()));
+                            let rollup = if store.rollup_ready() {
+                                "ready"
+                            } else {
+                                "unavailable, raw-only fallback"
+                            };
+                            log_event(
+                                "INFO",
+                                &format!(
+                                    "history store opened: {} (rollup {rollup})",
+                                    path.display()
+                                ),
+                            );
                             *guard = Some(store);
                         }
                         Err(e) => {
