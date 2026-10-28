@@ -72,6 +72,7 @@ SysVitals has no built-in auto-update; install a newer release manually.
 ### Usage
 
 - Click the indicator to open the CPU / memory history chart; click again, click away, or press Esc to close.
+- On Windows, every visible taskbar gets its own indicator (enable "Show my taskbar on all displays" to show it on secondary screens); clicking an indicator on another screen moves the history chart there.
 - Right-click for the menu:
   - Windows: Task Manager, Settings, Restart, Quit.
   - macOS: Activity Monitor, Settings, Restart, Quit.
@@ -125,8 +126,6 @@ History is kept for up to one month; logs older than 7 days are removed.
 ### Known limitations
 
 - Launch at login is not implemented.
-- Windows support covers the primary display only.
-- The month view may take a moment on first open.
 
 ### Build from source
 
@@ -138,7 +137,7 @@ cargo test
 cargo run -p sysvitals-core --example monitor
 ```
 
-`cargo build` and `cargo test` cover the cross-platform core crate. Platform crates are built explicitly on their own OS:
+`cargo build` and `cargo test` cover the cross-platform core crate. The official Windows/macOS packages are built by CI; contributors can build a platform crate on the matching OS if needed:
 
 ```sh
 cargo build -p app-win
@@ -223,6 +222,7 @@ SysVitals 没有内置自动更新；需要手动安装新版。
 ### 使用
 
 - 单击指示器打开 CPU / 内存走势图；再次单击、点击别处或按 Esc 关闭。
+- Windows 上每个可见任务栏都有独立指示器（在系统中开启“在所有显示器上显示任务栏”后副屏才会出现）；点击其他屏幕的指示器会把走势图移到该屏。
 - 右键菜单：
   - Windows：任务管理器、设置、重启、退出。
   - macOS：活动监视器、设置、重启、退出。
@@ -276,8 +276,6 @@ shasum -a 256 -c --ignore-missing SHA256SUMS
 ### 已知限制
 
 - 尚未实现开机自启。
-- Windows 仅支持主显示器。
-- 月视图首次打开可能需要一点时间。
 
 ### 从源码构建
 
@@ -289,7 +287,7 @@ cargo test
 cargo run -p sysvitals-core --example monitor
 ```
 
-`cargo build` / `cargo test` 覆盖跨平台 core crate；平台 crate 需在各自系统显式编译：
+`cargo build` / `cargo test` 覆盖跨平台 core crate；官方 Windows/macOS 包由 CI 构建；贡献者如需本地调试，可在对应系统显式编译：
 
 ```sh
 cargo build -p app-win
