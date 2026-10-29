@@ -88,12 +88,14 @@ jobs:
         run: cargo build --locked --release --target ${{ matrix.target }} -p app-settings
       - name: Build GPUI history chart
         run: cargo build --locked --release --target ${{ matrix.target }} -p app-history
-      # Portable (green) distribution: one SysVitals/ directory containing the
-      # overlay, settings and history executables, LICENSE and the generated
-      # third-party notices. Tag builds use the exact tag version, e.g.
-      # SysVitals_Windows_{arch}_v0.1.0.zip; main builds keep the dev name
-      # with the workspace version, short commit hash and `_dev` suffix.
-      - name: Package Windows portable zip
+      # Two distribution shapes from the same staged files: the portable
+      # (no-install) zip and a per-user Inno Setup installer. Tag builds use
+      # the exact tag version; main builds keep the dev name with the
+      # workspace version, short commit hash and `_dev` suffix.
+      - name: Install or upgrade Inno Setup
+        shell: pwsh
+        run: choco upgrade innosetup --no-progress -y
+      - name: Package Windows distributions
         shell: pwsh
         run: |
           $version = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
@@ -101,11 +103,13 @@ jobs:
           $target = "${{ matrix.target }}"
           if ($env:GITHUB_REF_TYPE -eq "tag") {
             $releaseVersion = $env:GITHUB_REF_NAME -replace "^v", ""
-            $zip = "SysVitals_Windows_${arch}_v${releaseVersion}.zip"
+            $assetBase = "SysVitals_Windows_${arch}_v${releaseVersion}"
           } else {
             $commit = (git rev-parse --short HEAD)
-            $zip = "SysVitals_Windows_${arch}_v${version}_${commit}_dev.zip"
+            $assetBase = "SysVitals_Windows_${arch}_v${version}_${commit}_dev"
           }
+          $zip = "${assetBase}_portable.zip"
+          $setupBase = "${assetBase}_setup"
           $stage = "SysVitals"
           Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Path $stage | Out-Null
@@ -121,12 +125,99 @@ jobs:
             Copy-Item -Path $f -Destination $stage
           }
           Compress-Archive -Path $stage -DestinationPath $zip -Force
-          Write-Host "Packaged $zip"
-      - name: Upload Windows portable package
+          $repoRoot = (Get-Location).Path
+          $sourceDir = (Resolve-Path $stage).Path
+          $iscc = $null
+          $isccCommand = Get-Command iscc -ErrorAction SilentlyContinue
+          if ($isccCommand) { $iscc = $isccCommand.Source }
+          if (-not $iscc) {
+            $iscc = @(
+              (Join-Path ${env:ProgramFiles(x86)} "Inno Setup 7\ISCC.exe"),
+              (Join-Path $env:ProgramFiles "Inno Setup 7\ISCC.exe"),
+              (Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"),
+              (Join-Path $env:ProgramFiles "Inno Setup 6\ISCC.exe")
+            ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          }
+          if (-not $iscc) { throw "ISCC.exe not found" }
+          $numeric = ($version -replace '[^0-9.].*$', '')
+          $parts = @($numeric.Split('.') | Where-Object { $_ -ne '' })
+          while ($parts.Count -lt 4) { $parts += '0' }
+          $versionInfo = ($parts[0..3] -join '.')
+          # x64os keeps the x64 installer off Arm64 machines; the Arm64
+          # installer is a separate asset.
+          $archAllowed = if ($arch -eq "x64") { "x64os" } else { "arm64" }
+          & $iscc `
+            "/DAppVersion=$version" `
+            "/DVersionInfoVersion=$versionInfo" `
+            "/DArch=$arch" `
+            "/DArchAllowed=$archAllowed" `
+            "/DArchMode=$archAllowed" `
+            "/DSourceDir=$sourceDir" `
+            "/DOutputDir=$repoRoot" `
+            "/DOutputBaseFilename=$setupBase" `
+            "/DRepoRoot=$repoRoot" `
+            ".github/installer/SysVitals.iss"
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
+          if (!(Test-Path (Join-Path $repoRoot "$setupBase.exe"))) {
+            throw "missing installer output: $setupBase.exe"
+          }
+          Write-Host "Packaged $zip and $setupBase.exe"
+      - name: Smoke-test Windows installer
+        if: matrix.arch == 'x64'
+        shell: pwsh
+        run: |
+          $installDir = Join-Path $env:LOCALAPPDATA "Programs\SysVitals"
+          if (Test-Path $installDir) { Remove-Item -Recurse -Force $installDir }
+          $setup = Get-ChildItem -Path . -Filter "SysVitals_Windows_x64_*_setup.exe" |
+            Select-Object -First 1
+          if (-not $setup) { throw "setup file not found" }
+          $install = Start-Process -FilePath $setup.FullName `
+            -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART" `
+            -Wait -PassThru
+          if ($install.ExitCode -ne 0) {
+            throw "installer failed with exit code $($install.ExitCode)"
+          }
+          $installed = @(
+            "SysVitals.exe",
+            "SysVitalsSettings.exe",
+            "SysVitalsHistory.exe",
+            "LICENSE",
+            "THIRD_PARTY_NOTICES.md"
+          )
+          foreach ($f in $installed) {
+            if (!(Test-Path (Join-Path $installDir $f))) {
+              throw "missing installed file: $f"
+            }
+          }
+          # Simulate the app's launch-at-login value; the uninstaller may remove
+          # it only when it points at this installation.
+          $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+          if (!(Test-Path $runKey)) { New-Item -Path $runKey -Force | Out-Null }
+          $runValue = '"' + (Join-Path $installDir "SysVitals.exe") + '"'
+          Set-ItemProperty -Path $runKey -Name "SysVitals" -Value $runValue
+          $uninstaller = Join-Path $installDir "unins000.exe"
+          if (!(Test-Path $uninstaller)) { throw "uninstaller not found" }
+          $uninstall = Start-Process -FilePath $uninstaller `
+            -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART" `
+            -Wait -PassThru
+          if ($uninstall.ExitCode -ne 0) {
+            throw "uninstaller failed with exit code $($uninstall.ExitCode)"
+          }
+          foreach ($f in $installed) {
+            if (Test-Path (Join-Path $installDir $f)) {
+              throw "uninstall left $f behind"
+            }
+          }
+          if (Get-ItemProperty -Path $runKey -Name "SysVitals" -ErrorAction SilentlyContinue) {
+            throw "uninstaller left the Run value behind"
+          }
+      - name: Upload Windows packages
         uses: actions/upload-artifact@v4
         with:
           name: SysVitals-windows-${{ matrix.arch }}
-          path: SysVitals_Windows_${{ matrix.arch }}_*.zip
+          path: |
+            SysVitals_Windows_${{ matrix.arch }}_*.zip
+            SysVitals_Windows_${{ matrix.arch }}_*.exe
           if-no-files-found: error
 
   build-macos:
@@ -162,11 +253,12 @@ jobs:
         run: cargo build --locked --release --target ${{ matrix.target }} -p app-history
       # One bundle, not three apps: the indicator is the declared
       # CFBundleExecutable, and the settings/history binaries are sibling
-      # executables it launches from Contents/MacOS. Tag builds use the exact
-      # tag version in the zip name; main builds keep the dev name. The bundle
-      # also carries LICENSE and the generated third-party notices under
-      # Contents/Resources.
-      - name: Package macOS app bundle
+      # executables it launches from Contents/MacOS. The distribution is a
+      # drag-and-drop dmg containing the bundle and an /Applications symlink.
+      # Tag builds use the exact tag version; main builds keep the dev name.
+      # The bundle also carries LICENSE and the generated third-party notices
+      # under Contents/Resources.
+      - name: Package macOS app bundle and dmg
         run: |
           version=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
           arch="${{ matrix.arch }}"
@@ -198,31 +290,72 @@ jobs:
           cp THIRD_PARTY_NOTICES.md "$app/Contents/Resources/THIRD_PARTY_NOTICES.md"
           # The plist is a template; substitute the numeric base version and a
           # numeric build number so Finder/Get Info never shows a stale 0.0.0.
-          # Any version suffix stays in the zip/tag/settings footer, while
+          # Any version suffix stays in the dmg/tag/settings footer, while
           # CFBundleShortVersionString stays a plain numeric version.
           # `github.run_number` is monotonic even on the default shallow clone;
           # `git rev-list --count HEAD` would always be 1 there.
           plutil -replace CFBundleShortVersionString -string "$short_version" "$app/Contents/Info.plist"
           plutil -replace CFBundleVersion -string "${{ github.run_number }}" "$app/Contents/Info.plist"
           if [ "$GITHUB_REF_TYPE" = "tag" ]; then
-            zip_name="SysVitals_macOS_${arch}_v${release_version}.zip"
+            dmg_name="SysVitals_macOS_${arch}_v${release_version}.dmg"
           else
-            zip_name="SysVitals_macOS_${arch}_v${release_version}_${commit}_dev.zip"
+            dmg_name="SysVitals_macOS_${arch}_v${release_version}_${commit}_dev.dmg"
           fi
-          zip -qr "$zip_name" "$app"
-          echo "Packaged $zip_name"
-      - name: Upload macOS app bundle
+          dmg_root="dmg-root"
+          rm -rf "$dmg_root"
+          mkdir -p "$dmg_root"
+          cp -R "$app" "$dmg_root/"
+          ln -s /Applications "$dmg_root/Applications"
+          hdiutil create -volname "SysVitals" -srcfolder "$dmg_root" \
+            -ov -format UDZO -fs HFS+ "$dmg_name"
+          rm -rf "$dmg_root"
+          # Mount the image and verify the bundle and the drag target before
+          # the artifact is uploaded. The release job runs on Linux and cannot
+          # mount a dmg, so this is the content gate for macOS assets.
+          mount_point="$RUNNER_TEMP/SysVitalsDmg"
+          rm -rf "$mount_point"
+          mkdir -p "$mount_point"
+          hdiutil attach -nobrowse -readonly -mountpoint "$mount_point" "$dmg_name" >/dev/null
+          trap 'hdiutil detach "$mount_point" >/dev/null 2>&1 || true' EXIT
+          for f in \
+            "SysVitals.app/Contents/MacOS/sysvitals" \
+            "SysVitals.app/Contents/MacOS/SysVitalsSettings" \
+            "SysVitals.app/Contents/MacOS/SysVitalsHistory" \
+            "SysVitals.app/Contents/Info.plist" \
+            "SysVitals.app/Contents/Resources/AppIcon.icns" \
+            "SysVitals.app/Contents/Resources/LICENSE" \
+            "SysVitals.app/Contents/Resources/THIRD_PARTY_NOTICES.md"; do
+            test -f "$mount_point/$f" \
+              || { echo "missing in $dmg_name: $f" >&2; exit 1; }
+          done
+          test -L "$mount_point/Applications" \
+            || { echo "missing Applications link in $dmg_name" >&2; exit 1; }
+          test "$(readlink "$mount_point/Applications")" = "/Applications" \
+            || { echo "Applications link must target /Applications" >&2; exit 1; }
+          plist_version=$(plutil -extract CFBundleShortVersionString raw -o - \
+            "$mount_point/SysVitals.app/Contents/Info.plist")
+          test "$plist_version" = "$short_version" \
+            || { echo "plist version mismatch: $plist_version != $short_version" >&2; exit 1; }
+          plist_build=$(plutil -extract CFBundleVersion raw -o - \
+            "$mount_point/SysVitals.app/Contents/Info.plist")
+          test -n "$plist_build" \
+            || { echo "empty CFBundleVersion in $dmg_name" >&2; exit 1; }
+          hdiutil detach "$mount_point" >/dev/null
+          trap - EXIT
+          echo "Packaged $dmg_name"
+      - name: Upload macOS dmg
         uses: actions/upload-artifact@v4
         with:
           name: SysVitals-macos-${{ matrix.arch }}
-          path: SysVitals_macOS_${{ matrix.arch }}_*.zip
+          path: SysVitals_macOS_${{ matrix.arch }}_*.dmg
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
   # Release gate: tag pushes only. The four build legs have already produced
-  # the formal zips; this job validates their contents, writes a single sorted
-  # SHA256SUMS manifest, creates a draft Release, uploads and re-downloads the
-  # assets to verify them, then publishes the Release.
+  # the formal Windows setup/portable packages and macOS dmgs; this job
+  # validates their contents, writes a single sorted SHA256SUMS manifest,
+  # creates a draft Release, uploads and re-downloads the assets to verify
+  # them, then publishes the Release.
   #
   # Versions containing a suffix are still marked --prerelease for
   # compatibility, but the current release flow publishes final versions only;
@@ -271,24 +404,26 @@ jobs:
           cd release-assets
 
           expected=(
-            "SysVitals_Windows_x64_v${VERSION}.zip"
-            "SysVitals_Windows_arm64_v${VERSION}.zip"
-            "SysVitals_macOS_arm64_v${VERSION}.zip"
-            "SysVitals_macOS_x64_v${VERSION}.zip"
+            "SysVitals_Windows_x64_v${VERSION}_setup.exe"
+            "SysVitals_Windows_x64_v${VERSION}_portable.zip"
+            "SysVitals_Windows_arm64_v${VERSION}_setup.exe"
+            "SysVitals_Windows_arm64_v${VERSION}_portable.zip"
+            "SysVitals_macOS_arm64_v${VERSION}.dmg"
+            "SysVitals_macOS_x64_v${VERSION}.dmg"
           )
           for f in "${expected[@]}"; do
             test -f "$f" || { echo "missing asset: $f" >&2; exit 1; }
           done
-          if find . -maxdepth 1 -name '*_dev.zip' | grep -q .; then
+          if find . -maxdepth 1 -type f -name '*_dev*' | grep -q .; then
             echo "development assets must not be published" >&2
             exit 1
           fi
 
-          find . -maxdepth 1 -name 'SysVitals_*.zip' -printf '%f\n' | LC_ALL=C sort > /tmp/actual-zips
-          printf '%s\n' "${expected[@]}" | LC_ALL=C sort > /tmp/expected-zips
-          diff -u /tmp/expected-zips /tmp/actual-zips
+          find . -maxdepth 1 -type f -name 'SysVitals_*' -printf '%f\n' | LC_ALL=C sort > /tmp/actual-assets
+          printf '%s\n' "${expected[@]}" | LC_ALL=C sort > /tmp/expected-assets
+          diff -u /tmp/expected-assets /tmp/actual-assets
 
-          windows_zip="SysVitals_Windows_x64_v${VERSION}.zip"
+          windows_zip="SysVitals_Windows_x64_v${VERSION}_portable.zip"
           for entry in \
             "SysVitals/SysVitals.exe" \
             "SysVitals/SysVitalsSettings.exe" \
@@ -299,39 +434,18 @@ jobs:
               || { echo "missing in $windows_zip: $entry" >&2; exit 1; }
           done
 
-          macos_zip="SysVitals_macOS_arm64_v${VERSION}.zip"
-          for entry in \
-            "SysVitals.app/Contents/MacOS/sysvitals" \
-            "SysVitals.app/Contents/MacOS/SysVitalsSettings" \
-            "SysVitals.app/Contents/MacOS/SysVitalsHistory" \
-            "SysVitals.app/Contents/Info.plist" \
-            "SysVitals.app/Contents/Resources/AppIcon.icns" \
-            "SysVitals.app/Contents/Resources/LICENSE" \
-            "SysVitals.app/Contents/Resources/THIRD_PARTY_NOTICES.md"; do
-            unzip -Z1 "$macos_zip" | tr '\\' '/' | grep -Fxq "$entry" \
-              || { echo "missing in $macos_zip: $entry" >&2; exit 1; }
-          done
-
-          unzip -p "$macos_zip" "SysVitals.app/Contents/Info.plist" > /tmp/Info.plist
-          python3 - "$VERSION" <<'PY'
-          import plistlib
-          import sys
-
-          version = sys.argv[1]
-          base = version.split("-", 1)[0]
-          with open("/tmp/Info.plist", "rb") as fh:
-              plist = plistlib.load(fh)
-          assert plist["CFBundleShortVersionString"] == base, plist
-          assert str(plist["CFBundleVersion"]).strip(), plist
-          print(f"plist ok: {base} / {plist['CFBundleVersion']}")
-          PY
-
+          # The Windows build job installs and uninstalls the x64 setup before
+          # uploading it; this job only checks presence. Each macOS dmg is
+          # mounted and checked in its build job (Linux cannot mount one here).
+          windows_setup="SysVitals_Windows_x64_v${VERSION}_setup.exe"
+          test -s "$windows_setup" \
+            || { echo "empty asset: $windows_setup" >&2; exit 1; }
           : > SHA256SUMS
-          for zip in "${expected[@]}"; do
-            sha256sum "$zip" >> SHA256SUMS
+          for asset in "${expected[@]}"; do
+            sha256sum "$asset" >> SHA256SUMS
           done
           LC_ALL=C sort -k 2,2 SHA256SUMS -o SHA256SUMS
-          echo "SHA256SUMS written for ${#expected[@]} archives"
+          echo "SHA256SUMS written for ${#expected[@]} assets"
       - name: Create draft release
         shell: bash
         env:
@@ -370,9 +484,9 @@ jobs:
             echo "per-archive .sha256 files must not be published" >&2
             exit 1
           fi
-          awk '{print $2}' SHA256SUMS | LC_ALL=C sort > /tmp/sums-zips
-          printf '%s\n' SysVitals_*.zip | LC_ALL=C sort > /tmp/published-zips
-          diff -u /tmp/sums-zips /tmp/published-zips
+          awk '{print $2}' SHA256SUMS | LC_ALL=C sort > /tmp/sums-assets
+          find . -maxdepth 1 -type f -name 'SysVitals_*' -printf '%f\n' | LC_ALL=C sort > /tmp/published-assets
+          diff -u /tmp/sums-assets /tmp/published-assets
           sha256sum -c --strict SHA256SUMS
           echo "uploaded assets verified"
       - name: Publish release

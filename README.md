@@ -26,24 +26,36 @@ Measured with the release build running normally (all groups on, default 2 s sam
 
 **Windows**
 
-1. Download the zip for your architecture from the [Releases page](https://github.com/fynhq/sysvitals/releases) and extract it.
-2. The archive contains one `SysVitals/` folder with `SysVitals.exe`, `SysVitalsSettings.exe`, `SysVitalsHistory.exe`, and `LICENSE`. Keep the three executables together.
+Installer (recommended):
+
+1. Download `SysVitals_Windows_<arch>_v<version>_setup.exe` from the [Releases page](https://github.com/fynhq/sysvitals/releases) and run it.
+2. The installer is per-user: it installs under `%LOCALAPPDATA%\Programs\SysVitals` and does not require administrator rights.
+3. Launch SysVitals from the Start menu; Settings and History are launched by the indicator.
+4. The build is unsigned. If SmartScreen appears, choose **More info → Run anyway**.
+
+Portable (no install):
+
+1. Download `SysVitals_Windows_<arch>_v<version>_portable.zip` and extract it.
+2. The archive contains one `SysVitals/` folder with `SysVitals.exe`, `SysVitalsSettings.exe`, `SysVitalsHistory.exe`, `LICENSE`, and `THIRD_PARTY_NOTICES.md`. Keep the three executables together.
 3. Run `SysVitals.exe`; Settings and History are launched by the indicator.
 4. The build is unsigned. If SmartScreen appears, choose **More info → Run anyway**.
 
+Both Windows builds keep settings, history and logs in `%APPDATA%\SysVitals`.
+
 **macOS**
 
-1. Download the zip for your Mac from the [Releases page](https://github.com/fynhq/sysvitals/releases) and extract `SysVitals.app`.
-2. Move it to `/Applications` and launch the `.app` (not the binaries inside `Contents/MacOS`).
-3. The build is unsigned and not notarized. If macOS blocks it, try right-click → **Open**; otherwise open **System Settings → Privacy & Security → Open Anyway**. If it is still blocked, remove the quarantine flag:
+1. Download the dmg for your Mac from the [Releases page](https://github.com/fynhq/sysvitals/releases) and open it.
+2. Drag `SysVitals.app` to `/Applications` (or to `~/Applications` if you do not have administrator rights; create that folder if needed). Launch the app, not the binaries inside `Contents/MacOS`.
+3. The build is unsigned and not notarized. If macOS blocks it, remove the quarantine flag:
 
    ```sh
    xattr -d -r com.apple.quarantine /Applications/SysVitals.app
    ```
 
-   If you get a permission error, run the same command with `sudo`.
-
+   If you installed the app in `~/Applications`, use that path instead. If you get a permission error, run the same command with `sudo`. On macOS 13/14 you can also try right-click → **Open**.
 4. SysVitals appears in the menu bar; the indicator has no Dock icon (Settings may show one while open).
+
+Asset names and available formats can differ between releases; use the files listed on the release page.
 
 ### Upgrade
 
@@ -51,23 +63,31 @@ SysVitals has no built-in auto-update; install a newer release manually.
 
 **Windows**
 
+Installer:
+
 1. Quit SysVitals.
-2. Download the new zip and replace the existing `SysVitals/` folder; keep the three executables together.
+2. Download the new `_setup.exe` and run it; it upgrades the existing per-user installation.
+3. Settings, history and logs in `%APPDATA%\SysVitals` are kept.
+
+Portable:
+
+1. Quit SysVitals.
+2. Download the new `_portable.zip` and replace the existing `SysVitals/` folder; keep the three executables together.
 3. Run `SysVitals.exe` again. Settings, history and logs in `%APPDATA%\SysVitals` are kept.
 
 **macOS**
 
 1. Quit SysVitals.
-2. Download the new zip and replace `/Applications/SysVitals.app`; leave `~/Library/Application Support/SysVitals` untouched.
-3. A newly downloaded app is quarantined again, so the command **must be re-run**:
+2. Download the new dmg and open it.
+3. Drag the new `SysVitals.app` over the existing copy in `/Applications` (or `~/Applications`); leave `~/Library/Application Support/SysVitals` untouched.
+4. A newly downloaded app is quarantined again, so the command **must be re-run**:
 
    ```sh
    xattr -d -r com.apple.quarantine /Applications/SysVitals.app
    ```
 
-   If you get a permission error, run the same command with `sudo`.
-
-4. Launch the new `SysVitals.app`.
+   If you installed the app in `~/Applications`, use that path instead. If you get a permission error, run the same command with `sudo`.
+5. Launch the new `SysVitals.app`.
 
 ### Usage
 
@@ -87,7 +107,7 @@ SysVitals has no built-in auto-update; install a newer release manually.
 
 ### Verify the download
 
-Each release provides a single `SHA256SUMS` file covering all archives. Download it and the archive(s) you want to check into the same folder.
+Each release provides a single `SHA256SUMS` file covering all release files. Download it and the files you want to check into the same folder.
 
 **Windows (PowerShell)**
 
@@ -108,19 +128,21 @@ Get-Content .\SHA256SUMS | ForEach-Object {
 shasum -a 256 -c --ignore-missing SHA256SUMS
 ```
 
-Archives you did not download are skipped. Checksums verify download integrity, not a signature.
+Files you did not download are skipped. Checksums verify download integrity, not a signature.
 
 ### Data and uninstall
 
 **Windows**
 
 - Data: `%APPDATA%\SysVitals`.
-- Uninstall: quit SysVitals, delete the extracted `SysVitals/` folder, and remove the data folder to delete settings, history and logs.
+- Installer: uninstall from **Settings → Apps → Installed apps** (or **Apps & features**).
+- Portable: quit SysVitals and delete the extracted `SysVitals/` folder.
+- To remove settings, history and logs, delete the data folder as well.
 
 **macOS**
 
 - Data: `~/Library/Application Support/SysVitals`.
-- Uninstall: quit SysVitals, move `SysVitals.app` to the Trash, and remove the data folder.
+- Uninstall: if **Launch at login** is enabled, turn it off in Settings first; quit SysVitals, move `SysVitals.app` to the Trash, and delete the data folder to remove settings, history and logs.
 
 History is kept for up to one month; logs older than 7 days are removed.
 
@@ -173,24 +195,36 @@ Released under the MIT License. See [LICENSE](LICENSE).
 
 **Windows**
 
-1. 从 [Releases 页面](https://github.com/fynhq/sysvitals/releases) 下载对应架构的 zip 并解压。
-2. 压缩包内是单一 `SysVitals/` 目录，含 `SysVitals.exe`、`SysVitalsSettings.exe`、`SysVitalsHistory.exe` 和 `LICENSE`；三个 exe 请保持在一起。
+安装版（推荐）：
+
+1. 从 [Releases 页面](https://github.com/fynhq/sysvitals/releases) 下载 `SysVitals_Windows_<arch>_v<version>_setup.exe` 并运行。
+2. 安装器按当前用户安装到 `%LOCALAPPDATA%\Programs\SysVitals`，不需要管理员权限。
+3. 从开始菜单启动 SysVitals；设置与走势图由指示器自动拉起。
+4. 构建未签名。首次启动如出现 SmartScreen，选择“更多信息”→“仍要运行”。
+
+便携版（免安装）：
+
+1. 下载 `SysVitals_Windows_<arch>_v<version>_portable.zip` 并解压。
+2. 压缩包内是单一 `SysVitals/` 目录，含 `SysVitals.exe`、`SysVitalsSettings.exe`、`SysVitalsHistory.exe`、`LICENSE` 和 `THIRD_PARTY_NOTICES.md`；三个 exe 请保持在一起。
 3. 运行 `SysVitals.exe`；设置与走势图由指示器自动拉起。
 4. 构建未签名。首次启动如出现 SmartScreen，选择“更多信息”→“仍要运行”。
 
+两种 Windows 形式都把设置、历史与日志保存在 `%APPDATA%\SysVitals`。
+
 **macOS**
 
-1. 从 [Releases 页面](https://github.com/fynhq/sysvitals/releases) 下载对应 Mac 的 zip，解压 `SysVitals.app`。
-2. 移到 `/Applications`，启动 `.app`（不要直接运行 `Contents/MacOS` 里的二进制）。
-3. 构建未签名/未公证。如被拦截，先右键→“打开”；否则到“系统设置→隐私与安全性→仍要打开”。如仍被拦截，移除隔离标记：
+1. 从 [Releases 页面](https://github.com/fynhq/sysvitals/releases) 下载对应 Mac 的 dmg 并打开。
+2. 把 `SysVitals.app` 拖到 `/Applications`（没有管理员权限时拖到 `~/Applications`，没有该目录就新建一个），启动 `.app`（不要直接运行 `Contents/MacOS` 里的二进制）。
+3. 构建未签名/未公证。如被拦截，移除隔离标记：
 
    ```sh
    xattr -d -r com.apple.quarantine /Applications/SysVitals.app
    ```
 
-   如遇权限问题，可尝试在命令前加 `sudo` 执行。
-
+   如果装在 `~/Applications`，请把路径换成对应位置。如遇权限问题，可尝试在命令前加 `sudo` 执行。macOS 13/14 也可以先试右键→“打开”。
 4. SysVitals 出现在菜单栏；指示器无 Dock 图标（设置窗打开时可能显示）。
+
+不同版本提供的资产名称/形式可能不同；请以对应 Release 页面列出的文件为准。
 
 ### 升级
 
@@ -198,23 +232,31 @@ SysVitals 没有内置自动更新；需要手动安装新版。
 
 **Windows**
 
+安装版：
+
 1. 退出 SysVitals。
-2. 下载新 zip，替换旧的 `SysVitals/` 目录；三个 exe 保持在一起。
+2. 下载新的 `_setup.exe` 并运行，会原地升级当前用户的安装。
+3. `%APPDATA%\SysVitals` 中的设置、历史与日志保留。
+
+便携版：
+
+1. 退出 SysVitals。
+2. 下载新的 `_portable.zip`，替换旧的 `SysVitals/` 目录；三个 exe 保持在一起。
 3. 重新运行 `SysVitals.exe`。`%APPDATA%\SysVitals` 中的设置、历史与日志保留。
 
 **macOS**
 
 1. 退出 SysVitals。
-2. 下载新 zip，替换 `/Applications/SysVitals.app`；保留 `~/Library/Application Support/SysVitals`。
-3. 新下载的 app 会重新带上隔离标记，**必须重新执行**：
+2. 下载新的 dmg 并打开。
+3. 把新的 `SysVitals.app` 拖到 `/Applications`（或 `~/Applications`）覆盖旧版本；保留 `~/Library/Application Support/SysVitals`。
+4. 新下载的 app 会重新带上隔离标记，**必须重新执行**：
 
    ```sh
    xattr -d -r com.apple.quarantine /Applications/SysVitals.app
    ```
 
-   如遇权限问题，可尝试在命令前加 `sudo` 执行。
-
-4. 启动新版 `SysVitals.app`。
+   如果装在 `~/Applications`，请把路径换成对应位置。如遇权限问题，可尝试在命令前加 `sudo` 执行。
+5. 启动新版 `SysVitals.app`。
 
 ### 使用
 
@@ -234,7 +276,7 @@ SysVitals 没有内置自动更新；需要手动安装新版。
 
 ### 校验下载
 
-每次发布提供一个 `SHA256SUMS`，覆盖全部压缩包。把它与要校验的压缩包下载到同一目录。
+每次发布提供一个 `SHA256SUMS`，覆盖全部发布文件。把它与要校验的文件下载到同一目录。
 
 **Windows（PowerShell）**
 
@@ -255,19 +297,21 @@ Get-Content .\SHA256SUMS | ForEach-Object {
 shasum -a 256 -c --ignore-missing SHA256SUMS
 ```
 
-未下载的压缩包会被跳过。校验只保证下载完整，不代表签名。
+未下载的文件会被跳过。校验只保证下载完整，不代表签名。
 
 ### 数据与卸载
 
 **Windows**
 
 - 数据：`%APPDATA%\SysVitals`。
-- 卸载：退出 SysVitals，删除解压出的 `SysVitals/` 目录；如需清除设置、历史与日志，再删除数据目录。
+- 安装版：在 **设置 → 应用 → 已安装的应用**（或“应用和功能”）中卸载。
+- 便携版：退出 SysVitals，删除解压出的 `SysVitals/` 目录。
+- 如需清除设置、历史与日志，再删除数据目录。
 
 **macOS**
 
 - 数据：`~/Library/Application Support/SysVitals`。
-- 卸载：退出 SysVitals，把 `SysVitals.app` 移到废纸篓；如需清除数据，再删除数据目录。
+- 卸载：如已开启**开机自启**，先在设置中关闭；退出 SysVitals，把 `SysVitals.app` 移到废纸篓；如需清除设置、历史与日志，再删除数据目录。
 
 历史最多保留一个月；日志超过 7 天自动清理。
 
