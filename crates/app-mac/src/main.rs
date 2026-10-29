@@ -124,6 +124,44 @@ mod macos {
         }));
     }
 
+    /// Log uncaught Objective-C exceptions before AppKit turns them into a
+    /// SIGABRT. Rust's panic hook cannot see these, so a crash inside an
+    /// AppKit call would otherwise leave no trace in the daily log.
+    extern "C" fn log_uncaught_exception(exception: *mut AnyObject) {
+        let mut detail = String::from("unknown exception");
+        if !exception.is_null() {
+            // SAFETY: `exception` is the live NSException passed by the
+            // runtime; both selectors return valid objects or null.
+            unsafe {
+                let desc: *mut AnyObject = msg_send![exception, description];
+                if !desc.is_null() {
+                    let utf8: *const std::ffi::c_char = msg_send![desc, UTF8String];
+                    if !utf8.is_null() {
+                        detail = std::ffi::CStr::from_ptr(utf8)
+                            .to_string_lossy()
+                            .into_owned();
+                    }
+                }
+            }
+        }
+        log_event(
+            "FATAL",
+            &format!("uncaught Objective-C exception: {detail}"),
+        );
+    }
+
+    extern "C" {
+        fn NSSetUncaughtExceptionHandler(handler: Option<extern "C" fn(*mut AnyObject)>);
+    }
+
+    /// Install the Objective-C crash logger (complements the Rust panic hook).
+    fn install_exception_logging() {
+        // SAFETY: registering a process-wide handler that only reads the
+        // exception and writes a log line; the exception keeps propagating
+        // afterwards, so termination behaviour is unchanged.
+        unsafe { NSSetUncaughtExceptionHandler(Some(log_uncaught_exception)) };
+    }
+
     /// Single-instance guard: an exclusive, non-blocking `flock` on
     /// `<data_dir>/sysvitals.lock`. Returns `true` when this process now holds
     /// the lock; a second launch finds it taken and exits. The file is
@@ -214,6 +252,19 @@ mod macos {
         static DUAL_OVERFLOW_LOGGED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
         /// Currently rendered template image and its reserved width.
         static STATUS_IMAGE: RefCell<Option<StatusImage>> = const { RefCell::new(None) };
+        /// Accessibility value for the current frame, kept so it can be applied
+        /// from a run-loop tick even when the image itself did not change.
+        static ACCESSIBILITY_TEXT: RefCell<String> = const { RefCell::new(String::new()) };
+        /// Last value actually pushed to AppKit, so an unchanged frame does not
+        /// re-send the same accessibility/tooltip update every tick.
+        static ACCESSIBILITY_APPLIED: RefCell<String> = const { RefCell::new(String::new()) };
+        /// True while `tick` runs from the repeating timer, i.e. inside
+        /// `NSApplication::run`. The startup tick runs before the run loop; the
+        /// accessibility and tooltip calls are deferred until this is true.
+        static IN_RUN_LOOP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        /// One-shot startup milestone: the first frame has been mounted. Kept
+        /// in the daily log so a launch that dies later is still traceable.
+        static FIRST_FRAME_LOGGED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     }
 
     /// Screen rectangle (left, top, right, bottom) in GPUI's global top-left,
@@ -385,6 +436,17 @@ mod macos {
         }
     }
 
+    /// Tick driven by the repeating timer. `IN_RUN_LOOP` is what tells
+    /// `update_accessibility` that AppKit is fully launched: the startup tick
+    /// runs before `NSApplication::run`, while the status item's scene is still
+    /// being realized on macOS 27, and the accessibility/tooltip setters must
+    /// wait for a real run-loop pass.
+    fn timer_tick() {
+        IN_RUN_LOOP.set(true);
+        tick();
+        IN_RUN_LOOP.set(false);
+    }
+
     /// Own and (re-)arm the repeating sample timer. The first tick primes it;
     /// later ticks re-schedule only when a config hot-reload changed
     /// `sample.interval_ms`, so a new interval takes effect within one old tick
@@ -397,7 +459,7 @@ mod macos {
             return;
         }
         let block = block2::RcBlock::new(|_timer: std::ptr::NonNull<NSTimer>| {
-            tick();
+            timer_tick();
         });
         // SAFETY: the block captures nothing non-Send and fires on the main run
         // loop, same contract as the other timers here.
@@ -945,13 +1007,16 @@ mod macos {
         });
         DRAW_SIGNATURE.with(|s| *s.borrow_mut() = sig);
         apply_status_image();
+        if !FIRST_FRAME_LOGGED.replace(true) {
+            log_event("INFO", "startup: first frame applied");
+        }
         let accessible = texts
             .iter()
             .filter(|text| !text.is_empty())
             .cloned()
             .collect::<Vec<_>>()
             .join(", ");
-        apply_accessibility(&accessible);
+        update_accessibility(accessible);
     }
 
     /// Sample metrics, record the history row, and update the indicator.
@@ -977,6 +1042,11 @@ mod macos {
 
         let row = format_frame(&snapshot, &cfg);
         render_indicator(&row, &cfg);
+        // The startup tick runs before the run loop; deferred accessibility
+        // updates from that tick land on the first timer-driven tick.
+        if IN_RUN_LOOP.get() {
+            apply_pending_accessibility();
+        }
     }
 
     /// Directory containing the running executable.
@@ -1383,6 +1453,36 @@ mod macos {
         });
     }
 
+    /// Record the accessibility text for the current frame and, once the app
+    /// runs on its real run loop, push it to AppKit. The startup tick happens
+    /// before `NSApplication::run`; on macOS 27 the status item scene is still
+    /// being realized at that point, and the setters abort the process when
+    /// called from there (0.2.0 regression — v0.1.1 had no such call). The
+    /// value is stored unconditionally so a deferred update still lands on the
+    /// first timer tick even when the image itself is reused unchanged.
+    fn update_accessibility(text: String) {
+        if text.is_empty() {
+            return;
+        }
+        ACCESSIBILITY_TEXT.with(|slot| *slot.borrow_mut() = text);
+        if IN_RUN_LOOP.get() {
+            apply_pending_accessibility();
+        }
+    }
+
+    /// Push the stored accessibility value to AppKit when it changed.
+    fn apply_pending_accessibility() {
+        let text = ACCESSIBILITY_TEXT.with(|slot| slot.borrow().clone());
+        if text.is_empty() {
+            return;
+        }
+        if ACCESSIBILITY_APPLIED.with(|slot| *slot.borrow() == text) {
+            return;
+        }
+        apply_accessibility(&text);
+        ACCESSIBILITY_APPLIED.with(|slot| *slot.borrow_mut() = text);
+    }
+
     /// Expose the live values to VoiceOver and as the status item's native
     /// tooltip. The template image itself has no accessible text, so without
     /// this the menu-bar item reads as an unlabeled button.
@@ -1444,6 +1544,7 @@ mod macos {
             log_event("INFO", "another instance is already running; exiting");
             return;
         }
+        install_exception_logging();
 
         // Get MainThreadMarker — must be on main thread.
         let mtm = MainThreadMarker::new().expect("must run on main thread");
@@ -1537,6 +1638,7 @@ mod macos {
         // enabled earlier; only apply after a successful initial read.
         if initial_config_ok {
             apply_auto_start(&cfg);
+            log_event("INFO", "startup: login-item state applied");
         }
 
         // Start the background SQLite writer before the first sample, so the
@@ -1547,8 +1649,11 @@ mod macos {
         // `reschedule_if_interval_changed`).
         tick();
 
-        // Enter the application event loop (blocks forever).
+        // Enter the application event loop (blocks forever). Quit goes through
+        // `terminate:`, which exits the process; returning here means the run
+        // loop ended without a quit, which is otherwise invisible.
         app.run();
+        log_event("WARN", "run loop returned unexpectedly");
     }
 }
 
