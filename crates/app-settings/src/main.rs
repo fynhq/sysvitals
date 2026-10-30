@@ -771,7 +771,8 @@ impl SettingsView {
                 "INFO",
                 &format!(
                     "settings: config saved (interval={}ms, language={:?}, theme={:?}, \
-                     dual_row={}, show_resources={}, show_network={}, item_spacing={}px)",
+                     dual_row={}, show_resources={}, show_network={}, item_spacing={}px, \
+                     auto_start={})",
                     cfg.sample.interval_ms,
                     cfg.display.language,
                     cfg.display.theme,
@@ -779,6 +780,7 @@ impl SettingsView {
                     cfg.display.show_resources,
                     cfg.display.show_network,
                     cfg.display.item_spacing,
+                    cfg.startup.auto_start,
                 ),
             );
             self.cfg = cfg;

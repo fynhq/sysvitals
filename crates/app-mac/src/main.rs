@@ -68,6 +68,15 @@ mod macos {
 
     // ------------------------------------------------------------- diagnostics
 
+    /// Build stamp emitted by the build script: `v{semver}` on a tagged
+    /// commit, `v{semver}_{short-hash} (dev)` otherwise, and the plain
+    /// version when git metadata is unavailable. Kept in step with the stamp
+    /// shown in the settings footer so a log file can be tied to a build.
+    const SV_BUILD_ID: &str = match option_env!("SV_BUILD_ID") {
+        Some(id) => id,
+        None => concat!("v", env!("CARGO_PKG_VERSION")),
+    };
+
     /// Local date (`YYYY-MM-DD`) and time (`HH:MM:SS`) for the log stamp, from
     /// chrono's local clock (the macOS counterpart of the Windows overlay's
     /// `GetLocalTime`-based `local_now`).
@@ -1650,8 +1659,9 @@ mod macos {
         log_event(
             "INFO",
             &format!(
-                "SysVitals (mac) starting (version={})",
-                env!("CARGO_PKG_VERSION")
+                "SysVitals (mac) starting (version={}, build={})",
+                env!("CARGO_PKG_VERSION"),
+                SV_BUILD_ID
             ),
         );
         log_event(
