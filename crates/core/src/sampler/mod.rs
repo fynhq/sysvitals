@@ -56,12 +56,19 @@ impl Sampler {
     /// weight (0 disables smoothing); it is fixed for the process lifetime —
     /// the config poller treats it as a startup-only debug setting.
     pub fn new(interfaces: NetSelection, cpu_smoothing: f64) -> Self {
+        // sysinfo 0.40 made both constructors fallible for platforms without
+        // the required backends. They are infallible on every platform this
+        // workspace builds (Windows, macOS, and the Linux test/example host);
+        // a failure would leave the indicator with nothing to show, so
+        // surface it at startup.
         let system = System::new_with_specifics(
             RefreshKind::nothing()
                 .with_cpu(CpuRefreshKind::everything())
                 .with_memory(MemoryRefreshKind::nothing().with_ram()),
-        );
-        let networks = Networks::new_with_refreshed_list();
+        )
+        .expect("sysinfo system information is supported on this platform");
+        let networks = Networks::new_with_refreshed_list()
+            .expect("sysinfo network enumeration is supported on this platform");
         Sampler {
             system,
             networks,

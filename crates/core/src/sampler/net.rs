@@ -199,23 +199,28 @@ impl NetSampler {
 /// heuristic. Split out so a future native backend can reuse the same shape.
 fn collect_frame(networks: &Networks, selection: &NetSelection) -> CounterFrame {
     networks
-        .list()
         .iter()
-        .filter(|(name, data)| {
+        .filter_map(|(name, data)| {
+            // Interface names are `OsString` since sysinfo 0.40; the release
+            // platforms (Windows/macOS) provide Unicode names, so the lossy
+            // form is exact in practice and keeps selection matched against
+            // the configured text.
+            let name = name.to_string_lossy();
             // Auto mode also requires the link to be up; an explicit user
             // choice is honored even if momentarily reported otherwise.
             let link_ok = match selection {
                 NetSelection::Auto => data.operational_state() == InterfaceOperationalState::Up,
                 NetSelection::Interfaces(_) => true,
             };
-            link_ok && selection.matches(name)
-        })
-        .map(|(name, data)| {
-            (
-                name.clone(),
-                data.total_received(),
-                data.total_transmitted(),
-            )
+            if link_ok && selection.matches(name.as_ref()) {
+                Some((
+                    name.into_owned(),
+                    data.total_received(),
+                    data.total_transmitted(),
+                ))
+            } else {
+                None
+            }
         })
         .collect()
 }

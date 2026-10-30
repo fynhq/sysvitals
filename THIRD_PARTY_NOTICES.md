@@ -4,10 +4,10 @@ SysVitals includes open-source third-party components. This notice is
 included in the Windows portable zip and in the macOS app bundle.
 
 The list covers the components used by the Windows and macOS binaries
-(516 packages in the union of all four shipped targets).
+(512 packages in the union of all four shipped targets).
 A package may be present on only some platforms or architectures.
 
-Generated from Cargo.lock. Dependency-set fingerprint: 93cfe29e79746be66345fc3ac9a5fe62275aed3c8026ccfed1bec80765d0f47b.
+Generated from Cargo.lock. Dependency-set fingerprint: 20916898ed62de94ea323c896f5817a950ded9dee9aaebf67d4e54b2cf369af0.
 
 License expressions are shown as declared by the upstream package (usually
 SPDX syntax). Where a component is offered under several licenses, SysVitals
@@ -77,8 +77,6 @@ authoritative.
 | cfg-if | 1.0.5 | MIT OR Apache-2.0 | https://github.com/rust-lang/cfg-if |
 | chrono | 0.4.45 | MIT OR Apache-2.0 | https://github.com/chronotope/chrono |
 | clipboard-win | 5.4.1 | BSL-1.0 | https://github.com/DoumanAsh/clipboard-win |
-| cocoa | 0.26.1 | MIT OR Apache-2.0 | https://github.com/servo/core-foundation-rs |
-| cocoa-foundation | 0.2.1 | MIT OR Apache-2.0 | https://github.com/servo/core-foundation-rs |
 | color_quant | 1.1.0 | MIT | https://github.com/image-rs/color_quant.git |
 | concurrent-queue | 2.5.0 | Apache-2.0 OR MIT | https://github.com/smol-rs/concurrent-queue |
 | const-oid | 0.10.2 | Apache-2.0 OR MIT | https://github.com/RustCrypto/formats |
@@ -137,7 +135,6 @@ authoritative.
 | float_next_after | 1.0.0 | MIT | https://gitlab.com/bronsonbdevost/next_afterf |
 | fluent-uri | 0.1.4 | MIT | https://github.com/yescallop/fluent-uri-rs |
 | flume | 0.12.0 | Apache-2.0/MIT | https://github.com/zesterer/flume |
-| foldhash | 0.1.5 | Zlib | https://github.com/orlp/foldhash |
 | foldhash | 0.2.0 | Zlib | https://github.com/orlp/foldhash |
 | fontdb | 0.23.0 | MIT | https://github.com/RazrFalcon/fontdb |
 | foreign-types | 0.5.0 | MIT/Apache-2.0 | https://github.com/sfackler/foreign-types |
@@ -164,34 +161,33 @@ authoritative.
 | glob | 0.3.4 | MIT OR Apache-2.0 | https://github.com/rust-lang/glob |
 | globset | 0.4.20 | Unlicense OR MIT | https://github.com/BurntSushi/ripgrep/tree/master/crates/globset |
 | globwalk | 0.8.1 | MIT | https://github.com/gilnaa/globwalk |
-| gpui-base | 0.7.3 | Apache-2.0 | https://github.com/longbridge/gpui-kit |
-| gpui-component | 0.7.3 | Apache-2.0 | https://github.com/longbridge/gpui-kit |
-| gpui-component-macros | 0.7.3 | Apache-2.0 | https://crates.io/crates/gpui-component-macros/0.7.3 |
-| gpui-kit | 0.7.3 | Apache-2.0 | https://github.com/longbridge/gpui-kit |
-| gpui-kit-assets | 0.7.3 | Apache-2.0 | https://github.com/longbridge/gpui-kit |
-| gpui-pre | 0.3.9 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-apple | 0.3.9 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-collections | 0.3.9 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-derive-refineable | 0.3.9 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-http-client | 0.3.9 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-macos | 0.3.9 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-macros | 0.3.9 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-platform | 0.3.9 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-refineable | 0.3.9 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-scheduler | 0.3.9 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-shared-string | 0.3.9 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-sum-tree | 0.3.9 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-util | 0.3.9 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-windows | 0.3.9 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-ztracing | 0.3.9 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-ztracing-macro | 0.3.9 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-base | 0.8.1 | Apache-2.0 | https://github.com/longbridge/gpui-kit |
+| gpui-component | 0.8.1 | Apache-2.0 | https://github.com/longbridge/gpui-kit |
+| gpui-component-macros | 0.8.1 | Apache-2.0 | https://crates.io/crates/gpui-component-macros/0.8.1 |
+| gpui-kit | 0.8.1 | Apache-2.0 | https://github.com/longbridge/gpui-kit |
+| gpui-kit-assets | 0.8.1 | Apache-2.0 | https://github.com/longbridge/gpui-kit |
+| gpui-pre | 0.3.10 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-apple | 0.3.10 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-collections | 0.3.10 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-derive-refineable | 0.3.10 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-http-client | 0.3.10 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-macos | 0.3.10 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-macros | 0.3.10 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-platform | 0.3.10 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-refineable | 0.3.10 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-scheduler | 0.3.10 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-shared-string | 0.3.10 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-sum-tree | 0.3.10 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-util | 0.3.10 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-windows | 0.3.10 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-ztracing | 0.3.10 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-ztracing-macro | 0.3.10 | Apache-2.0 | https://github.com/zed-industries/zed |
 | granit-parser | 1.3.0 | MIT OR Apache-2.0 | https://github.com/bourumir-wyngs/granit-parser |
 | half | 2.7.1 | MIT OR Apache-2.0 | https://github.com/VoidStarKat/half-rs |
 | hash32 | 0.3.1 | MIT OR Apache-2.0 | https://github.com/japaric/hash32 |
-| hashbrown | 0.15.5 | MIT OR Apache-2.0 | https://github.com/rust-lang/hashbrown |
 | hashbrown | 0.16.1 | MIT OR Apache-2.0 | https://github.com/rust-lang/hashbrown |
 | hashbrown | 0.17.1 | MIT OR Apache-2.0 | https://github.com/rust-lang/hashbrown |
-| hashlink | 0.10.0 | MIT OR Apache-2.0 | https://github.com/kyren/hashlink |
+| hashlink | 0.12.2 | MIT OR Apache-2.0 | https://github.com/djc/hashlink |
 | heapless | 0.9.3 | MIT OR Apache-2.0 | https://github.com/rust-embedded/heapless |
 | heck | 0.5.0 | MIT OR Apache-2.0 | https://github.com/withoutboats/heck |
 | html5ever | 0.27.0 | MIT OR Apache-2.0 | https://github.com/servo/html5ever |
@@ -227,7 +223,7 @@ authoritative.
 | lebe | 0.5.3 | BSD-3-Clause | https://github.com/johannesvollmer/lebe |
 | libc | 0.2.191 | MIT OR Apache-2.0 | https://github.com/rust-lang/libc |
 | libm | 0.2.16 | MIT | https://github.com/rust-lang/compiler-builtins |
-| libsqlite3-sys | 0.35.0 | MIT | https://github.com/rusqlite/rusqlite |
+| libsqlite3-sys | 0.39.1 | MIT | https://github.com/rusqlite/rusqlite |
 | link-section | 0.19.3 | Apache-2.0 OR MIT | https://github.com/mmastrac/linktime |
 | linktime-proc-macro | 0.2.3 | Apache-2.0 OR MIT | https://github.com/mmastrac/linktime |
 | litemap | 0.8.3 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
@@ -357,7 +353,7 @@ authoritative.
 | ropey | 2.0.0-beta.1 | MIT OR Apache-2.0 | https://github.com/cessen/ropey |
 | roxmltree | 0.20.0 | MIT OR Apache-2.0 | https://github.com/RazrFalcon/roxmltree |
 | roxmltree | 0.21.1 | MIT OR Apache-2.0 | https://github.com/RazrFalcon/roxmltree |
-| rusqlite | 0.37.0 | MIT | https://github.com/rusqlite/rusqlite |
+| rusqlite | 0.41.1 | MIT | https://github.com/rusqlite/rusqlite |
 | rust-embed | 8.13.0 | MIT | https://pyrossh.dev/repos/rust-embed |
 | rust-embed-impl | 8.13.0 | MIT | https://pyrossh.dev/repos/rust-embed |
 | rust-embed-utils | 8.13.0 | MIT | https://pyrossh.dev/repos/rust-embed |
@@ -417,8 +413,8 @@ authoritative.
 | syn | 3.0.9 | MIT OR Apache-2.0 | https://github.com/dtolnay/syn |
 | synstructure | 0.14.0 | MIT | https://github.com/mystor/synstructure |
 | sysinfo | 0.31.4 | MIT | https://github.com/GuillaumeGomez/sysinfo |
-| sysinfo | 0.39.6 | MIT | https://github.com/GuillaumeGomez/sysinfo |
-| taffy | 0.13.0 | MIT | https://github.com/DioxusLabs/taffy |
+| sysinfo | 0.40.0 | MIT | https://github.com/GuillaumeGomez/sysinfo |
+| taffy | 0.15.1 | MIT | https://github.com/DioxusLabs/taffy |
 | tendril | 0.4.3 | MIT/Apache-2.0 | https://github.com/servo/tendril |
 | thiserror | 2.0.21 | MIT OR Apache-2.0 | https://github.com/dtolnay/thiserror |
 | thiserror-impl | 2.0.21 | MIT OR Apache-2.0 | https://github.com/dtolnay/thiserror |
@@ -760,7 +756,7 @@ DEALINGS IN THE SOFTWARE.
 
 ### LICENSE / LICENSE-APACHE / aclysma__profiling / master__LICENSE-APACHE / servo__pathfinder / main__LICENSE-APACHE / servo__pathfinder / master__LICENSE-APACHE
 
-Used by: addr2line 0.25.1, aligned 0.4.3, arc-swap 1.9.3, arrayvec 0.7.8, as-slice 0.2.1, async-channel 2.5.0, async-executor 1.14.0, async-fs 2.2.0, async-io 2.6.0, async-lock 3.4.2, async-net 2.0.0, async-process 2.5.0, async-signal 0.2.14, async-task 4.7.1, atomic-waker 1.1.2, backtrace 0.3.76, base64 0.22.1, base64 0.23.1, bitflags 1.3.2, bitflags 2.13.2, bitstream-io 4.10.0, blocking 1.7.0, bstr 1.13.1, bumpalo 3.20.3, cfg-if 1.0.5, cocoa 0.26.1, cocoa-foundation 0.2.1, concurrent-queue 2.5.0, core-foundation 0.10.1, core-foundation-sys 0.8.7, core-graphics 0.24.0, core-graphics-types 0.2.0, core-text 21.0.0, core_detect 1.0.0, crossbeam-deque 0.8.8, crossbeam-epoch 0.9.21, crossbeam-utils 0.8.23, data-url 0.3.2, displaydoc 0.2.7, either 1.19.0, encoding_rs_io 0.1.8, equivalent 1.0.3, errno 0.3.14, euclid 0.22.14, event-listener 5.4.2, event-listener-strategy 0.5.4, fastrand 2.5.0, flate2 1.1.10, form_urlencoded 1.2.2, futf 0.1.5, futures-lite 2.6.1, gif 0.13.3, gif 0.14.2, gimli 0.32.3, glob 0.3.4, hash32 0.3.1, hashbrown 0.15.5, hashbrown 0.16.1, hashbrown 0.17.1, heapless 0.9.3, heck 0.5.0, html5ever 0.27.0, idna 1.1.0, idna_adapter 1.2.2, indexmap 2.14.2, itertools 0.11.0, itertools 0.13.0, itertools 0.14.0, lazy_static 1.5.1, lock_api 0.4.14, log 0.4.34, markup5ever 0.12.1, markup5ever_rcdom 0.3.0, metal 0.33.0, mime 0.3.17, num-bigint 0.4.8, num-complex 0.4.6, num-derive 0.4.2, num-integer 0.1.47, num-rational 0.4.2, num-traits 0.2.19, num_cpus 1.17.0, object 0.37.3, once_cell 1.21.4, parking 2.2.1, parking_lot 0.12.5, parking_lot_core 0.9.12, pathfinder_geometry 0.5.1, pathfinder_simd 0.5.6, percent-encoding 2.3.2, piper 0.2.5, png 0.17.16, png 0.18.1, polling 3.11.0, pollster 0.4.0, profiling 1.0.18, profiling-procmacros 1.0.18, rayon 1.12.0, rayon-core 1.13.0, regex 1.13.1, regex-automata 0.4.18, regex-syntax 0.8.11, roxmltree 0.20.0, roxmltree 0.21.1, rustc-demangle 0.1.28, rustix 1.1.5, scopeguard 1.2.0, shellexpand 3.1.2, signal-hook-registry 1.4.8, similar 2.7.0, simplecss 0.2.2, smallvec 1.16.3, smol 2.0.2, smol_str 0.3.6, stable_deref_trait 1.2.1, string_cache 0.8.9, svgtypes 0.15.3, svgtypes 0.16.1, tendril 0.4.3, ttf-parser 0.25.1, unicase 2.10.0, unicode-bidi 0.3.18, unicode-bidi-mirroring 0.4.0, unicode-ccc 0.4.0, unicode-id 0.3.7, unicode-properties 0.1.4, unicode-segmentation 1.13.3, unicode-vo 0.1.0, unicode-width 0.2.2, url 2.5.8, uuid 1.28.0, waker-fn 1.2.0, wasm-bindgen 0.2.129, wasm-bindgen-macro 0.2.129, wasm-bindgen-macro-support 0.2.129, wasm-bindgen-shared 0.2.129, weezl 0.1.12, xml5ever 0.18.1, zed-font-kit 0.14.1-zed
+Used by: addr2line 0.25.1, aligned 0.4.3, arc-swap 1.9.3, arrayvec 0.7.8, as-slice 0.2.1, async-channel 2.5.0, async-executor 1.14.0, async-fs 2.2.0, async-io 2.6.0, async-lock 3.4.2, async-net 2.0.0, async-process 2.5.0, async-signal 0.2.14, async-task 4.7.1, atomic-waker 1.1.2, backtrace 0.3.76, base64 0.22.1, base64 0.23.1, bitflags 1.3.2, bitflags 2.13.2, bitstream-io 4.10.0, blocking 1.7.0, bstr 1.13.1, bumpalo 3.20.3, cfg-if 1.0.5, concurrent-queue 2.5.0, core-foundation 0.10.1, core-foundation-sys 0.8.7, core-graphics 0.24.0, core-graphics-types 0.2.0, core-text 21.0.0, core_detect 1.0.0, crossbeam-deque 0.8.8, crossbeam-epoch 0.9.21, crossbeam-utils 0.8.23, data-url 0.3.2, displaydoc 0.2.7, either 1.19.0, encoding_rs_io 0.1.8, equivalent 1.0.3, errno 0.3.14, euclid 0.22.14, event-listener 5.4.2, event-listener-strategy 0.5.4, fastrand 2.5.0, flate2 1.1.10, form_urlencoded 1.2.2, futf 0.1.5, futures-lite 2.6.1, gif 0.13.3, gif 0.14.2, gimli 0.32.3, glob 0.3.4, hash32 0.3.1, hashbrown 0.16.1, hashbrown 0.17.1, heapless 0.9.3, heck 0.5.0, html5ever 0.27.0, idna 1.1.0, idna_adapter 1.2.2, indexmap 2.14.2, itertools 0.11.0, itertools 0.13.0, itertools 0.14.0, lazy_static 1.5.1, lock_api 0.4.14, log 0.4.34, markup5ever 0.12.1, markup5ever_rcdom 0.3.0, metal 0.33.0, mime 0.3.17, num-bigint 0.4.8, num-complex 0.4.6, num-derive 0.4.2, num-integer 0.1.47, num-rational 0.4.2, num-traits 0.2.19, num_cpus 1.17.0, object 0.37.3, once_cell 1.21.4, parking 2.2.1, parking_lot 0.12.5, parking_lot_core 0.9.12, pathfinder_geometry 0.5.1, pathfinder_simd 0.5.6, percent-encoding 2.3.2, piper 0.2.5, png 0.17.16, png 0.18.1, polling 3.11.0, pollster 0.4.0, profiling 1.0.18, profiling-procmacros 1.0.18, rayon 1.12.0, rayon-core 1.13.0, regex 1.13.1, regex-automata 0.4.18, regex-syntax 0.8.11, roxmltree 0.20.0, roxmltree 0.21.1, rustc-demangle 0.1.28, rustix 1.1.5, scopeguard 1.2.0, shellexpand 3.1.2, signal-hook-registry 1.4.8, similar 2.7.0, simplecss 0.2.2, smallvec 1.16.3, smol 2.0.2, smol_str 0.3.6, stable_deref_trait 1.2.1, string_cache 0.8.9, svgtypes 0.15.3, svgtypes 0.16.1, tendril 0.4.3, ttf-parser 0.25.1, unicase 2.10.0, unicode-bidi 0.3.18, unicode-bidi-mirroring 0.4.0, unicode-ccc 0.4.0, unicode-id 0.3.7, unicode-properties 0.1.4, unicode-segmentation 1.13.3, unicode-vo 0.1.0, unicode-width 0.2.2, url 2.5.8, uuid 1.28.0, waker-fn 1.2.0, wasm-bindgen 0.2.129, wasm-bindgen-macro 0.2.129, wasm-bindgen-macro-support 0.2.129, wasm-bindgen-shared 0.2.129, weezl 0.1.12, xml5ever 0.18.1, zed-font-kit 0.14.1-zed
 
 <pre>
 Apache License
@@ -3355,38 +3351,6 @@ ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 </pre>
 
-### LICENSE-MIT
-
-Used by: cocoa 0.26.1, cocoa-foundation 0.2.1, core-foundation 0.10.1, core-foundation-sys 0.8.7, core-graphics 0.24.0, core-graphics-types 0.2.0, core-text 21.0.0, euclid 0.22.14, string_cache 0.8.9
-
-<pre>
-Copyright (c) 2012-2013 Mozilla Foundation
-
-Permission is hereby granted, free of charge, to any
-person obtaining a copy of this software and associated
-documentation files (the "Software"), to deal in the
-Software without restriction, including without
-limitation the rights to use, copy, modify, merge,
-publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software
-is furnished to do so, subject to the following
-conditions:
-
-The above copyright notice and this permission notice
-shall be included in all copies or substantial portions
-of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
-ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
-TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
-PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
-SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
-IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-DEALINGS IN THE SOFTWARE.
-</pre>
-
 ### LICENSE
 
 Used by: color_quant 1.1.0
@@ -3473,6 +3437,38 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+</pre>
+
+### LICENSE-MIT
+
+Used by: core-foundation 0.10.1, core-foundation-sys 0.8.7, core-graphics 0.24.0, core-graphics-types 0.2.0, core-text 21.0.0, euclid 0.22.14, string_cache 0.8.9
+
+<pre>
+Copyright (c) 2012-2013 Mozilla Foundation
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
 </pre>
 
 ### LICENSE-MIT
@@ -4857,7 +4853,7 @@ SOFTWARE.
 
 ### LICENSE
 
-Used by: foldhash 0.1.5, foldhash 0.2.0
+Used by: foldhash 0.2.0
 
 <pre>
 Copyright (c) 2024 Orson Peters
@@ -5631,7 +5627,7 @@ SOFTWARE.
 
 ### LICENSE-APACHE / longbridge__gpui-kit / main__LICENSE-APACHE / longbridge__gpui-kit / master__LICENSE-APACHE
 
-Used by: gpui-base 0.7.3, gpui-component 0.7.3, gpui-component-macros 0.7.3, gpui-kit 0.7.3
+Used by: gpui-base 0.8.1, gpui-component 0.8.1, gpui-component-macros 0.8.1, gpui-kit 0.8.1
 
 <pre>
 Copyright 2024 - 2026 Longbridge <https://longbridge.com>
@@ -5829,7 +5825,7 @@ END OF TERMS AND CONDITIONS
 
 ### LICENSE-LUCIDE
 
-Used by: gpui-kit-assets 0.7.3
+Used by: gpui-kit-assets 0.8.1
 
 <pre>
 ISC License
@@ -5879,7 +5875,7 @@ SOFTWARE.
 
 ### LICENSE-APACHE
 
-Used by: gpui-pre 0.3.9, gpui-pre-apple 0.3.9, gpui-pre-collections 0.3.9, gpui-pre-derive-refineable 0.3.9, gpui-pre-http-client 0.3.9, gpui-pre-macos 0.3.9, gpui-pre-macros 0.3.9, gpui-pre-platform 0.3.9, gpui-pre-refineable 0.3.9, gpui-pre-scheduler 0.3.9, gpui-pre-shared-string 0.3.9, gpui-pre-sum-tree 0.3.9, gpui-pre-util 0.3.9, gpui-pre-windows 0.3.9, gpui-pre-ztracing 0.3.9, gpui-pre-ztracing-macro 0.3.9
+Used by: gpui-pre 0.3.10, gpui-pre-apple 0.3.10, gpui-pre-collections 0.3.10, gpui-pre-derive-refineable 0.3.10, gpui-pre-http-client 0.3.10, gpui-pre-macos 0.3.10, gpui-pre-macros 0.3.10, gpui-pre-platform 0.3.10, gpui-pre-refineable 0.3.10, gpui-pre-scheduler 0.3.10, gpui-pre-shared-string 0.3.10, gpui-pre-sum-tree 0.3.10, gpui-pre-util 0.3.10, gpui-pre-windows 0.3.10, gpui-pre-ztracing 0.3.10, gpui-pre-ztracing-macro 0.3.10
 
 <pre>
 Copyright 2022 - 2025 Zed Industries, Inc.
@@ -6156,7 +6152,7 @@ SOFTWARE.
 
 ### LICENSE-MIT
 
-Used by: hashbrown 0.15.5, hashbrown 0.16.1, hashbrown 0.17.1
+Used by: hashbrown 0.16.1, hashbrown 0.17.1
 
 <pre>
 Copyright (c) 2016 Amanieu d'Antras
@@ -6188,7 +6184,7 @@ DEALINGS IN THE SOFTWARE.
 
 ### LICENSE-APACHE
 
-Used by: hashlink 0.10.0, qoi 0.4.1
+Used by: hashlink 0.12.2, qoi 0.4.1
 
 <pre>
 Apache License
@@ -6396,7 +6392,7 @@ limitations under the License.
 
 ### LICENSE-MIT
 
-Used by: hashlink 0.10.0
+Used by: hashlink 0.12.2
 
 <pre>
 This work is derived in part from the `linked-hash-map` crate, Copyright (c)
@@ -7546,7 +7542,7 @@ Copyright notices are retained in src/* files where relevant.
 
 ### LICENSE
 
-Used by: libsqlite3-sys 0.35.0, rusqlite 0.37.0
+Used by: libsqlite3-sys 0.39.1, rusqlite 0.41.1
 
 <pre>
 Copyright (c) 2014 The rusqlite developers
@@ -12546,7 +12542,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 ### LICENSE
 
-Used by: sysinfo 0.31.4, sysinfo 0.39.6
+Used by: sysinfo 0.31.4, sysinfo 0.40.0
 
 <pre>
 The MIT License (MIT)
@@ -12574,7 +12570,7 @@ SOFTWARE.
 
 ### DioxusLabs__taffy / main__LICENSE / DioxusLabs__taffy / master__LICENSE
 
-Used by: taffy 0.13.0
+Used by: taffy 0.15.1
 
 <pre>
 MIT License
