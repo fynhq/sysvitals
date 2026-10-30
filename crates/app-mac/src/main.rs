@@ -22,18 +22,19 @@ mod macos {
 
     use chrono::Local;
     use objc2::rc::Retained;
-    use objc2::runtime::{AnyClass, AnyObject, Bool};
+    use objc2::runtime::{AnyClass, AnyObject, Bool, ProtocolObject};
     use objc2::{define_class, msg_send, sel, ClassType, MainThreadMarker, MainThreadOnly};
     use objc2_app_kit::{
         NSAppearanceCustomization, NSApplication, NSApplicationActivationPolicy,
-        NSAttributedStringNSStringDrawing, NSButtonCell, NSCellImagePosition, NSCellStyleMask,
-        NSEventMask, NSEventModifierFlags, NSEventType, NSFont, NSFontAttributeName,
-        NSFontWeightSemibold, NSImage, NSImageScaling, NSMenu, NSMenuItem, NSScreen, NSStatusBar,
-        NSStatusBarButton, NSStatusItem, NSVariableStatusItemLength, NSView,
+        NSApplicationDelegate, NSAttributedStringNSStringDrawing, NSButtonCell,
+        NSCellImagePosition, NSCellStyleMask, NSEventMask, NSEventModifierFlags, NSEventType,
+        NSFont, NSFontAttributeName, NSFontWeightSemibold, NSImage, NSImageScaling, NSMenu,
+        NSMenuItem, NSScreen, NSStatusBar, NSStatusBarButton, NSStatusItem,
+        NSVariableStatusItemLength, NSView,
     };
     use objc2_foundation::{
-        NSAttributedString, NSDictionary, NSObject, NSObjectProtocol, NSPoint, NSRect, NSRunLoop,
-        NSRunLoopCommonModes, NSSize, NSString, NSTimer,
+        NSAttributedString, NSDictionary, NSNotification, NSObject, NSObjectProtocol, NSPoint,
+        NSRect, NSRunLoop, NSRunLoopCommonModes, NSSize, NSString, NSTimer,
     };
 
     use sysvitals_core::config::{config_path, history_path};
@@ -1423,6 +1424,22 @@ mod macos {
         }
 
         unsafe impl NSObjectProtocol for ActionHandler {}
+
+        // SAFETY: `NSApplicationDelegate` adds no safety requirements of its
+        // own; the only requirement is main-thread confinement, which the
+        // `MainThreadOnly` thread kind above provides.
+        unsafe impl NSApplicationDelegate for ActionHandler {
+            /// macOS delivers a quit Apple Event for log out, restart and
+            /// shutdown; `terminate:` runs this hook before the process
+            /// exits. Closing the child panels here makes the system-driven
+            /// path behave like the menu's Quit item. `close_children` is
+            /// idempotent, so the menu path landing here twice is harmless.
+            #[unsafe(method(applicationWillTerminate:))]
+            fn application_will_terminate(&self, _notification: &NSNotification) {
+                close_children();
+                log_event("INFO", "application terminating; child panels closed");
+            }
+        }
     );
 
     /// Mount the pre-rendered template image and its reserved width. Called
@@ -1590,6 +1607,12 @@ mod macos {
             // AppKit does not paint its own highlight behind the glyphs.
             disable_button_highlight(&button);
         }
+
+        // The application delegate is a weak reference; the handler stored in
+        // `ACTION_HANDLER` below is what keeps it alive for the process
+        // lifetime. The delegate hook covers the quit Apple Event macOS sends
+        // at log out / shutdown, which otherwise bypasses the menu's cleanup.
+        app.setDelegate(Some(ProtocolObject::from_ref(&*handler)));
 
         // Keep the handler alive for the process lifetime, addressable so the
         // context menu can name it as the action target (see ACTION_HANDLER).

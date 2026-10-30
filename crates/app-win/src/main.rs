@@ -116,9 +116,9 @@ mod win {
         SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SPI_GETHIGHCONTRAST,
         SPI_GETNONCLIENTMETRICS, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE,
         SW_SHOWNOACTIVATE, SW_SHOWNORMAL, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, ULW_ALPHA,
-        WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP,
-        WM_SETTINGCHANGE, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-        WS_EX_TOPMOST, WS_POPUP,
+        WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ENDSESSION, WM_LBUTTONUP, WM_NULL,
+        WM_QUERYENDSESSION, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED,
+        WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
     };
 
     // ------------------------------------------------------------------ consts
@@ -2969,6 +2969,22 @@ mod win {
         wparam: WPARAM,
         lparam: LPARAM,
     ) -> LRESULT {
+        // Session end (shutdown, restart, log off). The indicator has no
+        // unsaved state, so it never delays the shell: allow the shutdown,
+        // then run the normal teardown when the session is really ending.
+        // A cancelled shutdown arrives as `WM_ENDSESSION` with a zero
+        // `wparam` and must leave the process running untouched.
+        if msg == WM_QUERYENDSESSION {
+            return LRESULT(1);
+        }
+        if msg == WM_ENDSESSION {
+            if wparam.0 != 0 {
+                log_event("INFO", "system session ending; closing panels and exiting");
+                close_children();
+                shutdown_and_quit();
+            }
+            return LRESULT(0);
+        }
         if TASKBAR_CREATED.get().is_some_and(|created| *created == msg) {
             log_event("INFO", "TaskbarCreated received; reconciling overlays");
             let _ = KillTimer(Some(hwnd), TIMER_REBIND);
