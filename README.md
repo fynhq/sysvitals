@@ -167,7 +167,7 @@ cargo build -p app-history
 
 ### Design notes
 
-Counter differencing, wrap-around protection, NIC selection, units and layout live in the pure-Rust `core` crate and are unit-tested. The status bar is drawn by thin platform-native code: a topmost layered window on Windows and an `NSStatusItem` on macOS. Settings and history run as separate GPUI processes, keeping the resident indicator minimal.
+Counter differencing, wrap-around protection, NIC aggregation, units and layout live in the pure-Rust `core` crate and are unit-tested. The status bar is drawn by thin platform-native code: a topmost layered window on Windows and an `NSStatusItem` on macOS. Settings and history run as separate GPUI processes, keeping the resident indicator minimal.
 
 ### License
 
@@ -336,7 +336,7 @@ cargo build -p app-history
 
 ### 设计说明
 
-计数器差分、回绕保护、网卡选择、单位与排版都放在纯 Rust 的 `core` crate 中并做单元测试。状态栏由薄的平台原生代码绘制：Windows 为 topmost 分层窗口，macOS 为 `NSStatusItem`。设置与走势图是独立 GPUI 进程，常驻指示器保持精简。
+计数器差分、回绕保护、网卡聚合、单位与排版都放在纯 Rust 的 `core` crate 中并做单元测试。状态栏由薄的平台原生代码绘制：Windows 为 topmost 分层窗口，macOS 为 `NSStatusItem`。设置与走势图是独立 GPUI 进程，常驻指示器保持精简。
 
 ### 许可
 

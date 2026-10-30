@@ -1,9 +1,10 @@
 //! Sampling layer.
 //!
-//! `sysinfo` is the ONLY place in the whole crate tree that touches a system
-//! API. Everything else consumes the pure [`Snapshot`] it produces, so each
-//! metric can later be swapped for a native call (`GetSystemTimes`,
-//! `GetIfTable2`, `host_statistics`, ...) without changing any caller.
+//! All OS-specific calls live in this module tree (sysinfo plus two
+//! Windows-only helpers: the PDH CPU counter and the NDIS interface table);
+//! everything else consumes the pure [`Snapshot`] it produces, so each metric
+//! can later be swapped for a native call (`GetSystemTimes`, `GetIfTable2`,
+//! `host_statistics`, ...) without changing any caller.
 //!
 //! Correctness rules baked in here, each unit-testable via a
 //! fake counter feed (see `net` tests — they do not need a real NIC):
@@ -16,14 +17,23 @@
 //!   slept or the process was stalled: the frame is dropped as stale (CPU
 //!   re-primes from raw, network reports NaN) so no sleep-spanning rate
 //!   reaches the display or the history ([`STALE_GAP_SECS`]).
-//! - Only selected physical NICs are aggregated; loopback / VPN / virtual
-//!   adapters are excluded by default, with a user override to pin a list.
-//! - CPU percent is exponentially smoothed with the `sample.cpu_smoothing`
-//!   history weight (0 disables) and clamped.
+//! - Only physical NICs are aggregated: virtual switches and VPN tunnels
+//!   mirror traffic the physical link already counts, so they are excluded
+//!   (Windows uses the NDIS `HardwareInterface` flag, elsewhere a name
+//!   heuristic); a user override can pin any interface list.
+//! - CPU percent follows Task Manager on Windows (`% Processor Utility`,
+//!   frequency-weighted) and the OS monitor on macOS (time-based), then is
+//!   exponentially smoothed with the `sample.cpu_smoothing` history weight
+//!   (0 disables) and clamped.
 
 mod cpu;
 mod mem;
 mod net;
+
+#[cfg(windows)]
+mod cpu_win;
+#[cfg(windows)]
+mod net_win;
 
 pub use cpu::CpuSampler;
 pub use net::{NetSampler, NetSelection};
@@ -44,6 +54,11 @@ pub struct Sampler {
     networks: Networks,
     net: NetSampler,
     cpu: CpuSampler,
+    /// Task Manager-equivalent CPU utilization on Windows
+    /// (`% Processor Utility`). `None` when the counter is unavailable, in
+    /// which case the time-based sysinfo value is used instead.
+    #[cfg(windows)]
+    cpu_utility: Option<cpu_win::ProcessorUtility>,
     /// Monotonic clock for real elapsed-time deltas, immune to wall-clock
     /// jumps (DST/NTP/sleep). The divisor for every differential is this, not
     /// the nominal interval, so a late tick still yields an accurate rate.
@@ -74,6 +89,8 @@ impl Sampler {
             networks,
             net: NetSampler::new(interfaces),
             cpu: CpuSampler::new(cpu_smoothing),
+            #[cfg(windows)]
+            cpu_utility: cpu_win::ProcessorUtility::new(),
             last_tick: None,
         }
     }
@@ -95,8 +112,16 @@ impl Sampler {
         let elapsed = self.last_tick.map(|prev| now.duration_since(prev));
         self.last_tick = Some(now);
 
-        // Whole-machine CPU percent (already time-normalized by sysinfo across
-        // refreshes). In sysinfo 0.39 this is `global_cpu_usage()`.
+        // Whole-machine CPU percent. On Windows this is Task Manager's
+        // `% Processor Utility` (frequency-weighted); sysinfo's time-based
+        // `global_cpu_usage()` only serves as the fallback and as the source
+        // on macOS, where Activity Monitor is time-based as well.
+        #[cfg(windows)]
+        let cpu_raw = match self.cpu_utility.as_mut().and_then(|c| c.read()) {
+            Some(value) => value,
+            None => self.system.global_cpu_usage() as f64,
+        };
+        #[cfg(not(windows))]
         let cpu_raw = self.system.global_cpu_usage() as f64;
         let cpu_pct = self.cpu.update(cpu_raw, elapsed);
         let mem_pct = mem::percent_used(self.system.used_memory(), self.system.total_memory());

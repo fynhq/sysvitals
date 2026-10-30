@@ -9,24 +9,26 @@
 //!    add/remove reconciliation and the divide-by-zero/first-frame rules. It is
 //!    unit-tested against synthetic counter feeds — no real NIC required.
 //! 2. [`NetSampler::poll`] adapts `sysinfo::Networks` (real cumulative
-//!    counters + operational state) into that `(name, rx, tx)` vector after
-//!    applying interface selection, then calls `compute_rates`.
+//!    counters) into that `(name, rx, tx)` vector after applying interface
+//!    selection, then calls `compute_rates`.
 //!
 //! We use `total_received`/`total_transmitted` (monotonic counters) rather than
 //! sysinfo's own per-refresh diff so the differential policy is entirely ours
 //! and is testable in isolation: sysinfo exposes cumulative counters, so
 //! the differential policy lives entirely here.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use sysinfo::{InterfaceOperationalState, Networks};
+use sysinfo::Networks;
 
 /// NIC selection policy.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum NetSelection {
-    /// Auto-aggregate physical adapters, excluding loopback/VPN/virtual by
-    /// name heuristic and requiring the interface be operationally Up.
+    /// Sum physical adapters only. Virtual switches and VPN tunnels mirror
+    /// traffic that the physical NIC already counts, so including them would
+    /// double-count it. On Windows the NDIS `HardwareInterface` flag decides;
+    /// macOS/Linux and the Windows fallback use a name heuristic.
     #[default]
     Auto,
     /// Aggregate exactly these interface names (user override in settings).
@@ -34,23 +36,60 @@ pub enum NetSelection {
 }
 
 impl NetSelection {
-    /// Whether an interface name is a candidate under this policy, ignoring
-    /// link state. Auto mode rejects loopback/VPN/virtual by name; explicit
-    /// mode requires an exact name match. (`collect_frame` additionally demands
-    /// the interface be operationally Up in Auto mode.)
+    /// Whether an interface name is a candidate under this policy. Auto mode
+    /// keeps physical adapters via [`is_physical_name`] (the sampler replaces
+    /// that with the native Windows hardware set when it is readable);
+    /// explicit mode requires an exact name match.
     pub fn matches(&self, name: &str) -> bool {
         match self {
-            NetSelection::Auto => is_physical_name(name),
+            NetSelection::Auto => auto_matches(name, None),
             NetSelection::Interfaces(list) => list.iter().any(|n| n == name),
         }
     }
 }
 
-/// Name prefixes that are never physical throughput adapters (containers,
-/// tunnels, virtual bridges). Matched case-insensitively. Loopback gets its
-/// own exact/`lo0`-style check below so a legacy physical name such as
-/// "Local Area Connection" is not mistaken for `lo`.
-const EXCLUDED_PREFIXES: &[&str] = &[
+/// Auto-mode decision: the NDIS hardware set is authoritative when available;
+/// otherwise the name heuristic decides.
+fn auto_matches(name: &str, hardware: Option<&HashSet<String>>) -> bool {
+    match hardware {
+        Some(names) => names.contains(name),
+        None => is_physical_name(name),
+    }
+}
+
+/// Whether an interface name is a loopback alias. Loopback traffic never
+/// leaves the machine. The `lo0` prefix covers the macOS slice variants.
+pub fn is_loopback(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.is_empty() || lower == "lo" || lower.starts_with("lo0") || lower.starts_with("loopback")
+}
+
+/// Name-based physical-adapter heuristic. Used on macOS/Linux, and on Windows
+/// until the NDIS hardware table is readable.
+///
+/// macOS/Linux physical NICs use well-known prefixes (`en*`, `eth*`, `wl*`,
+/// `wwan*`), so virtual interfaces (`utun*`, `awdl*`, `bridge*`, `docker*`, ...)
+/// never match. Windows adapters can be renamed to arbitrary localized names,
+/// so there the heuristic excludes known virtual prefixes instead.
+pub fn is_physical_name(name: &str) -> bool {
+    if is_loopback(name) {
+        return false;
+    }
+    let lower = name.to_ascii_lowercase();
+    #[cfg(windows)]
+    {
+        !VIRTUAL_PREFIXES.iter().any(|p| lower.starts_with(p))
+    }
+    #[cfg(not(windows))]
+    {
+        PHYSICAL_PREFIXES.iter().any(|p| lower.starts_with(p))
+    }
+}
+
+/// Virtual adapter name prefixes on Windows (fallback only — the NDIS
+/// `HardwareInterface` flag is the primary source of truth).
+#[cfg(windows)]
+const VIRTUAL_PREFIXES: &[&str] = &[
     "veth",
     "docker",
     "br-",
@@ -69,24 +108,25 @@ const EXCLUDED_PREFIXES: &[&str] = &[
     "stf",
     "isatap",
     "teredo",
-    "vethernet", // Windows Hyper-V virtual
+    "vethernet", // Hyper-V virtual
     "hapas",     // Wi-Fi Direct
     "wsl",
     "vpn",
+    "vmnet", // VMware
+    "vmware",
+    "vbox", // VirtualBox
+    "virtual",
+    "tailscale",
+    "zerotier",
+    "wintun",
+    "nordlynx",
+    "mullvad",
+    "proton",
 ];
 
-/// Decide whether an interface name represents a physical-ish throughput
-/// adapter in auto mode. Empty names and obviously virtual ones are rejected.
-pub fn is_physical_name(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    if lower.is_empty() {
-        return false;
-    }
-    if lower == "lo" || lower.starts_with("lo0") || lower.starts_with("loopback") {
-        return false;
-    }
-    !EXCLUDED_PREFIXES.iter().any(|p| lower.starts_with(p))
-}
+/// Physical adapter name prefixes on macOS/Linux.
+#[cfg(not(windows))]
+const PHYSICAL_PREFIXES: &[&str] = &["en", "eth", "wl", "wwan", "usb"];
 
 /// One interface's cumulative counters in a frame: `(name, rx_total, tx_total)`.
 pub type Counters = (String, u64, u64);
@@ -150,10 +190,10 @@ pub fn compute_rates(
         return (f64::NAN, f64::NAN);
     }
     if !valid_any {
-        // All selected interfaces just went down (auto mode drops links that
-        // are not Up): with a previous baseline this is a disconnect, which
-        // must read as 0 rather than a stale value or a placeholder. A first
-        // frame with no baseline, or a frame containing only new/wrapped
+        // No selected interface had a prior counter. With a previous baseline
+        // this means every adapter disappeared (unplug / VPN off) and must
+        // read as 0 rather than a stale value or a placeholder. A first frame
+        // with no baseline, or a frame containing only new/wrapped
         // interfaces, still has no measurable rate.
         if frame.is_empty() && had_baseline {
             return (0.0, 0.0);
@@ -170,6 +210,11 @@ pub fn compute_rates(
 pub struct NetSampler {
     selection: NetSelection,
     baseline: HashMap<String, (u64, u64)>,
+    /// Alias set of NDIS hardware interfaces (Windows only). Refreshed every
+    /// poll so plug/unplug is picked up; `None` until the first successful
+    /// table read.
+    #[cfg(windows)]
+    hardware: crate::sampler::net_win::HardwareInterfaces,
 }
 
 impl NetSampler {
@@ -177,6 +222,8 @@ impl NetSampler {
         NetSampler {
             selection,
             baseline: HashMap::new(),
+            #[cfg(windows)]
+            hardware: crate::sampler::net_win::HardwareInterfaces::new(),
         }
     }
 
@@ -189,15 +236,28 @@ impl NetSampler {
             None => 0.0,
         };
 
-        let frame = collect_frame(networks, &self.selection);
+        #[cfg(windows)]
+        let hardware = {
+            self.hardware.refresh();
+            self.hardware.names()
+        };
+        #[cfg(not(windows))]
+        let hardware = None;
+
+        let frame = collect_frame(networks, &self.selection, hardware);
         compute_rates(&mut self.baseline, &frame, elapsed_secs)
     }
 }
 
 /// Extract a filtered counter frame from a `sysinfo::Networks` handle.
-/// In Auto mode an interface must be operationally Up and pass the name
-/// heuristic. Split out so a future native backend can reuse the same shape.
-fn collect_frame(networks: &Networks, selection: &NetSelection) -> CounterFrame {
+/// Auto mode keeps physical adapters only; `hardware` is the native Windows
+/// hardware set when readable. Split out so a future native backend can reuse
+/// the shape.
+fn collect_frame(
+    networks: &Networks,
+    selection: &NetSelection,
+    hardware: Option<&HashSet<String>>,
+) -> CounterFrame {
     networks
         .iter()
         .filter_map(|(name, data)| {
@@ -206,13 +266,11 @@ fn collect_frame(networks: &Networks, selection: &NetSelection) -> CounterFrame 
             // form is exact in practice and keeps selection matched against
             // the configured text.
             let name = name.to_string_lossy();
-            // Auto mode also requires the link to be up; an explicit user
-            // choice is honored even if momentarily reported otherwise.
-            let link_ok = match selection {
-                NetSelection::Auto => data.operational_state() == InterfaceOperationalState::Up,
-                NetSelection::Interfaces(_) => true,
+            let selected = match selection {
+                NetSelection::Auto => auto_matches(name.as_ref(), hardware),
+                NetSelection::Interfaces(list) => list.iter().any(|n| n == name.as_ref()),
             };
-            if link_ok && selection.matches(name.as_ref()) {
+            if selected {
                 Some((
                     name.into_owned(),
                     data.total_received(),
@@ -374,9 +432,10 @@ mod tests {
 
     #[test]
     fn link_down_after_baseline_reports_zero_not_nan() {
-        // Auto mode drops links that are no longer Up. With a previous
-        // baseline this is a disconnect and must read as 0 (the display's
-        // "cleared" state), not as the first-frame "--".
+        // A frame with no interfaces after a seeded baseline (all adapters
+        // vanished, e.g. unplugged) must read as 0, not as the first-frame
+        // "--". This state is now reached only when the platform stops
+        // enumerating an interface entirely.
         let mut base = HashMap::new();
         compute_rates(&mut base, &[("eth0".to_string(), 1000, 1000)], secs(1000));
         let (up, down) = compute_rates(&mut base, &[], secs(2000));
@@ -391,23 +450,35 @@ mod tests {
 
     #[test]
     fn physical_name_heuristic() {
+        // Physical adapters pass on every platform's heuristic.
         assert!(is_physical_name("eth0"));
-        assert!(is_physical_name("wlan0"));
         assert!(is_physical_name("en0"));
-        assert!(is_physical_name("Wi-Fi"));
-        // A legacy Windows physical adapter is not loopback.
-        assert!(is_physical_name("Local Area Connection"));
+        assert!(is_physical_name("wlan0"));
+        assert!(is_physical_name("wwan0"));
+        // Loopback and virtual adapters never count toward the link rate.
         assert!(!is_physical_name("lo"));
         assert!(!is_physical_name("lo0"));
-        assert!(!is_physical_name("Loopback"));
-        assert!(!is_physical_name("docker0"));
-        assert!(!is_physical_name("veth1234"));
-        assert!(!is_physical_name("br-abc"));
-        assert!(!is_physical_name("utun4"));
-        assert!(!is_physical_name("wg0"));
-        assert!(!is_physical_name("VPN"));
+        assert!(!is_physical_name("Loopback Pseudo-Interface 1"));
         assert!(!is_physical_name("vEthernet (WSL)"));
+        assert!(!is_physical_name("utun4"));
+        assert!(!is_physical_name("docker0"));
         assert!(!is_physical_name(""));
+    }
+
+    #[test]
+    fn hardware_set_is_authoritative_in_auto_mode() {
+        // The native Windows table decides even when the name would fool the
+        // heuristic (renamed physical NIC / vendor virtual adapter).
+        let mut names = HashSet::new();
+        names.insert("Corp NIC".to_string());
+        names.insert("eth0".to_string());
+        let hardware = Some(&names);
+        assert!(auto_matches("Corp NIC", hardware));
+        assert!(auto_matches("eth0", hardware));
+        assert!(!auto_matches("vEthernet (WSL)", hardware));
+        // Without the native set the heuristic decides.
+        assert!(auto_matches("eth0", None));
+        assert!(!auto_matches("docker0", None));
     }
 
     #[test]
@@ -415,11 +486,12 @@ mod tests {
         let sel = NetSelection::Interfaces(vec!["en0".to_string()]);
         assert!(sel.matches("en0"));
         assert!(!sel.matches("en1"));
-        // An explicit choice matches even a virtual-looking name (user intent).
+        // An explicit choice matches even a loopback-looking name (user intent).
         let sel2 = NetSelection::Interfaces(vec!["lo".to_string()]);
         assert!(sel2.matches("lo"));
-        // Auto mode rejects virtual names via the heuristic.
-        assert!(NetSelection::Auto.matches("eth0"));
-        assert!(!NetSelection::Auto.matches("lo"));
+        // An explicit list skips the loopback guard for unlisted names too.
+        let sel3 = NetSelection::Interfaces(vec!["vEthernet (WSL)".to_string()]);
+        assert!(sel3.matches("vEthernet (WSL)"));
+        assert!(!sel3.matches("WLAN"));
     }
 }
