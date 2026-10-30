@@ -1392,9 +1392,10 @@ impl Render for SettingsView {
                 )
             })
             // Version footer: pinned to the bottom of the scrollable column
-            // and built from `SV_BUILD_ID` (see the const below). The stamp
-            // doubles as a link to the project repository; only the text
-            // itself is interactive, so the surrounding footer stays inert.
+            // and built from the product name plus `SV_BUILD_ID` (see the
+            // const below). The whole stamp doubles as a single link to the
+            // project repository; only the text itself is interactive, so the
+            // surrounding footer stays inert.
             .child(
                 h_flex().mt_auto().pt_2().justify_center().child(
                     div()
@@ -1411,7 +1412,7 @@ impl Render for SettingsView {
                                 cx.open_url(REPO_URL);
                             },
                         ))
-                        .child(SV_BUILD_ID),
+                        .child(format!("SysVitals {SV_BUILD_ID}")),
                 ),
             );
 
