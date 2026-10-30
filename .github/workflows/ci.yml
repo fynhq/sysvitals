@@ -296,6 +296,19 @@ jobs:
           # `git rev-list --count HEAD` would always be 1 there.
           plutil -replace CFBundleShortVersionString -string "$short_version" "$app/Contents/Info.plist"
           plutil -replace CFBundleVersion -string "${{ github.run_number }}" "$app/Contents/Info.plist"
+          # Ad-hoc sign the bundle with a stable identifier. The build host has
+          # no distribution certificate and the project does not notarize, but
+          # an unsigned bundle makes macOS key the login item to the per-build
+          # linker-signed identifier, so every update adds another login item.
+          # Signing the nested executables first and then the bundle keeps the
+          # SMAppService identity stable without a Developer ID.
+          codesign --force --sign - "$app/Contents/MacOS/SysVitalsSettings"
+          codesign --force --sign - "$app/Contents/MacOS/SysVitalsHistory"
+          codesign --force --sign - --identifier io.github.fynhq.sysvitals "$app"
+          codesign --verify --deep --strict "$app"
+          sig_id=$(codesign -dv --verbose=4 "$app" 2>&1 | sed -n 's/^Identifier=//p')
+          test "$sig_id" = "io.github.fynhq.sysvitals" \
+            || { echo "unexpected signature identifier: $sig_id" >&2; exit 1; }
           if [ "$GITHUB_REF_TYPE" = "tag" ]; then
             dmg_name="SysVitals_macOS_${arch}_v${release_version}.dmg"
           else
@@ -340,6 +353,11 @@ jobs:
             "$mount_point/SysVitals.app/Contents/Info.plist")
           test -n "$plist_build" \
             || { echo "empty CFBundleVersion in $dmg_name" >&2; exit 1; }
+          codesign --verify --deep --strict "$mount_point/SysVitals.app"
+          mount_sig=$(codesign -dv --verbose=4 "$mount_point/SysVitals.app" 2>&1 \
+            | sed -n 's/^Identifier=//p')
+          test "$mount_sig" = "io.github.fynhq.sysvitals" \
+            || { echo "signature identifier changed in $dmg_name: $mount_sig" >&2; exit 1; }
           hdiutil detach "$mount_point" >/dev/null
           trap - EXIT
           echo "Packaged $dmg_name"

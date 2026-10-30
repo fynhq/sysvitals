@@ -46,7 +46,7 @@ Both Windows builds keep settings, history and logs in `%APPDATA%\SysVitals`.
 
 1. Download the dmg for your Mac from the [Releases page](https://github.com/fynhq/sysvitals/releases) and open it.
 2. Drag `SysVitals.app` to `/Applications` (or to `~/Applications` if you do not have administrator rights; create that folder if needed). Launch the app, not the binaries inside `Contents/MacOS`.
-3. The build is unsigned and not notarized. If macOS blocks it, remove the quarantine flag:
+3. The build is ad-hoc signed but has no Developer ID signature or notarization. If macOS blocks it, remove the quarantine flag:
 
    ```sh
    xattr -d -r com.apple.quarantine /Applications/SysVitals.app
@@ -215,7 +215,7 @@ Released under the MIT License. See [LICENSE](LICENSE).
 
 1. 从 [Releases 页面](https://github.com/fynhq/sysvitals/releases) 下载对应 Mac 的 dmg 并打开。
 2. 把 `SysVitals.app` 拖到 `/Applications`（没有管理员权限时拖到 `~/Applications`，没有该目录就新建一个），启动 `.app`（不要直接运行 `Contents/MacOS` 里的二进制）。
-3. 构建未签名/未公证。如被拦截，移除隔离标记：
+3. 构建只做了 ad-hoc 签名，未做 Developer ID 签名/公证。如被拦截，移除隔离标记：
 
    ```sh
    xattr -d -r com.apple.quarantine /Applications/SysVitals.app
