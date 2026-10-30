@@ -1958,7 +1958,9 @@ fn main() {
             window_bounds: Some(settings_window_bounds(
                 anchor.as_ref(),
                 monitor,
-                size(px(400.), px(680.)),
+                // 400x720: leave room for the launch-at-login switch added to
+                // the General card; 680px did not account for the extra row.
+                size(px(400.), px(720.)),
                 cx,
             )),
             // Select the indicator's display explicitly; see
