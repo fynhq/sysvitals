@@ -1,28 +1,28 @@
-# SysVitals
-
-[English](#english) | [中文](#中文)
+<a id="english"></a>
 
 <p align="center">
   <img src="logo/sysvitals_logo_1024.png" alt="SysVitals logo" width="160" />
 </p>
 
-## English
+# SysVitals
 
 A lightweight CPU / memory / network monitor for the Windows taskbar and macOS menu bar. It shows live percentages and transfer rates, follows system font, DPI and appearance, and opens a CPU / memory history chart when clicked. Built in Rust, it aims to look native and stay cheap to run 24/7.
 
-### Supported systems
+English | [中文](#chinese)
+
+## Supported systems
 
 - Windows 10 2004+ / 11 (x64 or arm64)
 - macOS 13+ (Apple Silicon or Intel)
 
-### Footprint
+## Footprint
 
 Measured with the release build running normally (all groups on, default 2 s sampling, no popup):
 
 - Windows 11 taskbar: **~9 MB** resident
 - macOS 27 (Apple Silicon) menu bar: **~18 MB** resident
 
-### Install
+## Install
 
 **Windows**
 
@@ -57,7 +57,7 @@ Both Windows builds keep settings, history and logs in `%APPDATA%\SysVitals`.
 
 Asset names and available formats can differ between releases; use the files listed on the release page.
 
-### Upgrade
+## Upgrade
 
 SysVitals has no built-in auto-update; install a newer release manually.
 
@@ -89,7 +89,7 @@ Portable:
    If you installed the app in `~/Applications`, use that path instead. If you get a permission error, run the same command with `sudo`.
 5. Launch the new `SysVitals.app`.
 
-### Usage
+## Usage
 
 - Click the indicator to open the CPU / memory history chart; click again, click away, or press Esc to close.
 - On Windows, every visible taskbar gets its own indicator (enable "Show my taskbar on all displays" to show it on secondary screens); clicking an indicator on another screen moves the history chart there.
@@ -105,7 +105,7 @@ Portable:
 - Network rates are live-only; history and CSV cover CPU and memory.
 - All data stays local; no telemetry, cloud service, or account.
 
-### Verify the download
+## Verify the download
 
 Each release provides a single `SHA256SUMS` file covering all release files. Download it and the files you want to check into the same folder.
 
@@ -130,7 +130,7 @@ shasum -a 256 -c --ignore-missing SHA256SUMS
 
 Files you did not download are skipped. Checksums verify download integrity, not a signature.
 
-### Data and uninstall
+## Data and uninstall
 
 **Windows**
 
@@ -146,7 +146,7 @@ Files you did not download are skipped. Checksums verify download integrity, not
 
 History is kept for up to one month; logs older than 7 days are removed.
 
-### Build from source
+## Build from source
 
 Requires a stable Rust toolchain. Windows uses MSVC; macOS uses the Xcode command-line tools.
 
@@ -165,33 +165,37 @@ cargo build -p app-settings
 cargo build -p app-history
 ```
 
-### Design notes
+## Design notes
 
 Counter differencing, wrap-around protection, NIC aggregation, units and layout live in the pure-Rust `core` crate and are unit-tested. The status bar is drawn by thin platform-native code: a topmost layered window on Windows and an `NSStatusItem` on macOS. Settings and history run as separate GPUI processes, keeping the resident indicator minimal.
 
-### License
+## License
 
 Released under the MIT License. See [LICENSE](LICENSE).
 
 ---
 
-## 中文
+<a id="chinese"></a>
+
+# SysVitals
 
 常驻 Windows 任务栏 / macOS 菜单栏的轻量 CPU、内存、网速监控。实时显示占用百分比与上下行速度，字号、DPI 与亮暗跟随系统，点击可查看 CPU / 内存历史走势图；Rust 构建，目标是与系统原生一致且长期运行开销低。
 
-### 支持系统
+[English](#english) | 中文
+
+## 支持系统
 
 - Windows 10 2004+ / 11（x64 / arm64）
 - macOS 13+（Apple Silicon / Intel）
 
-### 资源占用
+## 资源占用
 
 真机实测，release 构建正常运行（指标全开、默认 2 秒采样、无弹窗）：
 
 - Windows 11 任务栏：常驻 **约 9 MB**
 - macOS 27（Apple Silicon）菜单栏：常驻 **约 18 MB**
 
-### 安装
+## 安装
 
 **Windows**
 
@@ -226,7 +230,7 @@ Released under the MIT License. See [LICENSE](LICENSE).
 
 不同版本提供的资产名称/形式可能不同；请以对应 Release 页面列出的文件为准。
 
-### 升级
+## 升级
 
 SysVitals 没有内置自动更新；需要手动安装新版。
 
@@ -258,7 +262,7 @@ SysVitals 没有内置自动更新；需要手动安装新版。
    如果装在 `~/Applications`，请把路径换成对应位置。如遇权限问题，可尝试在命令前加 `sudo` 执行。
 5. 启动新版 `SysVitals.app`。
 
-### 使用
+## 使用
 
 - 单击指示器打开 CPU / 内存走势图；再次单击、点击别处或按 Esc 关闭。
 - Windows 上每个可见任务栏都有独立指示器（在系统中开启“在所有显示器上显示任务栏”后副屏才会出现）；点击其他屏幕的指示器会把走势图移到该屏。
@@ -274,7 +278,7 @@ SysVitals 没有内置自动更新；需要手动安装新版。
 - 网速只实时显示；历史与 CSV 覆盖 CPU / 内存。
 - 所有数据都在本地；无遥测、云服务或账号。
 
-### 校验下载
+## 校验下载
 
 每次发布提供一个 `SHA256SUMS`，覆盖全部发布文件。把它与要校验的文件下载到同一目录。
 
@@ -299,7 +303,7 @@ shasum -a 256 -c --ignore-missing SHA256SUMS
 
 未下载的文件会被跳过。校验只保证下载完整，不代表签名。
 
-### 数据与卸载
+## 数据与卸载
 
 **Windows**
 
@@ -315,7 +319,7 @@ shasum -a 256 -c --ignore-missing SHA256SUMS
 
 历史最多保留一个月；日志超过 7 天自动清理。
 
-### 从源码构建
+## 从源码构建
 
 要求 stable Rust 工具链。Windows 用 MSVC，macOS 用 Xcode 命令行工具。
 
@@ -334,10 +338,10 @@ cargo build -p app-settings
 cargo build -p app-history
 ```
 
-### 设计说明
+## 设计说明
 
 计数器差分、回绕保护、网卡聚合、单位与排版都放在纯 Rust 的 `core` crate 中并做单元测试。状态栏由薄的平台原生代码绘制：Windows 为 topmost 分层窗口，macOS 为 `NSStatusItem`。设置与走势图是独立 GPUI 进程，常驻指示器保持精简。
 
-### 许可
+## 许可
 
 基于 MIT 许可发布，见 [LICENSE](LICENSE)。
