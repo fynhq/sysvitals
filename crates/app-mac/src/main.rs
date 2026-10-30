@@ -369,9 +369,16 @@ mod macos {
     fn set_launch_at_login(enabled: bool) -> Result<Option<isize>, String> {
         let cls = AnyClass::get(c"SMAppService")
             .ok_or_else(|| "SMAppService unavailable (requires macOS 13)".to_string())?;
-        let service: *mut AnyObject = unsafe { msg_send![cls, mainApp] };
+        // Swift exposes this class property as `mainApp`, but the Objective-C
+        // selector is `mainAppService`. Sending `mainApp` raises an
+        // unrecognized-selector exception, which unwinds into Rust and aborts
+        // the whole process.
+        if cls.class_method(sel!(mainAppService)).is_none() {
+            return Err("SMAppService.mainAppService unavailable".to_string());
+        }
+        let service: *mut AnyObject = unsafe { msg_send![cls, mainAppService] };
         if service.is_null() {
-            return Err("SMAppService.mainApp unavailable".to_string());
+            return Err("SMAppService.mainAppService unavailable".to_string());
         }
         let status: isize = unsafe { msg_send![service, status] };
         if enabled {
@@ -436,11 +443,10 @@ mod macos {
         }
     }
 
-    /// Tick driven by the repeating timer. `IN_RUN_LOOP` is what tells
-    /// `update_accessibility` that AppKit is fully launched: the startup tick
-    /// runs before `NSApplication::run`, while the status item's scene is still
-    /// being realized on macOS 27, and the accessibility/tooltip setters must
-    /// wait for a real run-loop pass.
+    /// Tick driven by the repeating timer. `IN_RUN_LOOP` marks the point where
+    /// ticks are dispatched from inside `NSApplication::run`; the startup tick
+    /// runs earlier, so accessibility/tooltip updates are applied from the
+    /// timer ticks instead of from that first tick.
     fn timer_tick() {
         IN_RUN_LOOP.set(true);
         tick();
@@ -1455,11 +1461,10 @@ mod macos {
 
     /// Record the accessibility text for the current frame and, once the app
     /// runs on its real run loop, push it to AppKit. The startup tick happens
-    /// before `NSApplication::run`; on macOS 27 the status item scene is still
-    /// being realized at that point, and the setters abort the process when
-    /// called from there (0.2.0 regression — v0.1.1 had no such call). The
-    /// value is stored unconditionally so a deferred update still lands on the
-    /// first timer tick even when the image itself is reused unchanged.
+    /// before `NSApplication::run`, so the setters are deferred until ticks
+    /// are dispatched from inside the run loop. The value is stored
+    /// unconditionally so a deferred update still lands on the first timer
+    /// tick even when the image itself is reused unchanged.
     fn update_accessibility(text: String) {
         if text.is_empty() {
             return;
