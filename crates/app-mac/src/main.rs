@@ -53,6 +53,13 @@ mod macos {
     /// reduces it further only if the two line boxes still exceed the bar.
     const DUAL_ROW_FONT_FACTOR: f64 = 0.8;
 
+    /// Tightest inter-line step used by the height fit, as a fraction of the
+    /// font size. The two rows are short labels; at 0.95x the previous row's
+    /// descenders still clear the next row's capitals. This lets the 0.75x
+    /// fallback use the ~9.5pt available in a 22pt bar instead of leaving the
+    /// block two points taller than the canvas.
+    const DUAL_ROW_MIN_STEP_FACTOR: f64 = 0.95;
+
     /// Conservative upper bound for one rate cell. `format_rate` keeps the
     /// numeric field at most four characters per unit tier (including the
     /// 1024 rounding), and "M" is the widest tier letter, so measuring this
@@ -824,16 +831,16 @@ mod macos {
             // attributed line box includes leading, so first try tightening
             // the inter-line step (two short rows of labels can sit closer
             // without touching); only if even the minimum step does not fit
-            // do we shrink the font and re-measure. This is what lets the
-            // requested 0.8x size survive on a standard bar instead of being
-            // silently pulled back to the old 0.75x by the height guard.
+            // do we shrink the font and re-measure. On a tall enough bar this
+            // preserves the requested 0.8x; on a 22pt bar the loop falls back
+            // to the 0.75x floor, and the tightened step keeps that fallback
+            // inside the canvas instead of clipping its bottom.
             let mut attempts = 0;
             while block_h > img_h && attempts < 3 {
-                // The two rows are short labels without descenders in the
-                // default configuration, so a step equal to the font size is
-                // still readable; this keeps the requested 0.8x size instead
-                // of letting the old height guard pull it back to 0.75x.
-                let min_step = font.pointSize().max(1.0);
+                // The step may dip slightly below one font size: the rows are
+                // short labels, and at DUAL_ROW_MIN_STEP_FACTOR the previous
+                // row's descenders still clear the next row's capitals.
+                let min_step = (font.pointSize() * DUAL_ROW_MIN_STEP_FACTOR).max(1.0);
                 let candidate = ((img_h - 0.5).max(1.0) - line_h) / (n - 1.0).max(1.0);
                 if candidate >= min_step {
                     line_step = candidate.min(line_h);
