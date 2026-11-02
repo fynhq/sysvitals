@@ -33,7 +33,9 @@ fn os_build() -> Option<u32> {
             dwOSVersionInfoSize: std::mem::size_of::<OSVERSIONINFOW>() as u32,
             ..Default::default()
         };
-        RtlGetVersion(&mut info).ok().map(|()| info.dwBuildNumber)
+        // `NTSTATUS::ok()` yields a `Result`, not an `Option`, so build the
+        // `Option` from `is_ok` directly.
+        RtlGetVersion(&mut info).is_ok().then(|| info.dwBuildNumber)
     }
 }
 
