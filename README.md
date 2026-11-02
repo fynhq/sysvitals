@@ -65,9 +65,10 @@ SysVitals has no built-in auto-update; install a newer release manually.
 
 Installer:
 
-1. Quit SysVitals.
-2. Download the new `_setup.exe` and run it; it upgrades the existing per-user installation.
-3. Settings, history and logs in `%APPDATA%\SysVitals` are kept.
+1. Download the new `_setup.exe` and run it; it upgrades the existing per-user installation.
+2. If SysVitals is running, Setup offers to close it and restarts it after the upgrade; silent installs close and restart it automatically.
+3. Downgrades are blocked: if the installed version is newer than the setup, Setup exits with an error.
+4. Settings, history and logs in `%APPDATA%\SysVitals` are kept.
 
 Portable:
 
@@ -238,9 +239,10 @@ SysVitals 没有内置自动更新；需要手动安装新版。
 
 安装版：
 
-1. 退出 SysVitals。
-2. 下载新的 `_setup.exe` 并运行，会原地升级当前用户的安装。
-3. `%APPDATA%\SysVitals` 中的设置、历史与日志保留。
+1. 下载新的 `_setup.exe` 并运行，会原地升级当前用户的安装。
+2. 如果 SysVitals 正在运行，安装器会提示关闭它，并在升级完成后重新启动；静默安装会自动关闭并重启。
+3. 不支持降级：如果已安装版本高于安装包，安装器会提示并退出。
+4. `%APPDATA%\SysVitals` 中的设置、历史与日志保留。
 
 便携版：
 
