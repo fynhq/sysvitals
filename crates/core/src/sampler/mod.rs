@@ -21,8 +21,10 @@
 //!   mirror traffic the physical link already counts, so they are excluded
 //!   (Windows uses the NDIS `HardwareInterface` flag, elsewhere a name
 //!   heuristic); a user override can pin any interface list.
-//! - CPU percent follows Task Manager on Windows (`% Processor Utility`,
-//!   frequency-weighted) and the OS monitor on macOS (time-based), then is
+//! - CPU percent follows Task Manager on Windows (the PDH counter is chosen
+//!   per OS build: frequency-weighted `% Processor Utility` below Windows 11
+//!   24H2, time-based `% Processor Time` from 24H2 on, where Task Manager
+//!   switched formulas) and the OS monitor on macOS (time-based), then is
 //!   exponentially smoothed with the `sample.cpu_smoothing` history weight
 //!   (0 disables) and clamped.
 
@@ -54,11 +56,11 @@ pub struct Sampler {
     networks: Networks,
     net: NetSampler,
     cpu: CpuSampler,
-    /// Task Manager-equivalent CPU utilization on Windows
-    /// (`% Processor Utility`). `None` when the counter is unavailable, in
-    /// which case the time-based sysinfo value is used instead.
+    /// Task Manager-equivalent CPU percent on Windows. The concrete PDH
+    /// counter follows the OS build (see `cpu_win`); `None` when PDH is
+    /// unavailable, in which case the time-based sysinfo value is used.
     #[cfg(windows)]
-    cpu_utility: Option<cpu_win::ProcessorUtility>,
+    cpu_counter: Option<cpu_win::CpuCounter>,
     /// Monotonic clock for real elapsed-time deltas, immune to wall-clock
     /// jumps (DST/NTP/sleep). The divisor for every differential is this, not
     /// the nominal interval, so a late tick still yields an accurate rate.
@@ -90,7 +92,7 @@ impl Sampler {
             net: NetSampler::new(interfaces),
             cpu: CpuSampler::new(cpu_smoothing),
             #[cfg(windows)]
-            cpu_utility: cpu_win::ProcessorUtility::new(),
+            cpu_counter: cpu_win::CpuCounter::new(),
             last_tick: None,
         }
     }
@@ -112,12 +114,13 @@ impl Sampler {
         let elapsed = self.last_tick.map(|prev| now.duration_since(prev));
         self.last_tick = Some(now);
 
-        // Whole-machine CPU percent. On Windows this is Task Manager's
-        // `% Processor Utility` (frequency-weighted); sysinfo's time-based
-        // `global_cpu_usage()` only serves as the fallback and as the source
-        // on macOS, where Activity Monitor is time-based as well.
+        // Whole-machine CPU percent. On Windows the PDH counter follows
+        // Task Manager's formula for the running OS build (frequency-weighted
+        // utility below Windows 11 24H2, time-based from 24H2 on); sysinfo's
+        // time-based `global_cpu_usage()` is the fallback and the source on
+        // macOS, where Activity Monitor is time-based as well.
         #[cfg(windows)]
-        let cpu_raw = match self.cpu_utility.as_mut().and_then(|c| c.read()) {
+        let cpu_raw = match self.cpu_counter.as_mut().and_then(|c| c.read()) {
             Some(value) => value,
             None => self.system.global_cpu_usage() as f64,
         };

@@ -1,47 +1,69 @@
-//! Windows CPU utilization with Task Manager's semantics.
+//! Windows CPU utilization with Task Manager's semantics for the running OS.
 //!
-//! Task Manager's Processes and Performance tabs report
-//! `\Processor Information(_Total)\% Processor Utility`, which weights busy
-//! time by the CPU's current frequency. `sysinfo` reports the older
-//! `\Processor(*)\% Idle Time` based "% Processor Time", which does not track
-//! Task Manager on CPUs that boost above their nominal clock (the two can
-//! differ by ~1.8x under identical load). Reading the utility counter directly
-//! is what makes the indicator agree with Task Manager; callers fall back to
-//! sysinfo when PDH is unavailable.
+//! Task Manager's whole-machine percentage changed formula with Windows 11
+//! 24H2 (KB5058411, May 2025): from that build on it reports time-based
+//! `\Processor Information(_Total)\% Processor Time`, while earlier builds
+//! report `\Processor Information(_Total)\% Processor Utility`, which weights
+//! busy time by the CPU's current frequency. The two differ by the boost
+//! ratio (measured ~1.8-2.4x on one machine), so reading the counter that
+//! does not match the local Task Manager makes the indicator sit permanently
+//! above or below it. The counter is therefore chosen from the OS build
+//! number at startup; callers fall back to sysinfo when PDH is unavailable.
 //!
 //! The counter name is added through `PdhAddEnglishCounterW`, so the lookup is
 //! independent of the OS display language.
 
 use windows::core::{w, PCWSTR};
+use windows::Wdk::System::SystemServices::RtlGetVersion;
 use windows::Win32::System::Performance::{
     PdhAddEnglishCounterW, PdhCloseQuery, PdhCollectQueryData, PdhGetFormattedCounterValue,
     PdhOpenQueryW, PDH_FMT_COUNTERVALUE, PDH_FMT_DOUBLE, PDH_HCOUNTER, PDH_HQUERY,
 };
+use windows::Win32::System::SystemInformation::OSVERSIONINFOW;
+
+use super::cpu::task_manager_is_time_based;
 
 /// PDH returns Win32 error codes; zero is `ERROR_SUCCESS`.
 const ERROR_SUCCESS: u32 = 0;
 
-pub(crate) struct ProcessorUtility {
+/// Build number of the running OS, or `None` if it cannot be determined.
+fn os_build() -> Option<u32> {
+    unsafe {
+        let mut info = OSVERSIONINFOW {
+            dwOSVersionInfoSize: std::mem::size_of::<OSVERSIONINFOW>() as u32,
+            ..Default::default()
+        };
+        RtlGetVersion(&mut info).ok().map(|()| info.dwBuildNumber)
+    }
+}
+
+/// Whole-machine CPU percent counter matching Task Manager on this OS build:
+/// frequency-weighted `% Processor Utility` below Windows 11 24H2, time-based
+/// `% Processor Time` from 24H2 on.
+pub(crate) struct CpuCounter {
     query: PDH_HQUERY,
     counter: PDH_HCOUNTER,
     /// Rate counters need two collections; the first read only seeds.
     primed: bool,
 }
 
-impl ProcessorUtility {
+impl CpuCounter {
     pub(crate) fn new() -> Option<Self> {
+        // An unknown build keeps the pre-24H2 utility counter (the legacy
+        // behavior); `RtlGetVersion` succeeds on every real system.
+        let time_based = os_build().is_some_and(task_manager_is_time_based);
+        let path = if time_based {
+            w!("\\Processor Information(_Total)\\% Processor Time")
+        } else {
+            w!("\\Processor Information(_Total)\\% Processor Utility")
+        };
         unsafe {
             let mut query = PDH_HQUERY::default();
             if PdhOpenQueryW(PCWSTR::null(), 0, &mut query) != ERROR_SUCCESS {
                 return None;
             }
             let mut counter = PDH_HCOUNTER::default();
-            let added = PdhAddEnglishCounterW(
-                query,
-                w!("\\Processor Information(_Total)\\% Processor Utility"),
-                0,
-                &mut counter,
-            );
+            let added = PdhAddEnglishCounterW(query, path, 0, &mut counter);
             if added != ERROR_SUCCESS {
                 let _ = PdhCloseQuery(query);
                 return None;
@@ -82,7 +104,7 @@ impl ProcessorUtility {
     }
 }
 
-impl Drop for ProcessorUtility {
+impl Drop for CpuCounter {
     fn drop(&mut self) {
         unsafe {
             let _ = PdhCloseQuery(self.query);

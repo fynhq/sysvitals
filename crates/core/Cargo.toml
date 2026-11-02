@@ -17,8 +17,8 @@ thiserror = { workspace = true }
 directories = { workspace = true }
 rusqlite = { workspace = true }
 
-# Task Manager-equivalent CPU utilization on Windows: the `% Processor
-# Utility` PDH counter lives outside sysinfo's public API. Target-gated so
-# Linux test builds and macOS packaging never pull it in.
+# Task Manager-equivalent CPU percent on Windows: the PDH counters
+# (`% Processor Utility` / `% Processor Time`) live outside sysinfo's public
+# API. Target-gated so Linux test builds and macOS packaging never pull it in.
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true }

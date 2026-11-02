@@ -20,6 +20,28 @@ use std::time::Duration;
 /// network reports NaN rather than a sleep-spanning rate.
 pub const STALE_GAP_SECS: f64 = 60.0;
 
+/// First Windows build whose Task Manager reports time-based CPU utilization.
+///
+/// Windows 11 24H2 (KB5058411, May 2025) switched Task Manager from the
+/// frequency-weighted `% Processor Utility` to time-based `% Processor Time`
+/// and moved the old weighted value to a separate "CPU Utility" display; the
+/// change was not backported to 23H2 or earlier. To stay aligned with Task
+/// Manager on every supported OS, the Windows sampler picks its PDH counter
+/// from the build number: time-based at or above this build, utility below.
+// Compiled on Windows (where the sampler consumes it) and in test builds on
+// every platform (so the boundary tests run in the Linux quality gate);
+// without this the lib target on non-Windows hosts sees no user and the
+// dead-code lint fires.
+#[cfg(any(windows, test))]
+pub(crate) const TM_TIME_BASED_BUILD: u32 = 26100;
+
+/// Whether Task Manager on a Windows machine with this build number shows
+/// time-based CPU utilization (as opposed to frequency-weighted utility).
+#[cfg(any(windows, test))]
+pub(crate) fn task_manager_is_time_based(build: u32) -> bool {
+    build >= TM_TIME_BASED_BUILD
+}
+
 /// Exponential moving average over CPU percent, with warm-up handling.
 #[derive(Debug, Clone)]
 pub struct CpuSampler {
@@ -155,5 +177,17 @@ mod tests {
         let big = Duration::from_secs_f64(STALE_GAP_SECS + 10.0);
         let v = s.update(100.0, Some(big));
         assert_eq!(v, 100.0, "stale gap must re-prime to raw, not blend");
+    }
+
+    #[test]
+    fn task_manager_formula_switches_at_24h2_build() {
+        // Windows 10 and Windows 11 23H2-: Task Manager shows the
+        // frequency-weighted utility.
+        assert!(!task_manager_is_time_based(19045)); // Win10 22H2
+        assert!(!task_manager_is_time_based(22631)); // Win11 23H2
+
+        // Windows 11 24H2 (KB5058411) and later: time-based.
+        assert!(task_manager_is_time_based(26100)); // Win11 24H2
+        assert!(task_manager_is_time_based(26200)); // Win11 25H2
     }
 }
