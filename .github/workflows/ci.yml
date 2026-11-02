@@ -2,8 +2,11 @@ name: CI
 
 on:
   push:
-    branches: [main]
-    tags: ["v*"]
+    # Any branch push and PR runs only the quality gate below. Packaging is
+    # tag-triggered: `build-*` tags build the four-arch dev packages for
+    # acceptance testing, `v*` tags run the full release pipeline.
+    branches: ["**"]
+    tags: ["v*", "build-*"]
   pull_request:
 
 env:
@@ -28,7 +31,7 @@ jobs:
         with:
           ref: ${{ github.ref }}
       - name: Verify tag matches workspace version
-        if: github.ref_type == 'tag'
+        if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
         shell: bash
         run: |
           version=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
@@ -86,8 +89,11 @@ jobs:
           fi
 
   # ---------------------------------------------------------------------------
-  # Build gate + distribution packaging.
+  # Build gate + distribution packaging (tag pushes only).
   #
+  # Ordinary branch pushes and PRs run only the quality gate above; these
+  # packaging jobs run on tag pushes — `build-*` tags produce the dev
+  # packages for acceptance testing, `v*` tags feed the release job below.
   # Both platform jobs run an architecture matrix: Windows x64/arm64 and
   # macOS arm64/x64. Each leg cross-compiles with an explicit Rust target, so
   # the runner's host architecture never decides the package architecture.
@@ -96,6 +102,7 @@ jobs:
   # ---------------------------------------------------------------------------
   build-windows:
     name: Build & package (Windows ${{ matrix.arch }})
+    if: github.ref_type == 'tag'
     runs-on: windows-latest
     strategy:
       fail-fast: false
@@ -106,7 +113,7 @@ jobs:
           - arch: arm64
             target: aarch64-pc-windows-msvc
     env:
-      SV_BUILD_ID_OVERRIDE: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+      SV_BUILD_ID_OVERRIDE: ${{ github.ref_type == 'tag' && startsWith(github.ref_name, 'v') && github.ref_name || '' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -137,7 +144,9 @@ jobs:
           $version = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
           $arch = "${{ matrix.arch }}"
           $target = "${{ matrix.target }}"
-          if ($env:GITHUB_REF_TYPE -eq "tag") {
+          # Only `v*` release tags use the formal asset names; branch pushes
+          # and `build-*` acceptance tags produce `_dev` packages.
+          if ($env:GITHUB_REF_NAME -like "v*") {
             $releaseVersion = $env:GITHUB_REF_NAME -replace "^v", ""
             $assetBase = "SysVitals_Windows_${arch}_v${releaseVersion}"
           } else {
@@ -260,6 +269,7 @@ jobs:
 
   build-macos:
     name: Build & package (macOS ${{ matrix.arch }})
+    if: github.ref_type == 'tag'
     runs-on: macos-latest
     strategy:
       fail-fast: false
@@ -271,7 +281,7 @@ jobs:
             target: x86_64-apple-darwin
     env:
       MACOSX_DEPLOYMENT_TARGET: "13.0"
-      SV_BUILD_ID_OVERRIDE: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+      SV_BUILD_ID_OVERRIDE: ${{ github.ref_type == 'tag' && startsWith(github.ref_name, 'v') && github.ref_name || '' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -301,7 +311,9 @@ jobs:
           version=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
           arch="${{ matrix.arch }}"
           target="${{ matrix.target }}"
-          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+          # Only `v*` release tags use the formal asset names; branch pushes
+          # and `build-*` acceptance tags produce `_dev` packages.
+          if [[ "$GITHUB_REF_NAME" == v* ]]; then
             release_version="${GITHUB_REF_NAME#v}"
             short_version="${release_version%%-*}"
           else
@@ -350,7 +362,7 @@ jobs:
           # Reject local paths or private-document names before the bundle is
           # packed into the distributable dmg.
           python3 .github/scripts/check_public_surface.py --assets "$app"
-          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+          if [[ "$GITHUB_REF_NAME" == v* ]]; then
             dmg_name="SysVitals_macOS_${arch}_v${release_version}.dmg"
           else
             dmg_name="SysVitals_macOS_${arch}_v${release_version}_${commit}_dev.dmg"
@@ -410,7 +422,8 @@ jobs:
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
-  # Release gate: tag pushes only. The four build legs have already produced
+  # Release gate: `v*` tag pushes only (`build-*` acceptance tags never
+  # touch the release job). The four build legs have already produced
   # the formal Windows setup/portable packages and macOS dmgs; this job
   # validates their contents, writes a single sorted SHA256SUMS manifest,
   # creates a draft Release, uploads and re-downloads the assets to verify
@@ -424,7 +437,7 @@ jobs:
   # ---------------------------------------------------------------------------
   release:
     name: Release
-    if: github.ref_type == 'tag'
+    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
     needs: [quality, build-windows, build-macos]
     runs-on: ubuntu-latest
     permissions:
