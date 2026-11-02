@@ -1,0 +1,24 @@
+[package]
+name = "sysvitals-core"
+description = "Platform-agnostic sampling, formatting, configuration and i18n for SysVitals."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+sysinfo = { workspace = true }
+serde = { workspace = true }
+toml = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+directories = { workspace = true }
+rusqlite = { workspace = true }
+
+# Task Manager-equivalent CPU utilization on Windows: the `% Processor
+# Utility` PDH counter lives outside sysinfo's public API. Target-gated so
+# Linux test builds and macOS packaging never pull it in.
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true }

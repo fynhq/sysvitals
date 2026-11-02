@@ -1,0 +1,27 @@
+[package]
+name = "app-win"
+description = "Windows display layer: topmost taskbar overlay indicator (Win32 layered window + GDI text)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# Windows-only. Build explicitly with `cargo build -p app-win` on a Windows
+# MSVC host (or via CI). The `windows` dependency is target-gated so the
+# workspace still resolves on Linux/macOS.
+
+[dependencies]
+sysvitals-core = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true }
+
+[target.'cfg(windows)'.build-dependencies]
+winres = "=0.1.12"
+
+[[bin]]
+# Mixed-case on purpose: the shipped executable is `SysVitals.exe`.
+name = "SysVitals"
+path = "src/main.rs"

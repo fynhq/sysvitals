@@ -1,0 +1,569 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Quality gate: the only job that lints and tests.
+  #
+  # The shared sampling/formatting/config layer is platform-independent, so it
+  # is checked on Linux, the cheapest runner. `cargo fmt` at a workspace root
+  # covers every member, so all crates are style-checked here even though the
+  # platform crates are not buildable on Linux; `cargo clippy` and `cargo test`
+  # act on the workspace's default members (the cross-platform crates), which
+  # is what they already did on every runner before this split.
+  # ---------------------------------------------------------------------------
+  quality:
+    name: Quality (fmt / clippy / test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+      - name: Verify tag matches workspace version
+        if: github.ref_type == 'tag'
+        shell: bash
+        run: |
+          version=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "tag $GITHUB_REF_NAME does not match workspace version v$version" >&2
+            exit 1
+          fi
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Verify third-party notices are current
+        run: python3 .github/scripts/check_third_party_notices.py
+      - name: Format check (all workspace members)
+        run: cargo fmt --check
+      - name: Clippy (default members)
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Tests (default members)
+        run: cargo test --locked
+
+  # ---------------------------------------------------------------------------
+  # Public-surface guard: reject private-document references, local environment
+  # narration, verification trailers, and local paths in new commit messages
+  # and tracked files. It scans only the new range, so historical leaks do not
+  # make every push fail.
+  # ---------------------------------------------------------------------------
+  public-surface:
+    name: Public surface
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+      - name: Check public surface
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            before="${{ github.event.pull_request.base.sha }}"
+            after="${{ github.event.pull_request.head.sha }}"
+          else
+            before="${{ github.event.before }}"
+            after="${{ github.sha }}"
+          fi
+          if ! git cat-file -e "$before" 2>/dev/null; then
+            if git cat-file -e "$after^" 2>/dev/null; then
+              before="$after^"
+            else
+              before="$after"
+            fi
+          fi
+          python3 .github/scripts/check_public_surface.py --range "$before..$after" --tree
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            python3 .github/scripts/check_public_surface.py --tag "${{ github.ref_name }}"
+          fi
+
+  # ---------------------------------------------------------------------------
+  # Build gate + distribution packaging.
+  #
+  # Both platform jobs run an architecture matrix: Windows x64/arm64 and
+  # macOS arm64/x64. Each leg cross-compiles with an explicit Rust target, so
+  # the runner's host architecture never decides the package architecture.
+  # These jobs do not repeat the quality checks: the logic they depend on is
+  # already covered by the quality job.
+  # ---------------------------------------------------------------------------
+  build-windows:
+    name: Build & package (Windows ${{ matrix.arch }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            target: x86_64-pc-windows-msvc
+          - arch: arm64
+            target: aarch64-pc-windows-msvc
+    env:
+      SV_BUILD_ID_OVERRIDE: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+          fetch-tags: true
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Build Windows display layer
+        run: cargo build --locked --release --target ${{ matrix.target }} -p app-win
+      - name: Build GPUI settings window
+        run: cargo build --locked --release --target ${{ matrix.target }} -p app-settings
+      - name: Build GPUI history chart
+        run: cargo build --locked --release --target ${{ matrix.target }} -p app-history
+      # Two distribution shapes from the same staged files: the portable
+      # (no-install) zip and a per-user Inno Setup installer. Tag builds use
+      # the exact tag version; main builds keep the dev name with the
+      # workspace version, short commit hash and `_dev` suffix.
+      - name: Install or upgrade Inno Setup
+        shell: pwsh
+        run: choco upgrade innosetup --no-progress -y
+      - name: Package Windows distributions
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          $arch = "${{ matrix.arch }}"
+          $target = "${{ matrix.target }}"
+          if ($env:GITHUB_REF_TYPE -eq "tag") {
+            $releaseVersion = $env:GITHUB_REF_NAME -replace "^v", ""
+            $assetBase = "SysVitals_Windows_${arch}_v${releaseVersion}"
+          } else {
+            $commit = (git rev-parse --short HEAD)
+            $assetBase = "SysVitals_Windows_${arch}_v${version}_${commit}_dev"
+          }
+          $zip = "${assetBase}_portable.zip"
+          $setupBase = "${assetBase}_setup"
+          $stage = "SysVitals"
+          Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path $stage | Out-Null
+          $files = @(
+            "target/$target/release/SysVitals.exe",
+            "target/$target/release/SysVitalsSettings.exe",
+            "target/$target/release/SysVitalsHistory.exe",
+            "LICENSE",
+            "THIRD_PARTY_NOTICES.md"
+          )
+          foreach ($f in $files) {
+            if (!(Test-Path $f)) { throw "missing build output: $f" }
+            Copy-Item -Path $f -Destination $stage
+          }
+          Compress-Archive -Path $stage -DestinationPath $zip -Force
+          $repoRoot = (Get-Location).Path
+          $sourceDir = (Resolve-Path $stage).Path
+          $iscc = $null
+          $isccCommand = Get-Command iscc -ErrorAction SilentlyContinue
+          if ($isccCommand) { $iscc = $isccCommand.Source }
+          if (-not $iscc) {
+            $iscc = @(
+              (Join-Path ${env:ProgramFiles(x86)} "Inno Setup 7\ISCC.exe"),
+              (Join-Path $env:ProgramFiles "Inno Setup 7\ISCC.exe"),
+              (Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"),
+              (Join-Path $env:ProgramFiles "Inno Setup 6\ISCC.exe")
+            ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          }
+          if (-not $iscc) { throw "ISCC.exe not found" }
+          $numeric = ($version -replace '[^0-9.].*$', '')
+          $parts = @($numeric.Split('.') | Where-Object { $_ -ne '' })
+          while ($parts.Count -lt 4) { $parts += '0' }
+          $versionInfo = ($parts[0..3] -join '.')
+          # x64os keeps the x64 installer off Arm64 machines; the Arm64
+          # installer is a separate asset.
+          $archAllowed = if ($arch -eq "x64") { "x64os" } else { "arm64" }
+          & $iscc `
+            "/DAppVersion=$version" `
+            "/DVersionInfoVersion=$versionInfo" `
+            "/DArch=$arch" `
+            "/DArchAllowed=$archAllowed" `
+            "/DArchMode=$archAllowed" `
+            "/DSourceDir=$sourceDir" `
+            "/DOutputDir=$repoRoot" `
+            "/DOutputBaseFilename=$setupBase" `
+            "/DRepoRoot=$repoRoot" `
+            ".github/installer/SysVitals.iss"
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
+          if (!(Test-Path (Join-Path $repoRoot "$setupBase.exe"))) {
+            throw "missing installer output: $setupBase.exe"
+          }
+          Write-Host "Packaged $zip and $setupBase.exe"
+          python .github/scripts/check_public_surface.py --assets $stage --assets $zip --assets "$setupBase.exe"
+          if ($LASTEXITCODE -ne 0) { throw "public surface check failed" }
+      - name: Smoke-test Windows installer
+        if: matrix.arch == 'x64'
+        shell: pwsh
+        run: |
+          $installDir = Join-Path $env:LOCALAPPDATA "Programs\SysVitals"
+          if (Test-Path $installDir) { Remove-Item -Recurse -Force $installDir }
+          $setup = Get-ChildItem -Path . -Filter "SysVitals_Windows_x64_*_setup.exe" |
+            Select-Object -First 1
+          if (-not $setup) { throw "setup file not found" }
+          $install = Start-Process -FilePath $setup.FullName `
+            -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART" `
+            -Wait -PassThru
+          if ($install.ExitCode -ne 0) {
+            throw "installer failed with exit code $($install.ExitCode)"
+          }
+          $installed = @(
+            "SysVitals.exe",
+            "SysVitalsSettings.exe",
+            "SysVitalsHistory.exe",
+            "LICENSE",
+            "THIRD_PARTY_NOTICES.md"
+          )
+          foreach ($f in $installed) {
+            if (!(Test-Path (Join-Path $installDir $f))) {
+              throw "missing installed file: $f"
+            }
+          }
+          # Simulate the app's launch-at-login value; the uninstaller may remove
+          # it only when it points at this installation.
+          $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+          if (!(Test-Path $runKey)) { New-Item -Path $runKey -Force | Out-Null }
+          $runValue = '"' + (Join-Path $installDir "SysVitals.exe") + '"'
+          Set-ItemProperty -Path $runKey -Name "SysVitals" -Value $runValue
+          $uninstaller = Join-Path $installDir "unins000.exe"
+          if (!(Test-Path $uninstaller)) { throw "uninstaller not found" }
+          $uninstall = Start-Process -FilePath $uninstaller `
+            -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART" `
+            -Wait -PassThru
+          if ($uninstall.ExitCode -ne 0) {
+            throw "uninstaller failed with exit code $($uninstall.ExitCode)"
+          }
+          foreach ($f in $installed) {
+            if (Test-Path (Join-Path $installDir $f)) {
+              throw "uninstall left $f behind"
+            }
+          }
+          if (Get-ItemProperty -Path $runKey -Name "SysVitals" -ErrorAction SilentlyContinue) {
+            throw "uninstaller left the Run value behind"
+          }
+      - name: Upload Windows packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: SysVitals-windows-${{ matrix.arch }}
+          path: |
+            SysVitals_Windows_${{ matrix.arch }}_*.zip
+            SysVitals_Windows_${{ matrix.arch }}_*.exe
+          if-no-files-found: error
+
+  build-macos:
+    name: Build & package (macOS ${{ matrix.arch }})
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            target: aarch64-apple-darwin
+          - arch: x64
+            target: x86_64-apple-darwin
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "13.0"
+      SV_BUILD_ID_OVERRIDE: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+          fetch-tags: true
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Build macOS display layer
+        run: cargo build --locked --release --target ${{ matrix.target }} -p app-mac
+      - name: Build GPUI settings window
+        run: cargo build --locked --release --target ${{ matrix.target }} -p app-settings
+      - name: Build GPUI history chart
+        run: cargo build --locked --release --target ${{ matrix.target }} -p app-history
+      # One bundle, not three apps: the indicator is the declared
+      # CFBundleExecutable, and the settings/history binaries are sibling
+      # executables it launches from Contents/MacOS. The distribution is a
+      # drag-and-drop dmg containing the bundle and an /Applications symlink.
+      # Tag builds use the exact tag version; main builds keep the dev name.
+      # The bundle also carries LICENSE and the generated third-party notices
+      # under Contents/Resources.
+      - name: Package macOS app bundle and dmg
+        run: |
+          version=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          arch="${{ matrix.arch }}"
+          target="${{ matrix.target }}"
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            release_version="${GITHUB_REF_NAME#v}"
+            short_version="${release_version%%-*}"
+          else
+            commit=$(git rev-parse --short HEAD)
+            release_version="$version"
+            short_version="${version%%-*}"
+          fi
+          app="SysVitals.app"
+          bin="target/$target/release"
+          rm -rf "$app"
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          for f in sysvitals SysVitalsSettings SysVitalsHistory; do
+            if [ ! -f "$bin/$f" ]; then
+              echo "missing build output: $bin/$f" >&2
+              exit 1
+            fi
+          done
+          cp "$bin/sysvitals" "$app/Contents/MacOS/sysvitals"
+          cp "$bin/SysVitalsSettings" "$app/Contents/MacOS/SysVitalsSettings"
+          cp "$bin/SysVitalsHistory" "$app/Contents/MacOS/SysVitalsHistory"
+          cp crates/app-mac/assets/Info.plist "$app/Contents/Info.plist"
+          cp crates/app-mac/assets/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
+          cp LICENSE "$app/Contents/Resources/LICENSE"
+          cp THIRD_PARTY_NOTICES.md "$app/Contents/Resources/THIRD_PARTY_NOTICES.md"
+          # The plist is a template; substitute the numeric base version and a
+          # numeric build number so Finder/Get Info never shows a stale 0.0.0.
+          # Any version suffix stays in the dmg/tag/settings footer, while
+          # CFBundleShortVersionString stays a plain numeric version.
+          # `github.run_number` is monotonic even on the default shallow clone;
+          # `git rev-list --count HEAD` would always be 1 there.
+          plutil -replace CFBundleShortVersionString -string "$short_version" "$app/Contents/Info.plist"
+          plutil -replace CFBundleVersion -string "${{ github.run_number }}" "$app/Contents/Info.plist"
+          # Ad-hoc sign the bundle with a stable identifier. The build host has
+          # no distribution certificate and the project does not notarize, but
+          # an unsigned bundle makes macOS key the login item to the per-build
+          # linker-signed identifier, so every update adds another login item.
+          # Signing the nested executables first and then the bundle keeps the
+          # SMAppService identity stable without a Developer ID.
+          codesign --force --sign - "$app/Contents/MacOS/SysVitalsSettings"
+          codesign --force --sign - "$app/Contents/MacOS/SysVitalsHistory"
+          codesign --force --sign - --identifier io.github.fynhq.sysvitals "$app"
+          codesign --verify --deep --strict "$app"
+          sig_id=$(codesign -dv --verbose=4 "$app" 2>&1 | sed -n 's/^Identifier=//p')
+          test "$sig_id" = "io.github.fynhq.sysvitals" \
+            || { echo "unexpected signature identifier: $sig_id" >&2; exit 1; }
+          # Reject local paths or private-document names before the bundle is
+          # packed into the distributable dmg.
+          python3 .github/scripts/check_public_surface.py --assets "$app"
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            dmg_name="SysVitals_macOS_${arch}_v${release_version}.dmg"
+          else
+            dmg_name="SysVitals_macOS_${arch}_v${release_version}_${commit}_dev.dmg"
+          fi
+          dmg_root="dmg-root"
+          rm -rf "$dmg_root"
+          mkdir -p "$dmg_root"
+          cp -R "$app" "$dmg_root/"
+          ln -s /Applications "$dmg_root/Applications"
+          hdiutil create -volname "SysVitals" -srcfolder "$dmg_root" \
+            -ov -format UDZO -fs HFS+ "$dmg_name"
+          rm -rf "$dmg_root"
+          # Mount the image and verify the bundle and the drag target before
+          # the artifact is uploaded. The release job runs on Linux and cannot
+          # mount a dmg, so this is the content gate for macOS assets.
+          mount_point="$RUNNER_TEMP/SysVitalsDmg"
+          rm -rf "$mount_point"
+          mkdir -p "$mount_point"
+          hdiutil attach -nobrowse -readonly -mountpoint "$mount_point" "$dmg_name" >/dev/null
+          trap 'hdiutil detach "$mount_point" >/dev/null 2>&1 || true' EXIT
+          for f in \
+            "SysVitals.app/Contents/MacOS/sysvitals" \
+            "SysVitals.app/Contents/MacOS/SysVitalsSettings" \
+            "SysVitals.app/Contents/MacOS/SysVitalsHistory" \
+            "SysVitals.app/Contents/Info.plist" \
+            "SysVitals.app/Contents/Resources/AppIcon.icns" \
+            "SysVitals.app/Contents/Resources/LICENSE" \
+            "SysVitals.app/Contents/Resources/THIRD_PARTY_NOTICES.md"; do
+            test -f "$mount_point/$f" \
+              || { echo "missing in $dmg_name: $f" >&2; exit 1; }
+          done
+          test -L "$mount_point/Applications" \
+            || { echo "missing Applications link in $dmg_name" >&2; exit 1; }
+          test "$(readlink "$mount_point/Applications")" = "/Applications" \
+            || { echo "Applications link must target /Applications" >&2; exit 1; }
+          plist_version=$(plutil -extract CFBundleShortVersionString raw -o - \
+            "$mount_point/SysVitals.app/Contents/Info.plist")
+          test "$plist_version" = "$short_version" \
+            || { echo "plist version mismatch: $plist_version != $short_version" >&2; exit 1; }
+          plist_build=$(plutil -extract CFBundleVersion raw -o - \
+            "$mount_point/SysVitals.app/Contents/Info.plist")
+          test -n "$plist_build" \
+            || { echo "empty CFBundleVersion in $dmg_name" >&2; exit 1; }
+          codesign --verify --deep --strict "$mount_point/SysVitals.app"
+          mount_sig=$(codesign -dv --verbose=4 "$mount_point/SysVitals.app" 2>&1 \
+            | sed -n 's/^Identifier=//p')
+          test "$mount_sig" = "io.github.fynhq.sysvitals" \
+            || { echo "signature identifier changed in $dmg_name: $mount_sig" >&2; exit 1; }
+          hdiutil detach "$mount_point" >/dev/null
+          trap - EXIT
+          echo "Packaged $dmg_name"
+      - name: Upload macOS dmg
+        uses: actions/upload-artifact@v4
+        with:
+          name: SysVitals-macos-${{ matrix.arch }}
+          path: SysVitals_macOS_${{ matrix.arch }}_*.dmg
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Release gate: tag pushes only. The four build legs have already produced
+  # the formal Windows setup/portable packages and macOS dmgs; this job
+  # validates their contents, writes a single sorted SHA256SUMS manifest,
+  # creates a draft Release, uploads and re-downloads the assets to verify
+  # them, then publishes the Release.
+  #
+  # Versions containing a suffix are still marked --prerelease for
+  # compatibility, but the current release flow publishes final versions only;
+  # the 0.1.0 tag follows the path without --prerelease. A failed verification
+  # leaves the Release as a draft so a re-run can complete it without exposing
+  # partial assets.
+  # ---------------------------------------------------------------------------
+  release:
+    name: Release
+    if: github.ref_type == 'tag'
+    needs: [quality, build-windows, build-macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+          fetch-tags: true
+      - name: Read release metadata
+        id: meta
+        shell: bash
+        run: |
+          version=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "tag $GITHUB_REF_NAME does not match workspace version v$version" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          case "$version" in
+            *-*) echo "prerelease=true" >> "$GITHUB_OUTPUT" ;;
+            *)   echo "prerelease=false" >> "$GITHUB_OUTPUT" ;;
+          esac
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: SysVitals-*
+          path: release-assets
+          merge-multiple: true
+      - name: Validate release assets
+        shell: bash
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          cd release-assets
+
+          expected=(
+            "SysVitals_Windows_x64_v${VERSION}_setup.exe"
+            "SysVitals_Windows_x64_v${VERSION}_portable.zip"
+            "SysVitals_Windows_arm64_v${VERSION}_setup.exe"
+            "SysVitals_Windows_arm64_v${VERSION}_portable.zip"
+            "SysVitals_macOS_arm64_v${VERSION}.dmg"
+            "SysVitals_macOS_x64_v${VERSION}.dmg"
+          )
+          for f in "${expected[@]}"; do
+            test -f "$f" || { echo "missing asset: $f" >&2; exit 1; }
+          done
+          if find . -maxdepth 1 -type f -name '*_dev*' | grep -q .; then
+            echo "development assets must not be published" >&2
+            exit 1
+          fi
+
+          find . -maxdepth 1 -type f -name 'SysVitals_*' -printf '%f\n' | LC_ALL=C sort > /tmp/actual-assets
+          printf '%s\n' "${expected[@]}" | LC_ALL=C sort > /tmp/expected-assets
+          diff -u /tmp/expected-assets /tmp/actual-assets
+
+          windows_zip="SysVitals_Windows_x64_v${VERSION}_portable.zip"
+          for entry in \
+            "SysVitals/SysVitals.exe" \
+            "SysVitals/SysVitalsSettings.exe" \
+            "SysVitals/SysVitalsHistory.exe" \
+            "SysVitals/LICENSE" \
+            "SysVitals/THIRD_PARTY_NOTICES.md"; do
+            unzip -Z1 "$windows_zip" | tr '\\' '/' | grep -Fxq "$entry" \
+              || { echo "missing in $windows_zip: $entry" >&2; exit 1; }
+          done
+
+          # The Windows build job installs and uninstalls the x64 setup before
+          # uploading it; this job only checks presence. Each macOS dmg is
+          # mounted and checked in its build job (Linux cannot mount one here).
+          windows_setup="SysVitals_Windows_x64_v${VERSION}_setup.exe"
+          test -s "$windows_setup" \
+            || { echo "empty asset: $windows_setup" >&2; exit 1; }
+          : > SHA256SUMS
+          for asset in "${expected[@]}"; do
+            sha256sum "$asset" >> SHA256SUMS
+          done
+          LC_ALL=C sort -k 2,2 SHA256SUMS -o SHA256SUMS
+          echo "SHA256SUMS written for ${#expected[@]} assets"
+      - name: Create draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          PRERELEASE: ${{ steps.meta.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            is_draft=$(gh release view "$TAG" --json isDraft --jq .isDraft)
+            if [ "$is_draft" != "true" ]; then
+              echo "release $TAG is already published" >&2
+              exit 1
+            fi
+            gh release upload "$TAG" release-assets/* --clobber
+          else
+            args=( "$TAG" --title "sysvitals v$VERSION" --draft --verify-tag --notes-from-tag )
+            if [ "$PRERELEASE" = "true" ]; then
+              args+=(--prerelease)
+            fi
+            gh release create "${args[@]}" release-assets/*
+          fi
+      - name: Verify uploaded assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p verify
+          gh release download "$TAG" --dir verify
+          cd verify
+          test -f SHA256SUMS || { echo "missing asset: SHA256SUMS" >&2; exit 1; }
+          if compgen -G '*.sha256' > /dev/null; then
+            echo "per-archive .sha256 files must not be published" >&2
+            exit 1
+          fi
+          awk '{print $2}' SHA256SUMS | LC_ALL=C sort > /tmp/sums-assets
+          find . -maxdepth 1 -type f -name 'SysVitals_*' -printf '%f\n' | LC_ALL=C sort > /tmp/published-assets
+          diff -u /tmp/sums-assets /tmp/published-assets
+          sha256sum -c --strict SHA256SUMS
+          echo "uploaded assets verified"
+      - name: Publish release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          PRERELEASE: ${{ steps.meta.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          if [ "$PRERELEASE" = "true" ]; then
+            gh release edit "$TAG" --draft=false --prerelease
+          else
+            gh release edit "$TAG" --draft=false
+          fi
+          gh release view "$TAG" --json tagName,isDraft,isPrerelease
+      - name: Show release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release view "$TAG"

@@ -1,0 +1,9 @@
+# Normalize line endings: keep LF in the working tree so `rustfmt` output and
+# git diffs are stable across all supported platforms.
+* text=auto eol=lf
+
+# Binary assets (future icons/screenshots) stay untouched.
+*.png binary
+*.jpg binary
+*.ico binary
+*.icns binary
