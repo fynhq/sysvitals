@@ -55,6 +55,38 @@ jobs:
         run: cargo test --locked
 
   # ---------------------------------------------------------------------------
+  # Platform type-check gate: the quality job only builds the cross-platform
+  # default members (core) on Linux. These platform crates otherwise compile
+  # for the first time on a tag-triggered packaging run, so a type error could
+  # reach main and only surface when a dev/release package is requested.
+  # Tag pushes are skipped here because the packaging jobs already compile
+  # every platform crate with the release profile.
+  # ---------------------------------------------------------------------------
+  platform-check:
+    name: Platform check (${{ matrix.os }})
+    if: github.ref_type != 'tag'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            packages: "-p app-win"
+          - os: macos-latest
+            packages: "-p app-mac -p app-settings -p app-history"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: platform-check-${{ matrix.os }}
+      - name: Check platform crates
+        shell: bash
+        run: cargo check --locked ${{ matrix.packages }}
+
+  # ---------------------------------------------------------------------------
   # Public-surface guard: reject private-document references, local environment
   # narration, verification trailers, and local paths in new commit messages
   # and tracked files. It scans only the new range, so historical leaks do not
@@ -543,7 +575,7 @@ jobs:
   release:
     name: Release
     if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
-    needs: [quality, build-windows, build-macos]
+    needs: [quality, public-surface, build-windows, build-macos]
     runs-on: ubuntu-latest
     permissions:
       contents: write
