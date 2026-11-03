@@ -119,6 +119,12 @@ pub enum CsvScope {
 #[serde(default)]
 pub struct StartupConfig {
     pub auto_start: bool,
+    /// Whether the user actually chose the auto-start value. A config that
+    /// merely inherited the default (or was re-created after a corrupt file
+    /// was backed up) must not remove a login item the user enabled in an
+    /// earlier run. The settings window sets this only when the switch is
+    /// clicked.
+    pub auto_start_explicit: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -205,6 +211,19 @@ impl Default for WindowsConfig {
 pub struct SanitizeIssue {
     pub field: &'static str,
     pub message: String,
+}
+
+/// Where a loaded config came from. A missing file yields defaults, but that
+/// is not the same as the user explicitly choosing the default values: the
+/// platform layers use this distinction to avoid applying side effects such
+/// as removing a login item when the file is absent or has just been renamed
+/// away as corrupt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigSource {
+    /// Loaded and parsed from an existing file.
+    File,
+    /// No file existed; defaults were used.
+    Defaults,
 }
 
 impl Config {
@@ -303,6 +322,18 @@ impl Config {
         issues
     }
 
+    /// Replace the fields owned by the settings UI with `ui`, leaving every
+    /// other field (history, CPU smoothing, and any future non-UI fields)
+    /// untouched. Settings starts from the file it just read and overlays
+    /// only these fields, so a manual edit outside the UI is not reverted by
+    /// the next save.
+    pub fn overlay_ui_from(&mut self, ui: &Config) {
+        self.display = ui.display.clone();
+        self.sample.interval_ms = ui.sample.interval_ms;
+        self.startup = ui.startup.clone();
+        self.windows = ui.windows.clone();
+    }
+
     /// Serialize to TOML text.
     pub fn to_toml_string(&self) -> anyhow::Result<String> {
         toml::to_string_pretty(self).map_err(Into::into)
@@ -318,12 +349,25 @@ impl Config {
     /// Load from disk. A missing file yields defaults (not an error); other
     /// read/parse errors are returned so the caller can decide to back up.
     pub fn load(path: &PathBuf) -> anyhow::Result<(Config, Vec<SanitizeIssue>)> {
+        Self::load_with_source(path).map(|(config, issues, _)| (config, issues))
+    }
+
+    /// Load from disk and report whether a file was actually read. Callers
+    /// that apply side effects from the config (auto-start) must use the
+    /// source to distinguish "the user saved defaults" from "the file is
+    /// missing or was renamed away as corrupt".
+    pub fn load_with_source(
+        path: &PathBuf,
+    ) -> anyhow::Result<(Config, Vec<SanitizeIssue>, ConfigSource)> {
         match fs::read_to_string(path) {
-            Ok(text) => Self::from_toml_str(&text),
+            Ok(text) => {
+                let (config, issues) = Self::from_toml_str(&text)?;
+                Ok((config, issues, ConfigSource::File))
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 let mut cfg = Config::default();
                 let issues = cfg.sanitize();
-                Ok((cfg, issues))
+                Ok((cfg, issues, ConfigSource::Defaults))
             }
             Err(e) => Err(e.into()),
         }
@@ -352,6 +396,16 @@ impl Config {
             file.sync_all()?;
             drop(file);
             fs::rename(&tmp, path)?;
+            // The rename itself is only durable once its directory entry is
+            // synced. Windows does not allow opening a directory as a file;
+            // the file sync above plus MoveFileEx is the best available
+            // there.
+            #[cfg(unix)]
+            if let Some(parent) = path.parent() {
+                if let Ok(dir) = fs::File::open(parent) {
+                    let _ = dir.sync_all();
+                }
+            }
             Ok(())
         })();
         if write.is_err() {
@@ -453,6 +507,7 @@ mod tests {
         assert!(c.display.dual_row);
         assert_eq!(c.history.retention_days, 30);
         assert!(!c.startup.auto_start);
+        assert!(!c.startup.auto_start_explicit);
         assert_eq!(c.display.item_spacing, DEFAULT_ITEM_SPACING_PX);
         assert_eq!(c.windows.left_margin_px, DEFAULT_LEFT_MARGIN_PX);
     }
@@ -513,6 +568,7 @@ mod tests {
         c.display.language = Language::Zh;
         c.display.dual_row = true;
         c.startup.auto_start = true;
+        c.startup.auto_start_explicit = true;
         c.windows.anchor = Anchor::Left;
         c.history.csv_scope = CsvScope::Last7d;
         let text = c.to_toml_string().unwrap();
@@ -669,5 +725,44 @@ mod tests {
         let (c, issues) = Config::load(&path).unwrap();
         assert_eq!(c, Config::default());
         assert!(issues.is_empty());
+    }
+
+    #[test]
+    fn ui_overlay_preserves_non_ui_fields_from_disk() {
+        let mut disk = Config::default();
+        disk.history.retention_days = 7;
+        disk.history.csv_scope = CsvScope::Last7d;
+        disk.sample.cpu_smoothing = 0.6;
+        disk.display.prefix.cpu = "DISK".to_string();
+
+        let mut ui = Config::default();
+        ui.display.language = Language::Zh;
+        ui.display.prefix.cpu = "UI".to_string();
+        ui.startup.auto_start = true;
+        ui.sample.interval_ms = 3000;
+
+        disk.overlay_ui_from(&ui);
+        assert_eq!(disk.display.prefix.cpu, "UI");
+        assert_eq!(disk.display.language, Language::Zh);
+        assert_eq!(disk.sample.interval_ms, 3000);
+        assert!(disk.startup.auto_start);
+        // Non-UI fields survive.
+        assert_eq!(disk.history.retention_days, 7);
+        assert_eq!(disk.history.csv_scope, CsvScope::Last7d);
+        assert_eq!(disk.sample.cpu_smoothing, 0.6);
+    }
+
+    #[test]
+    fn load_source_distinguishes_a_missing_file_from_saved_defaults() {
+        let path = temp_config_path("source").with_file_name("no-such-file.toml");
+        let (_, _, missing) = Config::load_with_source(&path).unwrap();
+        assert_eq!(missing, ConfigSource::Defaults);
+
+        let mut cfg = Config::default();
+        cfg.startup.auto_start = true;
+        cfg.save(&path).unwrap();
+        let (loaded, _, source) = Config::load_with_source(&path).unwrap();
+        assert_eq!(source, ConfigSource::File);
+        assert!(loaded.startup.auto_start);
     }
 }
