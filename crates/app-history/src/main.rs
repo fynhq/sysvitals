@@ -12,7 +12,7 @@
 // terminal flashes up beside the history window every time it launches.
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::env;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -45,7 +45,7 @@ use gpui_kit::*;
 
 use sysvitals_core::config::{config_path, history_path, Config, CsvScope};
 use sysvitals_core::i18n::{t, Language};
-use sysvitals_core::store::{floor_to_grid, spread_label_indices, Bucket, Store};
+use sysvitals_core::store::{floor_to_grid, Bucket, Store};
 #[cfg(windows)]
 use sysvitals_panel::panel_font_family;
 use sysvitals_panel::{
@@ -302,19 +302,26 @@ impl TimeRange {
     }
 }
 
-/// A single timestamped sample pair for the merged chart: one fine bucket
-/// renders as one x position carrying both series values, which is why CPU
-/// and memory live in one struct instead of two point lists. `label` is the
-/// sparse x-axis tick text — only clean wall-clock points (per
-/// [`TimeRange::label_step_secs`]) carry a non-empty label, the rest stay
-/// empty so the curve stays detailed while the axis stays readable. `ts` is
-/// kept so the hover tooltip can show the full date and time for any point.
+/// One dense chart slot. The x axis is an index axis, so the renderer must
+/// emit one point per bucket in the visible window; otherwise missing
+/// intervals compress time. `has_data` is false for padded slots (app not
+/// running, sleep, history disabled); their values repeat the previous real
+/// point so the path stays finite, and the tooltip reports `--`.
 #[derive(Debug, Clone)]
 struct ChartPoint {
     ts: i64,
-    label: String,
     cpu: f64,
     mem: f64,
+    has_data: bool,
+}
+
+/// The exact query window shared by the chart, the axis labels and the
+/// `Visible` CSV export.
+#[derive(Debug, Clone, Copy)]
+struct VisibleQuery {
+    from: i64,
+    to: i64,
+    bucket: i64,
 }
 
 /// How often a visible history window reloads the stored samples. The
@@ -331,9 +338,9 @@ const ACTIVE_POLL_MS: u64 = 40;
 #[cfg(windows)]
 const IDLE_POLL_MS: u64 = 100;
 
-/// How many x-axis tick labels the panel draws, spread evenly across the fine
-/// data points (mirrored by [`spread_label_indices`] when deciding which
-/// points carry label text).
+/// How many x-axis tick labels the panel draws, spread evenly across the
+/// visible time window (not across the data points, so gaps do not move
+/// them).
 const X_TICK_COUNT: usize = 6;
 
 /// Axis label size. The chart library paints its tick labels at a fixed
@@ -499,6 +506,9 @@ struct HistoryView {
     hidden_start: bool,
     range: TimeRange,
     buckets: Vec<Bucket>,
+    /// Window the current `buckets` were queried for; `points()` pads it to
+    /// one slot per bucket so the category x axis stays time-linear.
+    query: Option<VisibleQuery>,
     /// One connection kept for the window's lifetime. Reopening SQLite every
     /// three seconds re-ran WAL/schema setup and contended with the
     /// indicator's writer for no benefit.
@@ -515,6 +525,9 @@ struct HistoryView {
     /// Last config mtime applied, in nanoseconds; the popup keeps language and
     /// CSV-scope settings live instead of freezing them at launch.
     config_mtime: u64,
+    /// Last OS window title applied, so a language hot-reload can update the
+    /// title (Mission Control / taskbar) without re-setting it every frame.
+    last_title: Option<String>,
     /// Guards blur-close: only close after the window has been active at
     /// least once, so a transient "inactive" signal at open time (a macOS
     /// nonactivating panel that has not become key yet) cannot close the
@@ -565,6 +578,7 @@ impl HistoryView {
             hidden_start,
             range: TimeRange::Hour1,
             buckets: Vec::new(),
+            query: None,
             store: None,
             data_error_logged: false,
             csv_scope,
@@ -572,6 +586,7 @@ impl HistoryView {
             copy_failed: false,
             copy_feedback_seq: 0,
             config_mtime: 0,
+            last_title: None,
             ever_active: false,
             _activation: None,
             _appearance: None,
@@ -789,6 +804,8 @@ impl HistoryView {
                 if this
                     .update(cx, |view: &mut HistoryView, cx| {
                         let config_changed = view.reload_config();
+                        // The window title follows `lang`; render applies it
+                        // when it changes, including this hot-reload path.
                         // 1 d / 1 mo scan the whole retention window; keep
                         // them static while open. The range button loads them
                         // on switch (and re-clicking the active range reloads).
@@ -812,15 +829,24 @@ impl HistoryView {
     }
 
     /// The exact query window the chart is showing: a start floored to the
-    /// range's label grid, the current time, the fine curve bucket width, and
-    /// the local-time offset used for both bucketing and label flooring.
+    /// range's label grid, the current time, and the fine curve bucket width.
     /// CSV export and the chart both use this so "copy what you see" is true
     /// at the window boundary too.
-    fn visible_query(&self, now: i64) -> (i64, i64, i64, i64) {
+    ///
+    /// The bucket grid uses the offset at the *window start*, not at "now":
+    /// across a DST transition the old sample side must keep the offset that
+    /// was active when the window opened. Labels are converted per timestamp
+    /// in `axis_labels`, so both sides of the transition read the correct
+    /// local time.
+    fn visible_query(&self, now: i64) -> VisibleQuery {
         let step = self.range.label_step_secs();
-        let offset = Local::now().offset().local_minus_utc() as i64;
-        let from = floor_to_grid(now - self.range.seconds(), step, offset);
-        (from, now, self.range.bucket_secs(), offset)
+        let start = now - self.range.seconds();
+        let offset = local_offset_at(start);
+        VisibleQuery {
+            from: floor_to_grid(start, step, offset),
+            to: now,
+            bucket: self.range.bucket_secs(),
+        }
     }
 
     /// Keep one SQLite connection for the window. Reopening every refresh
@@ -864,18 +890,16 @@ impl HistoryView {
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
-        let (from, to, bucket, offset) = self.visible_query(now);
+        let query = self.visible_query(now);
+        self.query = Some(query);
         // Clear on failure: otherwise a range switch would keep showing the
         // previous range's points under the new axis.
         let mut buckets = Vec::new();
         if self.ensure_store() {
-            // The curve draws at the fine CSV bucket width; axis labels
-            // floor each point's timestamp to the clean grid (see
-            // `points`). One query serves both — no coarse pass anymore.
-            let result = self
-                .store
-                .as_ref()
-                .map(|store| store.buckets_offset(from, to, bucket, offset));
+            // The curve draws at the fine CSV bucket width; axis labels are
+            // generated independently from the time window (see
+            // `axis_labels`). One query serves both — no coarse pass.
+            let result = self.store.as_ref().map(|store| query_buckets(store, query));
             match result {
                 Some(Ok(loaded)) => {
                     buckets = loaded;
@@ -894,58 +918,97 @@ impl HistoryView {
     }
 
     fn points(&self) -> Vec<ChartPoint> {
-        // One point per fine bucket: the curve keeps its full resolution.
-        // Only the indices the panel paints labels at (`spread_label_indices`,
-        // mirroring the library's selection rule) carry label text, floored to
-        // the range's clean grid (60/600/7200/432000 s) so every visible tick
-        // reads as a round time. A labeled point's pixel position may sit up
-        // to one fine bucket off that clean boundary — under 1% of the window
-        // — which is the cost of keeping the line detailed; the label text,
-        // not the geometry, carries the roundness.
-        //
-        // Day-crossing: the first labeled point, and any whose floored local
-        // day differs from the previous labeled point's, carries "MM-DD HH:MM"
-        // so a midnight crossing is visible; within one day the label is just
-        // HH:MM. The month view labels with MM-DD only. A freshly started
-        // indicator can floor two labeled points to the same wall-clock string
-        // — painting it twice reads as broken, so only the first keeps it.
-        let month_view = self.range == TimeRange::Month1;
-        let step = self.range.label_step_secs();
-        let offset = Local::now().offset().local_minus_utc() as i64;
-        let labeled: HashSet<usize> = spread_label_indices(self.buckets.len(), X_TICK_COUNT)
-            .into_iter()
+        // The chart library's x scale is an index scale (`ScalePoint`), so
+        // one point per bucket is required for a time-linear geometry. The
+        // query returns only buckets that contain samples; pad the missing
+        // slots here. Missing values repeat the previous real point so the
+        // path stays finite; `has_data` lets the tooltip say "--" instead of
+        // presenting a fabricated value.
+        let Some(query) = self.query else {
+            return Vec::new();
+        };
+        let Some(first) = self.buckets.first().copied() else {
+            return Vec::new();
+        };
+        let mut by_ts: HashMap<i64, Bucket> = self
+            .buckets
+            .iter()
+            .map(|bucket| (bucket.ts, *bucket))
             .collect();
-        let mut points = Vec::with_capacity(self.buckets.len());
-        let mut prev_day: Option<String> = None;
-        let mut last_shown: Option<String> = None;
-        for (i, b) in self.buckets.iter().enumerate() {
-            let mut label = String::new();
-            if labeled.contains(&i) {
-                let clean = floor_to_grid(b.ts, step, offset);
-                let day = day_of(clean);
-                let crosses = prev_day.as_ref().is_none_or(|p| *p != day);
-                prev_day = Some(day);
-                label = if month_view {
-                    fmt_date(clean)
-                } else if crosses {
-                    fmt_date_time(clean)
-                } else {
-                    fmt_time(clean)
-                };
-                if last_shown.as_deref() == Some(label.as_str()) {
-                    label = String::new();
-                } else {
-                    last_shown = Some(label.clone());
-                }
+        let bucket = query.bucket.max(1);
+        let mut last = first;
+        let mut points = Vec::new();
+        let mut ts = query.from;
+        while ts <= query.to {
+            if let Some(bucket) = by_ts.remove(&ts) {
+                last = bucket;
+                points.push(ChartPoint {
+                    ts,
+                    cpu: bucket.cpu,
+                    mem: bucket.mem,
+                    has_data: true,
+                });
+            } else {
+                points.push(ChartPoint {
+                    ts,
+                    cpu: last.cpu,
+                    mem: last.mem,
+                    has_data: false,
+                });
             }
-            points.push(ChartPoint {
-                ts: b.ts,
-                label,
-                cpu: b.cpu,
-                mem: b.mem,
-            });
+            ts = match ts.checked_add(bucket) {
+                Some(next) => next,
+                None => break,
+            };
         }
         points
+    }
+
+    /// Six axis labels spread over the **time window**, not the data index.
+    /// Each label floors its own timestamp to the range's clean grid using
+    /// the offset at that timestamp, so a window crossing a DST transition
+    /// still reads the correct local time on both sides.
+    fn axis_labels(&self) -> Vec<(f32, String)> {
+        let Some(query) = self.query else {
+            return Vec::new();
+        };
+        if self.buckets.is_empty() {
+            return Vec::new();
+        }
+        if query.to <= query.from {
+            return Vec::new();
+        }
+        let month_view = self.range == TimeRange::Month1;
+        let step = self.range.label_step_secs();
+        let span = (query.to - query.from) as f64;
+        let mut labels = Vec::new();
+        let mut prev_day: Option<String> = None;
+        let mut last_shown: Option<String> = None;
+        for k in 0..X_TICK_COUNT {
+            let frac = if X_TICK_COUNT <= 1 {
+                0.5
+            } else {
+                k as f32 / (X_TICK_COUNT - 1) as f32
+            };
+            let ts = query.from + (span * f64::from(frac)).round() as i64;
+            let clean = floor_to_grid(ts, step, local_offset_at(ts));
+            let day = day_of(clean);
+            let crosses = prev_day.as_ref().is_none_or(|previous| *previous != day);
+            prev_day = Some(day);
+            let text = if month_view {
+                fmt_date(clean)
+            } else if crosses {
+                fmt_date_time(clean)
+            } else {
+                fmt_time(clean)
+            };
+            if last_shown.as_deref() == Some(text.as_str()) {
+                continue;
+            }
+            last_shown = Some(text.clone());
+            labels.push((frac, text));
+        }
+        labels
     }
 
     fn copy_csv(&mut self, cx: &mut Context<Self>) {
@@ -972,17 +1035,20 @@ impl HistoryView {
             CsvScope::Last7d => (604_800, 600),
             CsvScope::Last30d => (2_592_000, 3600),
         };
-        let offset = Local::now().offset().local_minus_utc() as i64;
-        let from = floor_to_grid(now - seconds, bucket_secs, offset);
+        let start = now - seconds;
+        let from = floor_to_grid(start, bucket_secs, local_offset_at(start));
+        let query = VisibleQuery {
+            from,
+            to: now,
+            bucket: bucket_secs,
+        };
         let executor = cx.background_executor().clone();
         cx.spawn(async move |this, cx| {
             let loaded = executor
                 .spawn(async move {
                     let path = history_path().map_err(|e| e.to_string())?;
                     let store = Store::open(&path).map_err(|e| e.to_string())?;
-                    store
-                        .buckets_offset(from, now, bucket_secs, offset)
-                        .map_err(|e| e.to_string())
+                    query_buckets(&store, query)
                 })
                 .await;
             let _ = this.update(cx, |view: &mut HistoryView, cx| match loaded {
@@ -1070,6 +1136,26 @@ impl HistoryView {
     }
 }
 
+/// Local UTC offset (seconds east) at a specific timestamp. Unlike
+/// `Local::now().offset()`, this stays correct on the old side of a DST
+/// transition when formatting labels.
+fn local_offset_at(ts: i64) -> i64 {
+    DateTime::from_timestamp(ts, 0)
+        .map(|dt| dt.with_timezone(&Local).offset().local_minus_utc() as i64)
+        .unwrap_or(0)
+}
+
+fn query_buckets(store: &Store, query: VisibleQuery) -> Result<Vec<Bucket>, String> {
+    store
+        .buckets_offset(
+            query.from,
+            query.to,
+            query.bucket,
+            local_offset_at(query.from),
+        )
+        .map_err(|e| e.to_string())
+}
+
 /// Format a unix timestamp as HH:MM in the machine's local time zone.
 fn fmt_time(ts: i64) -> String {
     DateTime::from_timestamp(ts, 0)
@@ -1147,18 +1233,18 @@ fn log_event(level: &str, message: &str) {
 impl Render for HistoryView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let lang = self.lang;
+        let title = format!("SysVitals {}", t(lang, "chart.title"));
+        if self.last_title.as_deref() != Some(title.as_str()) {
+            window.set_window_title(&title);
+            self.last_title = Some(title);
+        }
         let points = self.points();
-        let point_count = points.len();
+        let empty = self.buckets.is_empty();
         // The chart itself paints no x labels (`x_tick_count(0)` below); this
-        // panel draws them at a readable size instead. Each entry is a data
-        // index plus its clean-time label text; only the six indices the
-        // chart would label carry one.
-        let axis_labels: Vec<(usize, String)> = points
-            .iter()
-            .enumerate()
-            .filter(|(_, p)| !p.label.is_empty())
-            .map(|(i, p)| (i, p.label.clone()))
-            .collect();
+        // panel draws them at a readable size instead. Labels are generated
+        // from the time window (six evenly spaced positions), not from data
+        // indices, so a data gap does not move the axis text.
+        let axis_labels = self.axis_labels();
         let copied = self.copied;
         let copy_failed = self.copy_failed;
         let current_range = self.range;
@@ -1290,14 +1376,9 @@ impl Render for HistoryView {
                 let plot_h = (f32::from(bounds.size.height) - X_AXIS_STRIP_H).max(0.0);
                 let plot_w = (f32::from(bounds.size.width) - plot_left).max(0.0);
                 let mut texts = Vec::with_capacity(axis_labels.len() + y_labels.len());
-                for (i, text) in &axis_labels {
-                    let frac = if point_count > 1 {
-                        *i as f32 / (point_count - 1) as f32
-                    } else {
-                        0.5
-                    };
-                    let first = point_count > 1 && *i == 0;
-                    let last = point_count > 1 && *i == point_count - 1;
+                for (i, (frac, text)) in axis_labels.iter().enumerate() {
+                    let first = i == 0;
+                    let last = i + 1 == axis_labels.len();
                     let align = if first {
                         TextAlign::Left
                     } else if last {
@@ -1308,7 +1389,7 @@ impl Render for HistoryView {
                     texts.push(
                         PlotText::new(
                             text.clone(),
-                            point(px(plot_left + plot_w * frac), px(plot_h + 3.0)),
+                            point(px(plot_left + plot_w * *frac), px(plot_h + 3.0)),
                             label_color,
                         )
                         .font_size(px(AXIS_LABEL_SIZE))
@@ -1335,29 +1416,58 @@ impl Render for HistoryView {
         )
         .absolute()
         .size_full();
-        let merged_chart = div().flex_1().relative().child(axis_overlay).child(
-            AreaChart::new(points)
-                .x(|p: &ChartPoint| p.label.clone())
-                .y(|p: &ChartPoint| p.cpu)
-                .stroke(cpu_color())
-                .fill(transparent_color())
-                .name(t(lang, "chart.cpu").to_string())
-                .y(|p: &ChartPoint| p.mem)
-                .stroke(mem_color())
-                .fill(transparent_color())
-                .name(t(lang, "chart.mem").to_string())
-                .y_domain(Y_AXIS_MIN, Y_AXIS_MAX)
-                .y_padding(0.0, 0.0)
-                .x_axis(true)
-                .x_tick_count(0)
-                .y_axis(true)
-                .y_tick_format(|_| "")
-                .y_tick_count(Y_TICK_COUNT)
-                .grid(true)
-                .appear(false)
-                .tooltip_title(|p: &ChartPoint| format_ts_full(p.ts).into())
-                .tooltip_value(|_p: &ChartPoint, _series: usize, v: f64| format!("{v:.2}%").into()),
-        );
+        let empty_color = cx.theme().foreground.opacity(0.6);
+        let merged_chart = div()
+            .flex_1()
+            .relative()
+            .child(axis_overlay)
+            .child(
+                AreaChart::new(points)
+                    // The x value is only used for axis/tooltip text; the
+                    // library's ScalePoint projects by index. `points()`
+                    // makes that index correspond to a bucket slot.
+                    .x(|p: &ChartPoint| p.ts.to_string())
+                    .y(|p: &ChartPoint| p.cpu)
+                    .stroke(cpu_color())
+                    .fill(transparent_color())
+                    .name(t(lang, "chart.cpu").to_string())
+                    .y(|p: &ChartPoint| p.mem)
+                    .stroke(mem_color())
+                    .fill(transparent_color())
+                    .name(t(lang, "chart.mem").to_string())
+                    .y_domain(Y_AXIS_MIN, Y_AXIS_MAX)
+                    .y_padding(0.0, 0.0)
+                    .x_axis(true)
+                    .x_tick_count(0)
+                    .y_axis(true)
+                    .y_tick_format(|_| "")
+                    .y_tick_count(Y_TICK_COUNT)
+                    .grid(true)
+                    .appear(false)
+                    .tooltip_title(|p: &ChartPoint| format_ts_full(p.ts).into())
+                    .tooltip_value(|p: &ChartPoint, _series: usize, v: f64| {
+                        if p.has_data {
+                            format!("{v:.2}%").into()
+                        } else {
+                            "--".into()
+                        }
+                    }),
+            )
+            .when(empty, |this| {
+                this.child(
+                    h_flex()
+                        .absolute()
+                        .size_full()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(empty_color)
+                                .child(t(lang, "chart.no_data").to_string()),
+                        ),
+                )
+            });
 
         // Shared legend: dot + label per series, aligned with the chart's
         // own colors.
@@ -1491,12 +1601,11 @@ fn open_history_window(
         Some(a) => {
             let work = anchor_work_area(a, monitor, cx);
             let work_w = f32::from(work.size.width);
+            let work_h = f32::from(work.size.height);
             let width = f32::from(popup_size.width).min((work_w - 2.0 * POPUP_GAP).max(1.0));
-            let popup_size = size(px(width), popup_size.height);
-            Bounds::new(
-                anchor_origin(a, width, f32::from(popup_size.height), &work),
-                popup_size,
-            )
+            let height = f32::from(popup_size.height).min((work_h - 2.0 * POPUP_GAP).max(200.0));
+            let popup_size = size(px(width), px(height));
+            Bounds::new(anchor_origin(a, width, height, &work), popup_size)
         }
         None => Bounds::centered(None, popup_size, cx),
     };
@@ -1624,6 +1733,7 @@ fn run_resident(cx: &mut App) {
         let mut activated = false;
         let mut opened_at: Option<Instant> = None;
         let mut last_activation_attempt: Option<Instant> = None;
+        let mut activation_attempts: u32 = 0;
         let mut idle_since: Option<Instant> = Some(Instant::now());
         let mut trimmed = false;
         // Request generation that opened the current window. A blur/Esc
@@ -1662,6 +1772,7 @@ fn run_resident(cx: &mut App) {
                     activated = false;
                     opened_at = None;
                     last_activation_attempt = None;
+                    activation_attempts = 0;
                     idle_since = Some(Instant::now());
                     trimmed = false;
                     unsafe { shared.mark_hidden() };
@@ -1686,6 +1797,7 @@ fn run_resident(cx: &mut App) {
                     activated = false;
                     opened_at = None;
                     last_activation_attempt = None;
+                    activation_attempts = 0;
                     idle_since = Some(Instant::now());
                     trimmed = false;
                     trim_working_set();
@@ -1722,6 +1834,7 @@ fn run_resident(cx: &mut App) {
                             activated = false;
                             opened_at = Some(Instant::now());
                             last_activation_attempt = None;
+                            activation_attempts = 0;
                             open_generation = snapshot.generation;
                             dismissed_generation = None;
                             idle_since = None;
@@ -1745,9 +1858,17 @@ fn run_resident(cx: &mut App) {
                     let timed_out = opened_at.map_or(true, |opened| {
                         opened.elapsed() > Duration::from_millis(1500)
                     });
-                    let retry_due = last_activation_attempt
-                        .is_none_or(|last| last.elapsed() > Duration::from_millis(100));
+                    // GPUI's Windows activate() injects a synthetic Alt press
+                    // to satisfy the foreground lock. Retrying every ~100ms
+                    // could send dozens of Alt events into the foreground
+                    // app, so cap the attempts and space them out. The 3s
+                    // fallback below still shows the window without
+                    // activation when the lock refuses us.
+                    let retry_due = activation_attempts < 3
+                        && last_activation_attempt
+                            .is_none_or(|last| last.elapsed() > Duration::from_millis(500));
                     if (ready || timed_out) && retry_due {
+                        activation_attempts += 1;
                         let active = cx.update(|app| {
                             handle
                                 .update(app, |_view, window, _| {
@@ -1762,25 +1883,30 @@ fn run_resident(cx: &mut App) {
                             unsafe { shared.set_visible(true) };
                             log_event(
                                 "INFO",
-                                &format!("history: popup shown in {}ms", elapsed_ms()),
-                            );
-                        } else if opened_at
-                            .is_some_and(|opened| opened.elapsed() > Duration::from_secs(3))
-                        {
-                            // The foreground lock kept refusing activation.
-                            // Show anyway so the chart is usable; Esc or an
-                            // indicator click still closes it, but click-away
-                            // cannot be armed. Log once for diagnosis.
-                            activated = true;
-                            unsafe { shared.set_visible(true) };
-                            log_event(
-                                "WARN",
                                 &format!(
-                                    "history: popup shown without activation after {}ms",
+                                    "history: popup shown in {}ms (activation attempts {activation_attempts})",
                                     elapsed_ms()
                                 ),
                             );
                         }
+                    }
+                    if !activated
+                        && opened_at
+                            .is_some_and(|opened| opened.elapsed() > Duration::from_secs(3))
+                    {
+                        // The foreground lock kept refusing activation. Show
+                        // anyway so the chart is usable; Esc or an indicator
+                        // click still closes it, but click-away cannot be
+                        // armed. Log once for diagnosis.
+                        activated = true;
+                        unsafe { shared.set_visible(true) };
+                        log_event(
+                            "WARN",
+                            &format!(
+                                "history: popup shown without activation after {}ms (attempts {activation_attempts})",
+                                elapsed_ms()
+                            ),
+                        );
                     }
                 }
                 continue;
@@ -1811,6 +1937,7 @@ fn run_resident(cx: &mut App) {
                         activated = false;
                         opened_at = Some(Instant::now());
                         last_activation_attempt = None;
+                        activation_attempts = 0;
                         open_generation = snapshot.generation;
                         dismissed_generation = None;
                         idle_since = None;
