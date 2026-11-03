@@ -15,6 +15,7 @@ pub mod backdrop;
 pub mod color;
 pub mod config;
 pub mod format;
+pub mod history_writer;
 pub mod i18n;
 pub mod logger;
 pub mod model;
@@ -214,6 +215,7 @@ impl HistoryState {
 
 pub use config::Config;
 pub use format::{format_frame, format_frame_vertical, FormattedRow, Line};
+pub use history_writer::HistoryWriter;
 pub use i18n::{t, Language};
 pub use model::{Anchor, Metric, Snapshot, Theme};
 pub use sampler::{NetSelection, Sampler};

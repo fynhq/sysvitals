@@ -142,6 +142,17 @@ impl Store {
     /// one transaction. Returns whether wide queries may use the rollup; a
     /// failed backfill is not fatal (raw-only fallback).
     fn init_schema(conn: &mut Connection) -> anyhow::Result<bool> {
+        let version: i32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if version > SCHEMA_VERSION {
+            // A newer build may have changed the tables in a way this build
+            // cannot understand (for example after an application downgrade).
+            // Reject it before running any DDL: dropping an index or creating
+            // tables against a future schema would mutate a database this
+            // build cannot read.
+            anyhow::bail!(
+                "history database schema {version} is newer than supported {SCHEMA_VERSION}"
+            );
+        }
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS samples (
                  ts  INTEGER PRIMARY KEY,
@@ -159,8 +170,7 @@ impl Store {
                  n       INTEGER NOT NULL
              );",
         )?;
-        let version: i32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version >= SCHEMA_VERSION {
+        if version == SCHEMA_VERSION {
             return Ok(true);
         }
         let has_raw: bool = conn.query_row("SELECT EXISTS (SELECT 1 FROM samples)", [], |row| {
@@ -671,6 +681,18 @@ mod tests {
             .query_row("SELECT SUM(n) FROM samples_1m", [], |row| row.get(0))
             .unwrap();
         assert_eq!(total, 3);
+    }
+
+    #[test]
+    fn future_schema_is_rejected_instead_of_assumed_compatible() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION + 1)
+            .unwrap();
+        let err = Store::init_schema(&mut conn).unwrap_err();
+        assert!(
+            err.to_string().contains("newer than supported"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
