@@ -4,7 +4,9 @@ on:
   push:
     # Any branch push and PR runs only the quality gate below. Packaging is
     # tag-triggered: `build-*` tags build the four-arch dev packages for
-    # acceptance testing, `v*` tags run the full release pipeline.
+    # acceptance testing, `v*` tags run the full release pipeline. Dev tags
+    # are disposable: the newest successful `build-*` run deletes older
+    # `build-*` tags, and a published `v*` release deletes all of them.
     branches: ["**"]
     tags: ["v*", "build-*"]
   pull_request:
@@ -683,3 +685,71 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: gh release view "$TAG"
+
+  # ---------------------------------------------------------------------------
+  # Dev tag hygiene: `build-*` tags are one-shot acceptance triggers. Once the
+  # four-arch dev packages and the quality gate are green, delete every other
+  # `build-*` tag so only the tag that produced this run survives. A failed
+  # run keeps the previous tag untouched. Deleting a tag ref does not delete
+  # the workflow run or its uploaded artifacts — both stay reachable from the
+  # Actions tab.
+  # ---------------------------------------------------------------------------
+  prune-build-tags:
+    name: Prune previous build tags
+    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'build-')
+    needs: [quality, build-windows, build-macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: prune-build-tags
+      cancel-in-progress: false
+    steps:
+      - name: Delete previous build tags
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KEEP_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/git/matching-refs/tags/build-" \
+            --jq '.[].ref' |
+            sed 's#^refs/tags/##' |
+            while IFS= read -r tag; do
+              if [ "$tag" = "$KEEP_TAG" ]; then
+                continue
+              fi
+              echo "deleting tag $tag"
+              gh api --method DELETE "repos/${GITHUB_REPOSITORY}/git/refs/tags/${tag}"
+            done
+
+  # ---------------------------------------------------------------------------
+  # Release tag hygiene: after a `v*` Release is published, every `build-*`
+  # acceptance tag is obsolete, so remove all of them. This job runs only when
+  # the release job succeeded; a failed or still-draft release leaves the dev
+  # tags in place. Workflow runs and their artifacts are not deleted.
+  # ---------------------------------------------------------------------------
+  prune-build-tags-after-release:
+    name: Prune build tags after release
+    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+    needs: [release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: prune-build-tags
+      cancel-in-progress: false
+    steps:
+      - name: Delete all build tags
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/git/matching-refs/tags/build-" \
+            --jq '.[].ref' |
+            sed 's#^refs/tags/##' |
+            while IFS= read -r tag; do
+              echo "deleting tag $tag"
+              gh api --method DELETE "repos/${GITHUB_REPOSITORY}/git/refs/tags/${tag}"
+            done
