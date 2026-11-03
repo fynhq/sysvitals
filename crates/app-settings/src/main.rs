@@ -156,6 +156,23 @@ mod macos_select {
 
     thread_local! {
         static MENU_SELECTION: Cell<Option<isize>> = const { Cell::new(None) };
+        static MENU_OPEN: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// Keeps a second popup from nesting inside an already tracking menu
+    /// (two fast clicks can defer two popups). Reset on every exit path.
+    struct MenuGuard;
+
+    impl MenuGuard {
+        fn acquire() -> Option<Self> {
+            MENU_OPEN.with(|open| (!open.replace(true)).then_some(Self))
+        }
+    }
+
+    impl Drop for MenuGuard {
+        fn drop(&mut self) {
+            MENU_OPEN.with(|open| open.set(false));
+        }
     }
 
     define_class!(
@@ -189,11 +206,13 @@ mod macos_select {
 
     /// Show `items` at the pointer as a native menu and return the chosen
     /// index. The current item carries the system checkmark. `None` means the
-    /// menu was dismissed without a selection (or no window was available).
+    /// menu was dismissed without a selection, another menu is already open,
+    /// or no window was available.
     pub fn show(items: &[String], selected: usize) -> Option<usize> {
         if items.is_empty() {
             return None;
         }
+        let _guard = MenuGuard::acquire()?;
         let mtm = MainThreadMarker::new()?;
         let app = NSApplication::sharedApplication(mtm);
         let Some(window) = app.keyWindow().or_else(|| app.mainWindow()) else {
@@ -256,6 +275,43 @@ struct MacSelectStyle {
     border: Hsla,
     caret: Hsla,
     radius: Pixels,
+}
+
+/// Raise the native menu for a macOS dropdown and commit the chosen index.
+///
+/// `NSMenu` popup runs a nested AppKit tracking loop. Starting it inside a
+/// GPUI click handler holds the mutable `App` borrow for the whole time the
+/// menu is up, and the tracking loop keeps servicing the main run loop: the
+/// 500 ms accent poll and the platform's keyboard-layout notification both
+/// borrow the app from that loop and abort the process with "RefCell already
+/// borrowed". Defer the popup by one main-queue turn so the click dispatch
+/// has returned and no GPUI state is borrowed while the menu tracks; the
+/// selection is applied afterwards.
+#[cfg(target_os = "macos")]
+fn mac_select_popup(
+    cx: &mut Context<SettingsView>,
+    items: Vec<String>,
+    selected: usize,
+    apply: fn(&mut SettingsView, usize),
+) {
+    cx.spawn(async move |this, cx| {
+        // Must be non-zero: `BackgroundExecutor::timer` short-circuits a zero
+        // duration to a ready task, which would keep this poll inline in the
+        // click handler. A real timer is dispatched back through the platform
+        // dispatcher and therefore lands after the click dispatch.
+        cx.background_executor()
+            .timer(std::time::Duration::from_millis(1))
+            .await;
+        let Some(index) = macos_select::show(&items, selected) else {
+            return;
+        };
+        let _ = this.update(cx, |this, cx| {
+            apply(this, index);
+            this.save(cx);
+            cx.notify();
+        });
+    })
+    .detach();
 }
 
 /// The macOS dropdown trigger: the same filled control look as the GPUI
@@ -1116,12 +1172,12 @@ impl Render for SettingsView {
             px_items(&ALLOWED_ITEM_SPACING_PX)[self.spacing_idx].clone(),
             mac_style,
             cx.listener(|this, _, _, cx| {
-                let items = px_items(&ALLOWED_ITEM_SPACING_PX);
-                if let Some(index) = macos_select::show(&items, this.spacing_idx) {
-                    this.spacing_idx = index;
-                    this.save(cx);
-                    cx.notify();
-                }
+                mac_select_popup(
+                    cx,
+                    px_items(&ALLOWED_ITEM_SPACING_PX),
+                    this.spacing_idx,
+                    |view, index| view.spacing_idx = index,
+                );
             }),
         ));
         #[cfg(target_os = "macos")]
@@ -1130,12 +1186,12 @@ impl Render for SettingsView {
             px_items(&ALLOWED_LEFT_MARGIN_PX)[self.margin_idx].clone(),
             mac_style,
             cx.listener(|this, _, _, cx| {
-                let items = px_items(&ALLOWED_LEFT_MARGIN_PX);
-                if let Some(index) = macos_select::show(&items, this.margin_idx) {
-                    this.margin_idx = index;
-                    this.save(cx);
-                    cx.notify();
-                }
+                mac_select_popup(
+                    cx,
+                    px_items(&ALLOWED_LEFT_MARGIN_PX),
+                    this.margin_idx,
+                    |view, index| view.margin_idx = index,
+                );
             }),
         ));
         #[cfg(target_os = "macos")]
@@ -1144,12 +1200,12 @@ impl Render for SettingsView {
             anchor_items(self.current_lang())[self.anchor_idx].clone(),
             mac_style,
             cx.listener(|this, _, _, cx| {
-                let items = anchor_items(this.current_lang());
-                if let Some(index) = macos_select::show(&items, this.anchor_idx) {
-                    this.anchor_idx = index;
-                    this.save(cx);
-                    cx.notify();
-                }
+                mac_select_popup(
+                    cx,
+                    anchor_items(this.current_lang()),
+                    this.anchor_idx,
+                    |view, index| view.anchor_idx = index,
+                );
             }),
         ));
 
