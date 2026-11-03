@@ -211,19 +211,44 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "public surface check failed" }
       - name: Smoke-test Windows installer
         if: matrix.arch == 'x64'
+        timeout-minutes: 10
         shell: pwsh
         run: |
+          function Invoke-Setup {
+            param(
+              [string]$Label,
+              [string]$FilePath,
+              [string[]]$SetupArgs,
+              [int]$TimeoutSeconds = 180
+            )
+            $log = Join-Path $env:TEMP "sysvitals-$Label.log"
+            Write-Host "[smoke] $Label: start"
+            $proc = Start-Process -FilePath $FilePath `
+              -ArgumentList ($SetupArgs + "/LOG=`"$log`"") -PassThru
+            # `Start-Process -Wait` also waits for processes spawned by Setup
+            # (the indicator relaunched after an upgrade), which never exits.
+            # Wait for the installer process itself, with a hard timeout.
+            if (-not $proc.WaitForExit($TimeoutSeconds * 1000)) {
+              Write-Host "[smoke] $Label: TIMEOUT after $TimeoutSeconds s"
+              if (Test-Path $log) { Get-Content -Path $log -Tail 80 }
+              Get-Process SysVitals,SysVitalsSettings,SysVitalsHistory -ErrorAction SilentlyContinue |
+                Format-Table Id, ProcessName, StartTime | Out-String | Write-Host
+              throw "$Label timed out after $TimeoutSeconds s"
+            }
+            Write-Host "[smoke] $Label: exit $($proc.ExitCode)"
+            return $proc.ExitCode
+          }
           $installDir = Join-Path $env:LOCALAPPDATA "Programs\SysVitals"
           if (Test-Path $installDir) { Remove-Item -Recurse -Force $installDir }
           $setup = Get-ChildItem -Path . -Filter "SysVitals_Windows_x64_*_setup.exe" |
             Select-Object -First 1
           if (-not $setup) { throw "setup file not found" }
-          $install = Start-Process -FilePath $setup.FullName `
-            -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART" `
-            -Wait -PassThru
-          if ($install.ExitCode -ne 0) {
-            throw "installer failed with exit code $($install.ExitCode)"
+          $exit = Invoke-Setup -Label "install" -FilePath $setup.FullName `
+            -SetupArgs @("/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART")
+          if ($exit -ne 0) {
+            throw "installer failed with exit code $exit"
           }
+          Write-Host "[smoke] clean install verified"
           $installed = @(
             "SysVitals.exe",
             "SysVitalsSettings.exe",
@@ -251,15 +276,20 @@ jobs:
           }
           if (-not $appMutex) { throw "SysVitals did not start" }
           $appMutex.Dispose()
-          $upgrade = Start-Process -FilePath $setup.FullName `
-            -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART" `
-            -Wait -PassThru
-          if ($upgrade.ExitCode -ne 0) {
-            throw "upgrade over a running instance failed with exit code $($upgrade.ExitCode)"
+          Write-Host "[smoke] indicator running (pid $($oldProc.Id))"
+          $exit = Invoke-Setup -Label "upgrade" -FilePath $setup.FullName `
+            -SetupArgs @("/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART")
+          if ($exit -ne 0) {
+            throw "upgrade over a running instance failed with exit code $exit"
+          }
+          $deadline = (Get-Date).AddSeconds(15)
+          while (-not $oldProc.HasExited -and (Get-Date) -lt $deadline) {
+            Start-Sleep -Milliseconds 250
           }
           if (-not $oldProc.HasExited) {
             throw "Setup did not close the running SysVitals instance"
           }
+          Write-Host "[smoke] upgrade over running instance verified"
           $deadline = (Get-Date).AddSeconds(15)
           $relaunched = @()
           while ($relaunched.Count -eq 0 -and ((Get-Date) -lt $deadline)) {
@@ -275,6 +305,7 @@ jobs:
           if ($relaunched[0].Id -eq $oldProc.Id) {
             throw "SysVitals was not restarted as a new process"
           }
+          Write-Host "[smoke] relaunch verified (pid $($relaunched[0].Id))"
           Stop-Process -Name SysVitals -Force
           $deadline = (Get-Date).AddSeconds(15)
           while ($true) {
@@ -290,6 +321,7 @@ jobs:
             }
             Start-Sleep -Milliseconds 250
           }
+          Write-Host "[smoke] indicator stopped"
           # Downgrade guard: a higher installed version must block Setup.
           $uninstallKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\{7E2F6C1A-4B3D-4F8E-9A21-6C5D8B7E9F10}_is1"
           if (!(Test-Path $uninstallKey)) { throw "uninstall registry key not found" }
@@ -297,15 +329,15 @@ jobs:
           if (-not $realVersion) { throw "uninstall registry key has no DisplayVersion" }
           Set-ItemProperty -Path $uninstallKey -Name DisplayVersion -Value "99.0.0"
           try {
-            $blocked = Start-Process -FilePath $setup.FullName `
-              -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART" `
-              -Wait -PassThru
-            if ($blocked.ExitCode -eq 0) {
+            $exit = Invoke-Setup -Label "downgrade" -FilePath $setup.FullName `
+              -SetupArgs @("/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART")
+            if ($exit -eq 0) {
               throw "installer did not block a downgrade"
             }
           } finally {
             Set-ItemProperty -Path $uninstallKey -Name DisplayVersion -Value $realVersion
           }
+          Write-Host "[smoke] downgrade guard verified"
           # Simulate the app's launch-at-login value; the uninstaller may remove
           # it only when it points at this installation.
           $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
@@ -314,11 +346,10 @@ jobs:
           Set-ItemProperty -Path $runKey -Name "SysVitals" -Value $runValue
           $uninstaller = Join-Path $installDir "unins000.exe"
           if (!(Test-Path $uninstaller)) { throw "uninstaller not found" }
-          $uninstall = Start-Process -FilePath $uninstaller `
-            -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART" `
-            -Wait -PassThru
-          if ($uninstall.ExitCode -ne 0) {
-            throw "uninstaller failed with exit code $($uninstall.ExitCode)"
+          $exit = Invoke-Setup -Label "uninstall" -FilePath $uninstaller `
+            -SetupArgs @("/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART")
+          if ($exit -ne 0) {
+            throw "uninstaller failed with exit code $exit"
           }
           foreach ($f in $installed) {
             if (Test-Path (Join-Path $installDir $f)) {
@@ -328,7 +359,9 @@ jobs:
           if (Get-ItemProperty -Path $runKey -Name "SysVitals" -ErrorAction SilentlyContinue) {
             throw "uninstaller left the Run value behind"
           }
+          Write-Host "[smoke] uninstall verified"
       - name: Upload Windows packages
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: SysVitals-windows-${{ matrix.arch }}
