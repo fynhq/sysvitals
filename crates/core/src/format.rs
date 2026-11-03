@@ -25,6 +25,9 @@ pub const GB: f64 = 1024.0 * MB;
 
 /// Render a CPU/MEM percentage as an integer percent string.
 pub fn format_percent(value: f64) -> String {
+    if !value.is_finite() {
+        return "--%".to_string();
+    }
     let v = value.clamp(0.0, 100.0).round();
     format!("{v:.0}%")
 }
@@ -413,6 +416,8 @@ mod tests {
         assert_eq!(format_percent(29.6), "30%");
         assert_eq!(format_percent(-3.0), "0%");
         assert_eq!(format_percent(140.0), "100%");
+        assert_eq!(format_percent(f64::NAN), "--%");
+        assert_eq!(format_percent(f64::INFINITY), "--%");
     }
 
     #[test]

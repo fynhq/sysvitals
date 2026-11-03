@@ -82,6 +82,12 @@ impl CpuSampler {
     /// the sleep. Otherwise `None`/first tick passes the raw value through to
     /// avoid the classic EMA pull toward zero.
     pub fn update(&mut self, raw: f64, elapsed: Option<Duration>) -> f64 {
+        // A non-finite reading is "no data", not zero: clamping would keep
+        // NaN and poison every later EMA step. Leave the previous value (or
+        // NaN on the very first tick) and wait for a finite sample.
+        if !raw.is_finite() {
+            return self.last.unwrap_or(f64::NAN);
+        }
         let raw = raw.clamp(0.0, 100.0);
         // Wake/stall guard: a gap beyond the stale threshold invalidates the
         // whole smoothing history, not just one frame.
@@ -165,6 +171,18 @@ mod tests {
         s.update(50.0, None);
         let v = s.update(100.0, Some(Duration::from_millis(2000)));
         assert!((v - 85.0).abs() < 1e-9, "NaN alpha poisoned the EMA: {v}");
+    }
+
+    #[test]
+    fn non_finite_raw_does_not_poison_the_ema() {
+        let mut s = CpuSampler::new(0.3);
+        assert!(s.update(f64::NAN, None).is_nan());
+        s.update(50.0, None);
+        // A bad frame returns the last good value and leaves the EMA intact.
+        let bad = s.update(f64::INFINITY, Some(Duration::from_millis(1000)));
+        assert_eq!(bad, 50.0);
+        let v = s.update(100.0, Some(Duration::from_millis(2000)));
+        assert!((v - 85.0).abs() < 1e-9, "got {v}");
     }
 
     #[test]

@@ -8,22 +8,41 @@
 //! authoritative "physical NIC" set in Auto mode.
 
 use std::collections::HashSet;
+use std::time::{Duration, Instant};
 
 use windows::Win32::NetworkManagement::IpHelper::{FreeMibTable, GetIfTable2, MIB_IF_TABLE2};
+
+/// The hardware-interface set changes only on plug/unplug or adapter
+/// enable/disable. Re-enumerating the full NDIS table on every 1–3 s sample
+/// is unnecessary; a few seconds of staleness only means a newly appeared
+/// interface starts contributing on the next refresh.
+const HARDWARE_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Cached alias set of NDIS hardware interfaces.
 pub(crate) struct HardwareInterfaces {
     names: Option<HashSet<String>>,
+    last_refresh: Option<Instant>,
 }
 
 impl HardwareInterfaces {
     pub(crate) fn new() -> Self {
-        Self { names: None }
+        Self {
+            names: None,
+            last_refresh: None,
+        }
     }
 
-    /// Re-read the interface table. On failure the previous set is kept so a
-    /// transient error cannot blank the network readout.
+    /// Re-read the interface table, at most once per
+    /// [`HARDWARE_REFRESH_INTERVAL`]. On failure the previous set is kept so
+    /// a transient error cannot blank the network readout.
     pub(crate) fn refresh(&mut self) {
+        if self
+            .last_refresh
+            .is_some_and(|last| last.elapsed() < HARDWARE_REFRESH_INTERVAL)
+        {
+            return;
+        }
+        self.last_refresh = Some(Instant::now());
         if let Some(names) = hardware_names() {
             self.names = Some(names);
         }

@@ -107,6 +107,8 @@ pub fn t(lang: Language, key: &str) -> &str {
         (Language::Zh, "chart.range.1mo") => "1 个月",
         (Language::En, "chart.copy_csv") => "Copy CSV",
         (Language::Zh, "chart.copy_csv") => "复制 CSV",
+        (Language::En, "chart.no_data") => "No data in this range",
+        (Language::Zh, "chart.no_data") => "该时间范围内暂无数据",
         (Language::En, "chart.copied") => "Copied to clipboard",
         (Language::Zh, "chart.copied") => "已复制到剪贴板",
         (Language::En, "chart.copy_failed") => "Copy failed",
@@ -154,6 +156,12 @@ mod tests {
         );
         assert_eq!(t(Language::En, "settings.title"), "SysVitals Settings");
         assert_eq!(t(Language::Zh, "settings.title"), "SysVitals 设置");
+    }
+
+    #[test]
+    fn chart_empty_state_localized() {
+        assert_eq!(t(Language::En, "chart.no_data"), "No data in this range");
+        assert_eq!(t(Language::Zh, "chart.no_data"), "该时间范围内暂无数据");
     }
 
     #[test]

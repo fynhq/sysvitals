@@ -101,6 +101,23 @@ impl Sampler {
     /// (it only seeds baselines); from the second call on, network rates are
     /// real. `now_unix` is the local wall-clock timestamp to stamp the sample.
     pub fn sample(&mut self, now_unix: i64) -> Snapshot {
+        // Whole-machine CPU percent. On Windows the PDH counter follows
+        // Task Manager's formula for the running OS build (frequency-weighted
+        // utility below Windows 11 24H2, time-based from 24H2 on); sysinfo's
+        // time-based `global_cpu_usage()` is the fallback and the source on
+        // macOS, where Activity Monitor is time-based as well.
+        //
+        // Read PDH before refreshing sysinfo so a successful Windows counter
+        // does not pay for an all-core sysinfo refresh every tick. Only the
+        // fallback path refreshes sysinfo; the first PDH read primes the
+        // counter and therefore takes the fallback once.
+        #[cfg(windows)]
+        let pdh_cpu = self.cpu_counter.as_mut().and_then(|c| c.read());
+        #[cfg(windows)]
+        if pdh_cpu.is_none() {
+            self.system.refresh_cpu_usage();
+        }
+        #[cfg(not(windows))]
         self.system.refresh_cpu_usage();
         self.system.refresh_memory();
         // `false` keeps interfaces that momentarily disappear from the list so
@@ -114,16 +131,8 @@ impl Sampler {
         let elapsed = self.last_tick.map(|prev| now.duration_since(prev));
         self.last_tick = Some(now);
 
-        // Whole-machine CPU percent. On Windows the PDH counter follows
-        // Task Manager's formula for the running OS build (frequency-weighted
-        // utility below Windows 11 24H2, time-based from 24H2 on); sysinfo's
-        // time-based `global_cpu_usage()` is the fallback and the source on
-        // macOS, where Activity Monitor is time-based as well.
         #[cfg(windows)]
-        let cpu_raw = match self.cpu_counter.as_mut().and_then(|c| c.read()) {
-            Some(value) => value,
-            None => self.system.global_cpu_usage() as f64,
-        };
+        let cpu_raw = pdh_cpu.unwrap_or_else(|| self.system.global_cpu_usage() as f64);
         #[cfg(not(windows))]
         let cpu_raw = self.system.global_cpu_usage() as f64;
         let cpu_pct = self.cpu.update(cpu_raw, elapsed);
