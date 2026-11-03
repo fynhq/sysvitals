@@ -48,16 +48,18 @@
 mod win {
     use std::cell::RefCell;
     use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, AtomicU32, AtomicU64, Ordering};
-    use std::sync::{Mutex, OnceLock, RwLock};
+    use std::sync::{Arc, Mutex, OnceLock, RwLock};
     use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
     use sysvitals_core::format::FormattedRow;
     use sysvitals_core::{
-        format_frame, format_frame_vertical, t, Config, Language, NetSelection, Sampler, Theme,
+        format_frame, format_frame_vertical, t, Config, HistoryWriter, Language, NetSelection,
+        Sampler, Theme,
     };
     use windows::Wdk::System::SystemServices::RtlGetVersion;
     use windows::Win32::Foundation::{
-        CloseHandle, ERROR_FILE_NOT_FOUND, HANDLE, INVALID_HANDLE_VALUE, WAIT_TIMEOUT,
+        CloseHandle, ERROR_FILE_NOT_FOUND, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
+        WAIT_TIMEOUT,
     };
     use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
     use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
@@ -90,7 +92,7 @@ mod win {
     };
     use windows::Win32::System::Registry::{
         RegCloseKey, RegDeleteKeyValueW, RegOpenKeyExW, RegQueryValueExW, RegSetKeyValueW, HKEY,
-        HKEY_CURRENT_USER, KEY_READ, REG_SZ, REG_VALUE_TYPE,
+        HKEY_CURRENT_USER, KEY_READ, REG_DWORD, REG_SZ, REG_VALUE_TYPE,
     };
     use windows::Win32::System::SystemInformation::{GetLocalTime, OSVERSIONINFOW};
     use windows::Win32::System::Threading::{
@@ -102,26 +104,37 @@ mod win {
         GetDpiForSystem, GetDpiForWindow, SetProcessDpiAwarenessContext,
         DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
     };
-    use windows::Win32::UI::Shell::{IVirtualDesktopManager, ShellExecuteW, VirtualDesktopManager};
+    use windows::Win32::UI::Shell::{
+        IVirtualDesktopManager, SHAppBarMessage, ShellExecuteW, VirtualDesktopManager,
+        ABM_GETSTATE, ABS_AUTOHIDE, APPBARDATA,
+    };
     use windows::Win32::UI::WindowsAndMessaging::{
         AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
         DispatchMessageW, FindWindowExW, FindWindowW, GetClassNameW, GetCursorPos,
         GetForegroundWindow, GetMessageW, GetShellWindow, GetSystemMetrics, GetWindowLongPtrW,
-        GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow,
-        IsWindowVisible, KillTimer, MoveWindow, PostMessageW, PostQuitMessage, RegisterClassExW,
-        RegisterWindowMessageW, SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow,
-        SystemParametersInfoW, TrackPopupMenu, TranslateMessage, UpdateLayeredWindow,
-        WindowFromPoint, CS_HREDRAW, CS_VREDRAW, GWL_EXSTYLE, HWND_TOPMOST, MF_SEPARATOR,
-        MF_STRING, MSG, NONCLIENTMETRICSW, SM_CXSCREEN, SM_CXVIRTUALSCREEN, SM_CYSCREEN,
-        SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SPI_GETHIGHCONTRAST,
-        SPI_GETNONCLIENTMETRICS, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE,
-        SW_SHOWNOACTIVATE, SW_SHOWNORMAL, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, ULW_ALPHA,
-        WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ENDSESSION, WM_LBUTTONUP, WM_NULL,
-        WM_QUERYENDSESSION, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED,
-        WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+        GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, KillTimer,
+        MoveWindow, PostMessageW, PostQuitMessage, RegisterClassExW, RegisterWindowMessageW,
+        SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow, SystemParametersInfoW,
+        TrackPopupMenu, TranslateMessage, UpdateLayeredWindow, WindowFromPoint, CS_HREDRAW,
+        CS_VREDRAW, GWL_EXSTYLE, HWND_TOPMOST, MF_SEPARATOR, MF_STRING, MSG, NONCLIENTMETRICSW,
+        SM_CXSCREEN, SM_CXVIRTUALSCREEN, SM_CYSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+        SM_YVIRTUALSCREEN, SPI_GETHIGHCONTRAST, SPI_GETNONCLIENTMETRICS, SWP_NOACTIVATE,
+        SWP_NOMOVE, SWP_NOSIZE, SW_HIDE, SW_SHOWNOACTIVATE, SW_SHOWNORMAL, TPM_LEFTALIGN,
+        TPM_RETURNCMD, TPM_RIGHTBUTTON, ULW_ALPHA, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED,
+        WM_ENDSESSION, WM_LBUTTONUP, WM_NULL, WM_QUERYENDSESSION, WM_RBUTTONUP, WM_SETTINGCHANGE,
+        WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+        WS_POPUP,
     };
 
     // ------------------------------------------------------------------ consts
+
+    /// Build stamp emitted by build.rs: `v{semver}` on a tagged commit,
+    /// `v{semver}_{short-hash} (dev)` otherwise. Kept in step with the
+    /// settings footer and the macOS startup log.
+    const SV_BUILD_ID: &str = match option_env!("SV_BUILD_ID") {
+        Some(id) => id,
+        None => concat!("v", env!("CARGO_PKG_VERSION")),
+    };
 
     const TIMER_SAMPLE: usize = 0x515;
     const TIMER_MOVE: usize = 0x516;
@@ -133,6 +146,9 @@ mod win {
     /// Posted by the background history-launch thread once the resident
     /// process handle is stored (or the launch failed).
     const WM_APP_HISTORY_READY: u32 = 0x8000 + 3;
+    /// Posted by the background settings-launch thread once the child handle
+    /// is stored (or the launch failed).
+    const WM_APP_SETTINGS_READY: u32 = 0x8000 + 4;
     /// Polls the resident history process so a crash is reaped and a stale
     /// request cleared without waiting for the next click.
     const TIMER_HISTORY: usize = 0x519;
@@ -207,6 +223,19 @@ mod win {
     /// case: a broken file must not silently remove a login item the user
     /// enabled earlier.
     static CONFIG_LOAD_FAILED: AtomicBool = AtomicBool::new(false);
+    /// True when the currently loaded config came from an existing file.
+    /// A missing file is not an explicit "auto-start off" choice: the login
+    /// item is left untouched until the user saves a config through Settings.
+    static CONFIG_FROM_FILE: AtomicBool = AtomicBool::new(false);
+    /// Cache of the Win11 centered-taskbar preference. `u32::MAX` means
+    /// "probe again"; refreshed on WM_SETTINGCHANGE and TaskbarCreated so the
+    /// per-tick placement code avoids a registry read.
+    static WIN11_CENTERED: AtomicU32 = AtomicU32::new(u32::MAX);
+    /// Cache of the shell auto-hide preference. `SHAppBarMessage` is a
+    /// synchronous shell call, so probing it on every geometry tick could
+    /// block the message thread if Explorer is busy. Invalidate on setting
+    /// changes, TaskbarCreated, and the 5s watchdog.
+    static AUTO_HIDE: AtomicU32 = AtomicU32::new(u32::MAX);
     /// Job object owning every panel child. Created once at startup with
     /// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`; the handle is deliberately kept
     /// for the process lifetime, so a crash or a quit during a slow
@@ -219,11 +248,19 @@ mod win {
     /// True from the moment the background launch is requested until the
     /// worker finishes; a click during startup must not spawn a second child.
     static HISTORY_LAUNCHING: AtomicBool = AtomicBool::new(false);
+    /// Settings launch/replace worker in flight. `CreateProcessW` and the
+    /// wait for a replaced Settings instance's mutex can take seconds, so
+    /// both happen off the message thread.
+    static SETTINGS_LAUNCHING: AtomicBool = AtomicBool::new(false);
     /// Monitor (HMONITOR as isize) the live settings window was opened on.
     /// A Settings click on a different indicator moves the window there by
     /// closing and relaunching it; a click on the same screen is a no-op
     /// (there is no IPC to raise an existing GPUI window).
     static SETTINGS_MONITOR: AtomicIsize = AtomicIsize::new(0);
+    /// Settings process handle; stored as an `isize` because the launch
+    /// happens on a worker thread (`HANDLE` is not `Send`). The UI thread
+    /// reaps and closes it.
+    static SETTINGS_PROCESS: Mutex<Option<isize>> = Mutex::new(None);
     /// The process is shutting down intentionally: the overlay's `WM_DESTROY`
     /// must quit rather than wait for a shell-driven rebind.
     static QUITTING: AtomicBool = AtomicBool::new(false);
@@ -246,10 +283,6 @@ mod win {
     /// mtime of the last config parse failure, so a broken file logs once
     /// instead of every CONFIG_POLL_MS tick.
     static CONFIG_ERROR_MTIME: AtomicU64 = AtomicU64::new(0);
-    /// Whether a history write/prune failure has already been logged. Open
-    /// failures are retried periodically; write failures are logged once so a
-    /// full disk does not spam the log every tick.
-    static STORE_WRITE_ERROR_LOGGED: AtomicBool = AtomicBool::new(false);
 
     /// Per-taskbar overlay state. One entry per visible taskbar: the main bar
     /// plus one per extra monitor. Everything that used to be a process-wide
@@ -298,13 +331,10 @@ mod win {
         static LAST_SNAPSHOT: RefCell<Option<sysvitals_core::Snapshot>> = const { RefCell::new(None) };
         /// One entry per visible taskbar; the registry the sentinel drives.
         static OVERLAYS: RefCell<Vec<Overlay>> = const { RefCell::new(Vec::new()) };
-        // History store. Lazily opened on the first sample so a missing
-        // data dir never blocks the indicator itself.
-        static STORE: RefCell<Option<sysvitals_core::Store>> = const { RefCell::new(None) };
-        static TICK_COUNT: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
-        // Child process handles, kept so we can detect a still-running
-        // instance and avoid stacking duplicate windows.
-        static SETTINGS_PROCESS: RefCell<Option<HANDLE>> = const { RefCell::new(None) };
+        /// Background SQLite writer. Created on the first enabled sample so a
+        /// missing data dir or a failed spawn never blocks the indicator.
+        static HISTORY_WRITER: RefCell<Option<HistoryWriter>> = const { RefCell::new(None) };
+        static HISTORY_WRITER_FAILED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
         /// Shared command/status block between this overlay and the resident
         /// history process. The mapping handle is kept alive for the process
         /// lifetime.
@@ -323,8 +353,15 @@ mod win {
                 // fall back to defaults and keep running, but leave a trace so
                 // a parse error is diagnosable.
                 let loaded = match sysvitals_core::config::config_path() {
-                    Ok(p) => match Config::load(&p) {
-                        Ok((c, _)) => c,
+                    Ok(p) => match Config::load_with_source(&p) {
+                        Ok((c, issues, source)) => {
+                            log_config_issues(&issues);
+                            CONFIG_FROM_FILE.store(
+                                source == sysvitals_core::config::ConfigSource::File,
+                                Ordering::Relaxed,
+                            );
+                            c
+                        }
                         Err(e) => {
                             log_event(
                                 "WARN",
@@ -334,12 +371,14 @@ mod win {
                                 ),
                             );
                             CONFIG_LOAD_FAILED.store(true, Ordering::Relaxed);
+                            CONFIG_FROM_FILE.store(false, Ordering::Relaxed);
                             Config::default()
                         }
                     },
                     Err(e) => {
                         log_event("WARN", &format!("config path unavailable: {e}"));
                         CONFIG_LOAD_FAILED.store(true, Ordering::Relaxed);
+                        CONFIG_FROM_FILE.store(false, Ordering::Relaxed);
                         Config::default()
                     }
                 };
@@ -353,6 +392,15 @@ mod win {
     fn store_config(new: Config) {
         if let Some(slot) = CONFIG.get() {
             *slot.write().expect("config lock") = new;
+        }
+    }
+
+    fn log_config_issues(issues: &[sysvitals_core::config::SanitizeIssue]) {
+        for issue in issues {
+            log_event(
+                "WARN",
+                &format!("config repair {}: {}", issue.field, issue.message),
+            );
         }
     }
 
@@ -427,7 +475,7 @@ mod win {
             Some(&mut size),
         );
         let _ = RegCloseKey(hkey);
-        if queried.is_ok() && size >= 4 {
+        if queried.is_ok() && size >= 4 && kind == REG_DWORD {
             Some(u32::from_le_bytes(data))
         } else {
             None
@@ -518,21 +566,34 @@ mod win {
     /// Apply the login-startup preference once per value change. The settings
     /// window writes the config; this process owns the registry side effect.
     fn apply_auto_start(cfg: &Config) {
+        // A `false` that merely came from the default (or a config re-created
+        // after a corrupt file was backed up) is not an explicit user choice,
+        // so it must not remove a login item. A legacy `true` is still safe
+        // to apply: it can only repair/add the entry, never remove one.
+        if !cfg.startup.auto_start_explicit && !cfg.startup.auto_start {
+            // Leave the system state alone, but forget the last applied bit
+            // so a later explicit/legacy `true` can still repair the entry.
+            APPLIED_AUTO_START.store(u32::MAX, Ordering::Relaxed);
+            return;
+        }
         let desired = cfg.startup.auto_start;
         let desired_bits = desired as u32;
-        let previous = APPLIED_AUTO_START.swap(desired_bits, Ordering::Relaxed);
-        if previous == desired_bits {
+        if APPLIED_AUTO_START.load(Ordering::Relaxed) == desired_bits {
             return;
         }
         match unsafe { set_auto_start(desired) } {
-            Ok(true) => log_event(
-                "INFO",
-                &format!(
-                    "auto-start {}",
-                    if desired { "enabled" } else { "disabled" }
-                ),
-            ),
-            Ok(false) => {}
+            Ok(changed) => {
+                APPLIED_AUTO_START.store(desired_bits, Ordering::Relaxed);
+                if changed {
+                    log_event(
+                        "INFO",
+                        &format!(
+                            "auto-start {}",
+                            if desired { "enabled" } else { "disabled" }
+                        ),
+                    );
+                }
+            }
             Err(e) => log_event(
                 "WARN",
                 &format!(
@@ -544,6 +605,11 @@ mod win {
     }
 
     unsafe fn refresh_theme() {
+        // The taskbar alignment lives beside the theme values and can change
+        // while the indicator is running; drop the cached probe so the next
+        // placement reads it again.
+        WIN11_CENTERED.store(u32::MAX, Ordering::Relaxed);
+        AUTO_HIDE.store(u32::MAX, Ordering::Relaxed);
         LIGHT_THEME.store(
             hkcu_dword(THEME_KEY, THEME_VALUE).unwrap_or(0).min(1),
             Ordering::Relaxed,
@@ -587,9 +653,16 @@ mod win {
     }
 
     /// Win11 with centered taskbar icons: the only case where the far-left
-    /// anchor is offered.
+    /// anchor is offered. Cached because placement runs every tick; the
+    /// setting-change / TaskbarCreated paths invalidate the cache.
     unsafe fn win11_centered_taskbar() -> bool {
-        hkcu_dword(TASKBAR_KEY, TASKBAR_VALUE) == Some(1)
+        let cached = WIN11_CENTERED.load(Ordering::Relaxed);
+        if cached != u32::MAX {
+            return cached == 1;
+        }
+        let centered = hkcu_dword(TASKBAR_KEY, TASKBAR_VALUE) == Some(1);
+        WIN11_CENTERED.store(u32::from(centered), Ordering::Relaxed);
+        centered
     }
 
     /// Whether the effective theme is light (config override wins over the
@@ -784,6 +857,24 @@ mod win {
         monitor: isize,
     }
 
+    /// Whether the shell's auto-hide setting is enabled. The state is global
+    /// (per shell), not per bar; `ABM_GETSTATE` returns it without reporting
+    /// the current visibility, which the geometry check in
+    /// [`taskbar_info_for`] supplies.
+    unsafe fn taskbar_auto_hide_enabled() -> bool {
+        let cached = AUTO_HIDE.load(Ordering::Relaxed);
+        if cached != u32::MAX {
+            return cached == 1;
+        }
+        let mut data = APPBARDATA {
+            cbSize: std::mem::size_of::<APPBARDATA>() as u32,
+            ..Default::default()
+        };
+        let enabled = (SHAppBarMessage(ABM_GETSTATE, &mut data) as u32 & ABS_AUTOHIDE) != 0;
+        AUTO_HIDE.store(u32::from(enabled), Ordering::Relaxed);
+        enabled
+    }
+
     /// Geometry for one specific taskbar window, or `None` when that bar is
     /// not currently on screen (auto-hidden, or shell not ready).
     ///
@@ -838,6 +929,18 @@ mod win {
             return None;
         }
         let vertical = (r.bottom - r.top) > (r.right - r.left);
+        // Auto-hide leaves only a thin strip of the bar on screen. Geometry
+        // alone would still place the overlay partly off-screen; make the
+        // "hidden" state explicit and keep the overlay hidden while the user
+        // is not revealing the bar.
+        if taskbar_auto_hide_enabled() {
+            let visible_w = r.right.min(mon_rect.right) - r.left.max(mon_rect.left);
+            let visible_h = r.bottom.min(mon_rect.bottom) - r.top.max(mon_rect.top);
+            let thickness = if vertical { visible_w } else { visible_h };
+            if thickness <= 4 {
+                return None;
+            }
+        }
         let left_edge = vertical && r.left <= mon_rect.left;
         Some(TaskbarInfo {
             rect: r,
@@ -1105,16 +1208,17 @@ mod win {
         }
         let mut class_buf = [0u16; 128];
         let class_len = GetClassNameW(hit, &mut class_buf).max(0) as usize;
-        let mut title_buf = [0u16; 160];
-        let title_len = GetWindowTextW(hit, &mut title_buf).max(0) as usize;
         let mut pid = 0u32;
         GetWindowThreadProcessId(hit, Some(&mut pid));
+        // Do not call GetWindowTextW here: it sends WM_GETTEXT to another
+        // process and can block this message thread if that window is hung.
+        // Class + PID is enough to identify a diagnostic occluder and avoids
+        // writing the user's window title into the shared log.
         log_event(
             "WARN",
             &format!(
-                "overlay center covered by class='{}' title='{}' pid={pid}",
+                "overlay center covered by class='{}' pid={pid}",
                 String::from_utf16_lossy(&class_buf[..class_len]),
-                String::from_utf16_lossy(&title_buf[..title_len]),
             ),
         );
     }
@@ -1529,68 +1633,41 @@ mod win {
         render_layered(hwnd, &row, ov.vertical);
     }
 
-    /// Insert the current CPU/MEM sample into the history database and prune
-    /// old rows periodically. A failed open is retried every 300 ticks (ten
-    /// minutes at the default interval); write failures are logged once.
+    /// Queue the current CPU/MEM sample for the background history writer.
+    /// The UI thread never opens or writes SQLite: an old-database rollup
+    /// backfill or a prune/VACUUM can take seconds, which would freeze the
+    /// taskbar message loop. The writer owns the open/insert/prune policy and
+    /// its own failure logging.
     fn record_history(cfg: &Config, now: i64, snapshot: &sysvitals_core::Snapshot) {
         if !cfg.history.enabled {
             return;
         }
-        let tick = TICK_COUNT.with(|c| {
-            let v = c.get().wrapping_add(1);
-            c.set(v);
-            v
-        });
-        STORE.with(|s| {
-            let mut guard = s.borrow_mut();
-            if guard.is_none() && (tick == 1 || tick % 300 == 0) {
-                if let Ok(path) = sysvitals_core::config::history_path() {
-                    if let Some(parent) = path.parent() {
-                        let _ = std::fs::create_dir_all(parent);
+        HISTORY_WRITER.with(|slot| {
+            let mut writer = slot.borrow_mut();
+            if writer.is_none() && !HISTORY_WRITER_FAILED.with(|failed| failed.get()) {
+                let log: sysvitals_core::history_writer::LogFn =
+                    Arc::new(|level: &str, message: &str| log_event(level, message));
+                match HistoryWriter::spawn(log) {
+                    Ok(started) => {
+                        log_event("INFO", "history writer started");
+                        *writer = Some(started);
                     }
-                    match sysvitals_core::Store::open(&path) {
-                        Ok(store) => {
-                            let rollup = if store.rollup_ready() {
-                                "ready"
-                            } else {
-                                "unavailable, raw-only fallback"
-                            };
-                            log_event(
-                                "INFO",
-                                &format!(
-                                    "history store opened: {} (rollup {rollup})",
-                                    path.display()
-                                ),
-                            );
-                            *guard = Some(store);
-                        }
-                        Err(e) => {
-                            log_event(
-                                "WARN",
-                                &format!(
-                                    "history store failed to open ({}): {}",
-                                    path.display(),
-                                    e
-                                ),
-                            );
-                            *guard = None;
-                        }
+                    Err(e) => {
+                        HISTORY_WRITER_FAILED.with(|failed| failed.set(true));
+                        log_event(
+                            "WARN",
+                            &format!("history writer unavailable: {e}; history disabled"),
+                        );
                     }
                 }
             }
-            if let Some(store) = guard.as_ref() {
-                if let Err(e) = store.insert(now, snapshot.cpu_pct, snapshot.mem_pct) {
-                    if !STORE_WRITE_ERROR_LOGGED.swap(true, Ordering::Relaxed) {
-                        log_event("WARN", &format!("history insert failed: {e}"));
-                    }
-                }
-                if tick % 300 == 0 {
-                    if let Err(e) = store.prune(now, cfg.history.retention_days) {
-                        if !STORE_WRITE_ERROR_LOGGED.swap(true, Ordering::Relaxed) {
-                            log_event("WARN", &format!("history prune failed: {e}"));
-                        }
-                    }
-                }
+            if let Some(writer) = writer.as_ref() {
+                writer.record(
+                    now,
+                    snapshot.cpu_pct,
+                    snapshot.mem_pct,
+                    cfg.history.retention_days,
+                );
             }
         });
     }
@@ -1875,9 +1952,12 @@ mod win {
             return;
         }
         let loaded =
-            sysvitals_core::config::config_path().and_then(|p| Config::load(&p).map(|(c, _)| c));
-        let loaded = match loaded {
-            Ok(c) => c,
+            sysvitals_core::config::config_path().and_then(|p| Config::load_with_source(&p));
+        let (loaded, source) = match loaded {
+            Ok((c, issues, source)) => {
+                log_config_issues(&issues);
+                (c, source)
+            }
             Err(e) => {
                 // Keep the last good config. Do not advance CONFIG_MTIME, so a
                 // fixed file is picked up on the next poll; throttle the log
@@ -1890,8 +1970,21 @@ mod win {
         };
         CONFIG_MTIME.store(current, Ordering::Relaxed);
         CONFIG_ERROR_MTIME.store(0, Ordering::Relaxed);
+        CONFIG_FROM_FILE.store(
+            source == sysvitals_core::config::ConfigSource::File,
+            Ordering::Relaxed,
+        );
         store_config(loaded.clone());
-        apply_auto_start(&loaded);
+        // A missing file (for example after saving a corrupt config aside)
+        // is not an explicit "auto-start off" choice. Only an existing,
+        // parsed file may apply the platform side effect.
+        if source == sysvitals_core::config::ConfigSource::File {
+            apply_auto_start(&loaded);
+        } else {
+            // Let a later re-created config apply its value again, even if it
+            // matches the last one we applied.
+            APPLIED_AUTO_START.store(u32::MAX, Ordering::Relaxed);
+        }
         log_event(
             "INFO",
             &format!(
@@ -1933,65 +2026,83 @@ mod win {
 
     // ------------------------------------------------------- child process launch
 
-    /// Whether the child process behind `slot` is still running. Reaps the
-    /// handle when the process has exited.
-    fn child_alive(slot: &std::cell::RefCell<Option<HANDLE>>) -> bool {
-        let mut borrow = slot.borrow_mut();
-        let Some(handle) = borrow.as_ref() else {
+    /// Whether the Settings child is still running. Reaps the handle when the
+    /// process has exited. Never blocks the message thread.
+    fn settings_child_alive() -> bool {
+        let mut slot = SETTINGS_PROCESS.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(raw) = *slot else {
             return false;
         };
+        let handle = HANDLE(raw as *mut std::ffi::c_void);
         if handle.is_invalid() {
-            *borrow = None;
+            *slot = None;
             return false;
         }
-        let wait = unsafe { WaitForSingleObject(*handle, 0) };
-        if wait == WAIT_TIMEOUT {
-            true
-        } else {
-            let _ = unsafe { CloseHandle(*handle) };
-            *borrow = None;
-            false
+        match unsafe { WaitForSingleObject(handle, 0) } {
+            WAIT_TIMEOUT => true,
+            WAIT_OBJECT_0 => {
+                let _ = unsafe { CloseHandle(handle) };
+                *slot = None;
+                false
+            }
+            _ => {
+                // WAIT_FAILED or an unexpected state: the handle can no
+                // longer be trusted. Close it and let the next click relaunch.
+                let _ = unsafe { CloseHandle(handle) };
+                *slot = None;
+                log_event("WARN", "settings process wait failed; handle dropped");
+                false
+            }
         }
     }
 
-    /// Terminate the process behind `slot` if it is still running. The handle
-    /// is closed and the slot cleared either way. Returns `true` only when a
-    /// live process was terminated. `wait_for_exit` blocks briefly until the
-    /// process object is signaled, which also guarantees that a child's named
-    /// single-instance mutex has been released before a replacement starts.
-    fn terminate_child(
-        slot: &std::cell::RefCell<Option<HANDLE>>,
-        label: &str,
-        wait_for_exit: bool,
-    ) -> bool {
-        let mut borrow = slot.borrow_mut();
-        let Some(handle) = borrow.as_ref() else {
+    /// Terminate the Settings child if it is still running. The handle is
+    /// closed and the slot cleared either way. `wait_for_exit` is only used
+    /// from the background launch worker (a replacement must wait for the old
+    /// instance's single-instance mutex to be released); the UI paths pass
+    /// `false` so closing never blocks the message loop.
+    fn terminate_settings(wait_for_exit: bool) -> bool {
+        // Take the handle out of the shared slot before any blocking wait:
+        // the UI thread must be able to call `settings_child_alive()` while a
+        // replacement worker waits up to 2s for the old process object.
+        let raw = {
+            let mut slot = SETTINGS_PROCESS.lock().unwrap_or_else(|e| e.into_inner());
+            slot.take()
+        };
+        let Some(raw) = raw else {
             return false;
         };
+        let handle = HANDLE(raw as *mut std::ffi::c_void);
         if handle.is_invalid() {
-            *borrow = None;
             return false;
         }
         // Already exited: reap quietly, treat as "nothing to close".
-        if unsafe { WaitForSingleObject(*handle, 0) } != WAIT_TIMEOUT {
-            let _ = unsafe { CloseHandle(*handle) };
-            *borrow = None;
-            return false;
-        }
-        let _ = unsafe { TerminateProcess(*handle, 0) };
-        if wait_for_exit {
-            // Waits for the process object, which is signaled only after the
-            // child's handles are closed — including its single-instance
-            // mutex. Without this, a replacement launched immediately could
-            // see the dying instance and exit.
-            let wait = unsafe { WaitForSingleObject(*handle, 2_000) };
-            if wait == WAIT_TIMEOUT {
-                log_event("WARN", &format!("{label} did not exit within 2s"));
+        match unsafe { WaitForSingleObject(handle, 0) } {
+            WAIT_OBJECT_0 => {
+                let _ = unsafe { CloseHandle(handle) };
+                return false;
+            }
+            WAIT_TIMEOUT => {}
+            _ => {
+                let _ = unsafe { CloseHandle(handle) };
+                log_event("WARN", "settings process wait failed; handle dropped");
+                return false;
             }
         }
-        let _ = unsafe { CloseHandle(*handle) };
-        *borrow = None;
-        log_event("INFO", &format!("{label} process closed by indicator"));
+        let _ = unsafe { TerminateProcess(handle, 0) };
+        if wait_for_exit {
+            // The process object is signaled only after the child's handles
+            // are closed — including its single-instance mutex. Without this,
+            // a replacement launched immediately could see the dying instance
+            // and exit. This runs on a worker thread, never the UI thread,
+            // and the slot is already empty so the UI never waits on us.
+            let wait = unsafe { WaitForSingleObject(handle, 2_000) };
+            if wait != WAIT_OBJECT_0 {
+                log_event("WARN", "settings window did not exit within 2s");
+            }
+        }
+        let _ = unsafe { CloseHandle(handle) };
+        log_event("INFO", "settings window process closed by indicator");
         true
     }
 
@@ -2007,9 +2118,17 @@ mod win {
         if handle.is_invalid() {
             return false;
         }
-        if unsafe { WaitForSingleObject(handle, 0) } != WAIT_TIMEOUT {
-            let _ = unsafe { CloseHandle(handle) };
-            return false;
+        match unsafe { WaitForSingleObject(handle, 0) } {
+            WAIT_TIMEOUT => {}
+            WAIT_OBJECT_0 => {
+                let _ = unsafe { CloseHandle(handle) };
+                return false;
+            }
+            _ => {
+                log_event("WARN", "history process wait failed; handle dropped");
+                let _ = unsafe { CloseHandle(handle) };
+                return false;
+            }
         }
         let _ = unsafe { TerminateProcess(handle, 0) };
         let _ = unsafe { CloseHandle(handle) };
@@ -2022,11 +2141,9 @@ mod win {
     /// empty) and leaves Settings orphaned after Quit.
     fn close_children() {
         let _ = history_terminate();
-        SETTINGS_PROCESS.with(|slot| {
-            // Quit/restart: the relaunch is delayed by the caller, so there is
-            // no single-instance race to wait out here.
-            let _ = terminate_child(slot, "settings window", false);
-        });
+        // Quit/restart: the relaunch is delayed by the caller, so there is no
+        // single-instance race to wait out here; never block the UI thread.
+        let _ = terminate_settings(false);
     }
 
     /// Create the kill-on-close job that owns every panel child. Keeping the
@@ -2076,8 +2193,8 @@ mod win {
     }
 
     /// Spawn `exe_path` with the given argv tail. Returns the process handle
-    /// (the thread handle is closed here). Used both by the synchronous
-    /// Settings launch and by the background resident-history launcher.
+    /// (the thread handle is closed here). Used by the background Settings
+    /// and resident-history launchers; never call this from the UI thread.
     fn spawn_process(exe_path: &str, dir: &str, args: Option<&str>) -> Result<HANDLE, String> {
         let exe_w = utf16(exe_path);
         let dir_w = utf16(dir);
@@ -2117,57 +2234,11 @@ mod win {
         }
     }
 
-    fn launch_child_inner(
-        exe_name: &str,
-        args: Option<&str>,
-        slot: &std::cell::RefCell<Option<HANDLE>>,
-    ) -> bool {
-        let Some(dir) = current_exe_dir() else {
-            log_event(
-                "WARN",
-                &format!("launch_child: cannot determine exe directory: {exe_name}"),
-            );
-            return false;
-        };
-        let exe_path = format!("{dir}\\{exe_name}");
-        if !std::path::Path::new(&exe_path).exists() {
-            log_event("WARN", &format!("launch_child: not found: {exe_path}"));
-            return false;
-        }
-        log_event(
-            "INFO",
-            &format!(
-                "launching {exe_name}{}",
-                args.map(|a| format!(" {a}")).unwrap_or_default()
-            ),
-        );
-        let started = Instant::now();
-        match spawn_process(&exe_path, &dir, args) {
-            Ok(handle) => {
-                unsafe { assign_to_child_job(handle) };
-                *slot.borrow_mut() = Some(handle);
-                log_event(
-                    "INFO",
-                    &format!("launched {exe_name} in {}ms", started.elapsed().as_millis()),
-                );
-                true
-            }
-            Err(e) => {
-                log_event(
-                    "WARN",
-                    &format!("launch_child: CreateProcessW failed for {exe_name}: {e}"),
-                );
-                false
-            }
-        }
-    }
-
-    /// Launch the external settings process (`SysVitalsSettings.exe`). The
-    /// launch is synchronous (`CreateProcessW` does not pump messages), so
-    /// the slot liveness check alone is enough; there is no in-flight window
-    /// to guard. Pass the parent pid so the panel can close itself if the
-    /// indicator dies without running its quit path, and the clicked
-    /// indicator's rect so the window opens on that indicator's monitor.
+    /// Launch the external settings process (`SysVitalsSettings.exe`) on a
+    /// worker thread. `CreateProcessW` has been measured at hundreds of
+    /// milliseconds to several seconds on loaded hosts, and replacing a
+    /// window on another monitor additionally waits for the old instance's
+    /// single-instance mutex. Neither may block the indicator message loop.
     fn launch_settings(hwnd: HWND) {
         let mut args = format!("--parent-pid {}", unsafe { GetCurrentProcessId() });
         if let Some(anchor) = window_anchor_logical(hwnd) {
@@ -2184,22 +2255,97 @@ mod win {
             }
         }
         let monitor = window_monitor_id(hwnd) as isize;
-        SETTINGS_PROCESS.with(|slot| {
-            if child_alive(slot) {
-                if SETTINGS_MONITOR.load(Ordering::Relaxed) == monitor {
-                    log_event("INFO", "settings launch skipped: already on this monitor");
-                    return;
+        let alive = settings_child_alive();
+        if alive && SETTINGS_MONITOR.load(Ordering::Relaxed) == monitor {
+            log_event("INFO", "settings launch skipped: already on this monitor");
+            return;
+        }
+        if SETTINGS_LAUNCHING.swap(true, Ordering::SeqCst) {
+            log_event(
+                "INFO",
+                "settings launch skipped: another launch is in flight",
+            );
+            return;
+        }
+        if alive {
+            // GPUI cannot move an existing window, so a Settings click on
+            // another screen closes the window and reopens it there. Every
+            // setting is persisted on change, so nothing is lost except
+            // transient scroll/focus state.
+            log_event("INFO", "settings: moving window to the clicked monitor");
+        }
+        let Some(dir) = current_exe_dir() else {
+            SETTINGS_LAUNCHING.store(false, Ordering::SeqCst);
+            log_event("WARN", "launch_settings: cannot determine exe directory");
+            return;
+        };
+        let exe_path = format!("{dir}\\SysVitalsSettings.exe");
+        if !std::path::Path::new(&exe_path).exists() {
+            SETTINGS_LAUNCHING.store(false, Ordering::SeqCst);
+            log_event("WARN", &format!("launch_settings: not found: {exe_path}"));
+            return;
+        }
+        log_event(
+            "INFO",
+            &format!("launching SysVitalsSettings.exe (replace={alive}) {args}"),
+        );
+        let sentinel_raw = sentinel_hwnd().0 as isize;
+        let replace = alive;
+        let spawn = std::thread::Builder::new()
+            .name("sysvitals-settings".to_string())
+            .spawn(move || {
+                if replace {
+                    // Must run on the worker: waits up to 2s for the old
+                    // instance's named mutex to be released.
+                    let _ = terminate_settings(true);
                 }
-                // GPUI cannot move an existing window, so a Settings click on
-                // another screen closes the window and reopens it there.
-                // Every setting is persisted on change, so nothing is lost
-                // except transient scroll/focus state.
-                log_event("INFO", "settings: moving window to the clicked monitor");
-                let _ = terminate_child(slot, "settings window", true);
-            }
-            SETTINGS_MONITOR.store(monitor, Ordering::Relaxed);
-            let _ = launch_child_inner("SysVitalsSettings.exe", Some(&args), slot);
-        });
+                let started = Instant::now();
+                match spawn_process(&exe_path, &dir, Some(&args)) {
+                    Ok(handle) => {
+                        unsafe { assign_to_child_job(handle) };
+                        if QUITTING.load(Ordering::Relaxed) {
+                            let _ = unsafe { TerminateProcess(handle, 0) };
+                            let _ = unsafe { CloseHandle(handle) };
+                            log_event("INFO", "settings launch cancelled by quit");
+                        } else {
+                            *SETTINGS_PROCESS.lock().unwrap_or_else(|e| e.into_inner()) =
+                                Some(handle.0 as isize);
+                            // Record the monitor only after the process is
+                            // actually alive; a failed replacement must not
+                            // make a later click on the new monitor a no-op.
+                            SETTINGS_MONITOR.store(monitor, Ordering::Relaxed);
+                            log_event(
+                                "INFO",
+                                &format!(
+                                    "launched SysVitalsSettings.exe in {}ms",
+                                    started.elapsed().as_millis()
+                                ),
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        log_event(
+                            "WARN",
+                            &format!("launch_settings: CreateProcessW failed: {e}"),
+                        );
+                    }
+                }
+                SETTINGS_LAUNCHING.store(false, Ordering::SeqCst);
+                if sentinel_raw != 0 {
+                    let _ = unsafe {
+                        PostMessageW(
+                            Some(HWND(sentinel_raw as *mut std::ffi::c_void)),
+                            WM_APP_SETTINGS_READY,
+                            WPARAM(0),
+                            LPARAM(0),
+                        )
+                    };
+                }
+            });
+        if spawn.is_err() {
+            SETTINGS_LAUNCHING.store(false, Ordering::SeqCst);
+            log_event("WARN", "launch_settings: worker thread spawn failed");
+        }
     }
 
     /// Whether the resident history framework is running or being launched.
@@ -2218,20 +2364,27 @@ mod win {
             *slot = None;
             return false;
         }
-        if unsafe { WaitForSingleObject(handle, 0) } == WAIT_TIMEOUT {
-            true
-        } else {
-            if !QUITTING.load(Ordering::Relaxed) {
-                let mut code = 0u32;
-                let _ = unsafe { GetExitCodeProcess(handle, &mut code) };
-                log_event(
-                    "WARN",
-                    &format!("history resident exited unexpectedly (exit code {code})"),
-                );
+        match unsafe { WaitForSingleObject(handle, 0) } {
+            WAIT_TIMEOUT => true,
+            WAIT_OBJECT_0 => {
+                if !QUITTING.load(Ordering::Relaxed) {
+                    let mut code = 0u32;
+                    let _ = unsafe { GetExitCodeProcess(handle, &mut code) };
+                    log_event(
+                        "WARN",
+                        &format!("history resident exited unexpectedly (exit code {code})"),
+                    );
+                }
+                let _ = unsafe { CloseHandle(handle) };
+                *slot = None;
+                false
             }
-            let _ = unsafe { CloseHandle(handle) };
-            *slot = None;
-            false
+            _ => {
+                log_event("WARN", "history process wait failed; handle dropped");
+                let _ = unsafe { CloseHandle(handle) };
+                *slot = None;
+                false
+            }
         }
     }
 
@@ -2987,6 +3140,8 @@ mod win {
         }
         if TASKBAR_CREATED.get().is_some_and(|created| *created == msg) {
             log_event("INFO", "TaskbarCreated received; reconciling overlays");
+            WIN11_CENTERED.store(u32::MAX, Ordering::Relaxed);
+            AUTO_HIDE.store(u32::MAX, Ordering::Relaxed);
             let _ = KillTimer(Some(hwnd), TIMER_REBIND);
             if find_taskbar().is_some() {
                 reconcile_overlays();
@@ -2998,6 +3153,12 @@ mod win {
         }
         if msg == WM_APP_HISTORY_READY {
             sync_history_state();
+            return LRESULT(0);
+        }
+        if msg == WM_APP_SETTINGS_READY {
+            // Reap a child that exited immediately after launch; the worker
+            // has already stored or cleared the handle.
+            let _ = settings_child_alive();
             return LRESULT(0);
         }
         if msg == WM_DISPLAYCHANGE {
@@ -3046,6 +3207,12 @@ mod win {
                 }
                 TIMER_WATCH => {
                     if !QUITTING.load(Ordering::Relaxed) {
+                        // Re-probe shell/taskbar preferences at a low cadence;
+                        // the per-tick geometry code then reads the cache
+                        // instead of making a synchronous shell/registry
+                        // call on every overlay.
+                        AUTO_HIDE.store(u32::MAX, Ordering::Relaxed);
+                        WIN11_CENTERED.store(u32::MAX, Ordering::Relaxed);
                         reconcile_overlays();
                     }
                     return LRESULT(0);
@@ -3096,7 +3263,10 @@ mod win {
             prune_old_logs();
             log_event(
                 "INFO",
-                &format!("SysVitals starting (version={})", env!("CARGO_PKG_VERSION")),
+                &format!(
+                    "SysVitals starting (version={}, build={SV_BUILD_ID})",
+                    env!("CARGO_PKG_VERSION")
+                ),
             );
             log_event(
                 "INFO",
@@ -3116,7 +3286,9 @@ mod win {
                     cfg.startup.auto_start,
                 ),
             );
-            if !CONFIG_LOAD_FAILED.load(Ordering::Relaxed) {
+            if !CONFIG_LOAD_FAILED.load(Ordering::Relaxed)
+                && CONFIG_FROM_FILE.load(Ordering::Relaxed)
+            {
                 apply_auto_start(&cfg);
             }
             let centered = win11_centered_taskbar();
@@ -3149,6 +3321,7 @@ mod win {
                 ..Default::default()
             };
             if RegisterClassExW(&wc) == 0 {
+                log_event("WARN", "overlay window class registration failed");
                 return;
             }
 
@@ -3173,6 +3346,7 @@ mod win {
             };
             if RegisterClassExW(&sentinel_wc) == 0 {
                 log_event("WARN", "sentinel class registration failed");
+                return;
             }
             let sentinel_title = utf16("SysVitalsSentinel");
             let sentinel = CreateWindowExW(
@@ -3199,7 +3373,13 @@ mod win {
                     let _ = SetTimer(Some(sentinel), TIMER_HISTORY, HISTORY_SYNC_MS, None);
                     let _ = SetTimer(Some(sentinel), TIMER_WATCH, WATCHDOG_MS, None);
                 }
-                Err(_) => log_event("WARN", "sentinel window creation failed"),
+                Err(e) => {
+                    log_event(
+                        "WARN",
+                        &format!("sentinel window creation failed: {e}; exiting"),
+                    );
+                    return;
+                }
             }
 
             // Create one overlay per existing taskbar, then paint the first
