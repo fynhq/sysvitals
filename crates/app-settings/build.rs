@@ -3,11 +3,12 @@
 //!   the settings window shows the SysVitals icon in its title bar and
 //!   taskbar entry.
 //! - On every host, computes the human-readable build identifier shown in the
-//!   settings footer: `v{semver}` when HEAD sits on an annotated tag (a
-//!   release build), `v{semver}_{short-hash} (dev)` on any other commit, and
-//!   just `v{semver}` when git or the repository metadata is unavailable
-//!   (tarballs, vendored copies, cache warm-up). The semver is read from
-//!   `CARGO_PKG_VERSION`, which the workspace root propagates.
+//!   settings footer: `v{semver}` when HEAD sits on a `v*` tag (a release
+//!   build), `v{semver}_{short-hash} (dev)` on any other commit — including
+//!   `build-*` acceptance tags — and just `v{semver}` when git or the
+//!   repository metadata is unavailable (tarballs, vendored copies, cache
+//!   warm-up). The semver is read from `CARGO_PKG_VERSION`, which the
+//!   workspace root propagates.
 //!
 //! The CI build jobs pass `fetch-tags: true` to the checkout, so an annotated
 //! release tag is visible here; local builds without git metadata fall back to
@@ -108,15 +109,19 @@ fn emit_build_id() {
 
     let version = std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.0.0".into());
 
-    // `git describe --tags --exact-match` succeeds only when HEAD points at a
-    // tagged commit — the release signal. A failed lookup means "dev build".
+    // `git describe --tags --exact-match` succeeds for any tag. Only a `v*`
+    // tag is a release signal; acceptance tags (`build-*`) point at the same
+    // commit the dev package was built from, so they keep the hash + `(dev)`
+    // stamp instead of looking like a release. A failed lookup means "dev".
     let tagged = git(&repo, &["describe", "--tags", "--exact-match"]);
-    let stamp = match tagged {
-        Some(_) => format!("v{version}"),
-        None => match git(&repo, &["rev-parse", "--short", "HEAD"]) {
+    let release = tagged.as_deref().is_some_and(|tag| tag.starts_with('v'));
+    let stamp = if release {
+        format!("v{version}")
+    } else {
+        match git(&repo, &["rev-parse", "--short", "HEAD"]) {
             Some(hash) => format!("v{version}_{hash} (dev)"),
             None => format!("v{version}"),
-        },
+        }
     };
     println!("cargo:rustc-env=SV_BUILD_ID={stamp}");
 }
