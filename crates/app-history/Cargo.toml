@@ -31,12 +31,6 @@ windows = { workspace = true }
 # feature-selection notes.
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "=0.2.191"
-objc2 = "=0.6.5"
-objc2-app-kit = { version = "=0.3.2", default-features = false, features = [
-    "NSColor",
-    "NSColorSpace",
-    "objc2-core-foundation",
-] }
 
 [target.'cfg(windows)'.build-dependencies]
 winres = "=0.1.12"

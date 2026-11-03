@@ -195,8 +195,6 @@ dependencies = [
  "chrono",
  "gpui-kit",
  "libc",
- "objc2 0.6.5",
- "objc2-app-kit 0.3.2",
  "sysvitals-core",
  "sysvitals-panel",
  "windows 0.62.2",
@@ -6311,7 +6309,6 @@ dependencies = [
  "rusqlite",
  "serde",
  "sysinfo 0.40.0",
- "thiserror 2.0.21",
  "toml 1.1.8+spec-1.1.0",
  "windows 0.62.2",
 ]

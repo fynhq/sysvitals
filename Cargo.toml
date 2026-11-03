@@ -29,7 +29,6 @@ sysinfo = { version = "=0.40.0", default-features = false, features = ["system",
 serde = { version = "=1.0.229", features = ["derive"] }
 toml = "=1.1.8"
 anyhow = "=1.0.104"
-thiserror = "=2.0.21"
 directories = "=6.0.0"
 # `bundled` statically embeds SQLite so there is no system-library dependency
 # on Windows/macOS. History storage is the only consumer.
@@ -82,4 +81,7 @@ opt-level = 2
 opt-level = 3
 lto = "thin"
 codegen-units = 1
-strip = true
+# Keep the symbol table so a release-build panic backtrace is resolvable;
+# only debuginfo is stripped. The crash hook logs a backtrace, and fully
+# stripping symbols made those frames address-only.
+strip = "debuginfo"
