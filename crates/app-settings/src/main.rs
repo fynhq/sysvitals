@@ -39,7 +39,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use sysvitals_core::config::{
-    ALLOWED_INTERVAL_MS, ALLOWED_ITEM_SPACING_PX, ALLOWED_LEFT_MARGIN_PX,
+    ALLOWED_INTERVAL_MS, ALLOWED_ITEM_SPACING_PX, ALLOWED_LEFT_MARGIN_PX, MAX_PREFIX_CHARS,
 };
 use sysvitals_core::{Anchor, Config, Language, Theme, t};
 use sysvitals_panel::{
@@ -454,6 +454,10 @@ struct SettingsView {
     show_resources: bool,
     show_network: bool,
     auto_start: bool,
+    /// Set only when the user actually clicks the launch-at-login switch.
+    /// A config value inherited from defaults must not become an explicit
+    /// platform side effect merely because another setting was saved.
+    auto_start_touched: bool,
     // Index-based selections
     lang_idx: usize,
     interval_idx: usize,
@@ -616,19 +620,30 @@ impl SettingsView {
             }));
         }
         for state in [&prefix_cpu, &prefix_mem, &prefix_up, &prefix_down] {
-            _subscriptions.push(
-                cx.subscribe(state, |this: &mut Self, _, ev: &InputEvent, cx| {
+            _subscriptions.push(cx.subscribe_in(
+                state,
+                &*window,
+                |this: &mut Self, state, ev: &InputEvent, window, cx| {
                     match ev {
-                        // Prefix text commits when the field loses focus or
-                        // the user presses Enter, not on every keystroke.
-                        // Safe to read the input states here: events are
-                        // dispatched through the app's effect queue, so the
-                        // emitting entity's borrow is already released.
-                        InputEvent::Blur | InputEvent::PressEnter { .. } => this.save(cx),
+                        // Truncate only on commit. Doing it on every Change
+                        // would rewrite the field while an IME composition is
+                        // active and can break Chinese/Japanese input.
+                        // Blur/Enter is after composition has ended, and the
+                        // updated value is what `save` reads immediately.
+                        InputEvent::Blur | InputEvent::PressEnter { .. } => {
+                            let current = state.read(cx).value().to_string();
+                            let cleaned: String = current.chars().take(MAX_PREFIX_CHARS).collect();
+                            if cleaned != current {
+                                state.update(cx, |state, cx| {
+                                    state.set_value(cleaned, window, cx);
+                                });
+                            }
+                            this.save(cx);
+                        }
                         _ => {}
                     }
-                }),
-            );
+                },
+            ));
         }
 
         // macOS has no default application menu in this child process, so
@@ -650,6 +665,7 @@ impl SettingsView {
             show_resources: cfg.display.show_resources,
             show_network: cfg.display.show_network,
             auto_start: cfg.startup.auto_start,
+            auto_start_touched: false,
             cfg,
             prefix_cpu,
             prefix_mem,
@@ -771,6 +787,8 @@ impl SettingsView {
         cfg.display.show_resources = self.show_resources;
         cfg.display.show_network = self.show_network;
         cfg.startup.auto_start = self.auto_start;
+        cfg.startup.auto_start_explicit =
+            self.auto_start_touched || cfg.startup.auto_start_explicit;
         cfg.display.prefix.cpu = self.prefix_cpu.read(cx).value().to_string();
         cfg.display.prefix.mem = self.prefix_mem.read(cx).value().to_string();
         cfg.display.prefix.up = self.prefix_up.read(cx).value().to_string();
@@ -787,7 +805,7 @@ impl SettingsView {
     /// result is unchanged, so merely focusing away does not bump the mtime
     /// and make the indicator reload/re-sample.
     fn save(&mut self, cx: &App) {
-        let mut cfg = self.collect_config(cx);
+        let ui = self.collect_config(cx);
         let Ok(path) = sysvitals_core::config::config_path() else {
             log_event(
                 "WARN",
@@ -796,18 +814,25 @@ impl SettingsView {
             self.save_failed.set(true);
             return;
         };
-        match Config::load(&path) {
-            Ok((disk, _)) => {
-                cfg.history = disk.history;
-                cfg.sample.cpu_smoothing = disk.sample.cpu_smoothing;
-            }
+        // Start from the file currently on disk so every field this window
+        // does not own (history.*, sample.cpu_smoothing, and any future
+        // non-UI field) survives. Only the UI-owned fields are overlaid.
+        let mut cfg = match Config::load(&path) {
+            Ok((disk, _)) => disk,
             Err(e) => {
                 log_event(
                     "WARN",
                     &format!("settings: config merge read failed: {e}; keeping UI values"),
                 );
+                self.cfg.clone()
             }
-        }
+        };
+        let disk_auto_start_explicit = cfg.startup.auto_start_explicit;
+        cfg.overlay_ui_from(&ui);
+        // A manual edit that already marked the preference explicit must not
+        // be downgraded just because this window did not touch the switch.
+        cfg.startup.auto_start_explicit |= disk_auto_start_explicit;
+        cfg.sanitize();
         let text = match cfg.to_toml_string() {
             Ok(text) => text,
             Err(e) => {
@@ -1281,6 +1306,7 @@ impl Render for SettingsView {
                     .checked(self.auto_start)
                     .on_click(cx.listener(|this, checked: &bool, _, cx| {
                         this.auto_start = *checked;
+                        this.auto_start_touched = true;
                         this.save(cx);
                         cx.notify();
                     })),
@@ -1561,9 +1587,44 @@ fn prefix_cell(
         .child(blur_on_outside(div().w_full()).child(field))
 }
 
-/// Load the config, backing up a malformed file before falling back to
-/// defaults. Without the backup the first instant-save would overwrite the
-/// user's (hand-edited) file with defaults.
+/// Move a corrupt config aside before the settings window can overwrite it
+/// with defaults. Returns the backup path when the rename succeeded.
+fn backup_corrupt_config(path: &std::path::Path, reason: &str) -> Option<std::path::PathBuf> {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let backup = path.with_file_name(format!(
+        "config.toml.corrupt-{stamp}-{}",
+        std::process::id()
+    ));
+    match std::fs::rename(path, &backup) {
+        Ok(()) => {
+            log_event(
+                "WARN",
+                &format!(
+                    "settings: {reason}; backed up to {}; using defaults",
+                    backup.display()
+                ),
+            );
+            Some(backup)
+        }
+        Err(e) => {
+            log_event(
+                "WARN",
+                &format!(
+                    "settings: {reason}; could not back up to {} ({e}); using defaults",
+                    backup.display()
+                ),
+            );
+            None
+        }
+    }
+}
+
+/// Load the config, backing up a malformed or non-UTF-8 file before falling
+/// back to defaults. Without the backup the first instant-save would
+/// overwrite the user's (hand-edited) file with defaults.
 fn load_config_with_backup() -> Config {
     let Ok(path) = sysvitals_core::config::config_path() else {
         log_event(
@@ -1585,19 +1646,29 @@ fn load_config_with_backup() -> Config {
             return Config::default();
         }
         Err(e) => {
-            // A sharing violation/permission error is transient: do not move
-            // the user's file aside (the next save would then overwrite the
-            // canonical path with defaults). Only a malformed file is backed
-            // up below.
-            log_event(
-                "WARN",
-                &format!("settings: config read failed: {e}; using defaults"),
-            );
+            // Invalid UTF-8 is malformed content, not a transient sharing
+            // violation: preserve the bytes so a later save cannot destroy
+            // the user's file. Other read errors stay transient and are not
+            // moved aside.
+            if e.kind() == std::io::ErrorKind::InvalidData {
+                let _ = backup_corrupt_config(&path, &format!("config is not valid UTF-8: {e}"));
+            } else {
+                log_event(
+                    "WARN",
+                    &format!("settings: config read failed: {e}; using defaults"),
+                );
+            }
             return Config::default();
         }
     };
     match Config::from_toml_str(&text) {
-        Ok((cfg, _)) => {
+        Ok((cfg, issues)) => {
+            for issue in &issues {
+                log_event(
+                    "WARN",
+                    &format!("settings: config repair {}: {}", issue.field, issue.message),
+                );
+            }
             log_event(
                 "INFO",
                 &format!("settings: config loaded from {}", path.display()),
@@ -1605,19 +1676,7 @@ fn load_config_with_backup() -> Config {
             cfg
         }
         Err(e) => {
-            let stamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            let backup = path.with_file_name(format!("config.toml.corrupt-{stamp}"));
-            let _ = std::fs::rename(&path, &backup);
-            log_event(
-                "WARN",
-                &format!(
-                    "settings: config parse failed: {e}; backed up to {}; using defaults",
-                    backup.display()
-                ),
-            );
+            let _ = backup_corrupt_config(&path, &format!("config parse failed: {e}"));
             Config::default()
         }
     }
@@ -1768,6 +1827,32 @@ fn parse_anchor_monitor() -> Option<DisplayId> {
     None
 }
 
+/// Fit the requested window size into a display's usable work area. GPUI's
+/// `check_given_bounds()` only verifies the window center, so a fixed
+/// 400x720 settings window can otherwise spill above/below a short work area
+/// on a high-DPI laptop. Keep a small breathing margin on every edge.
+fn fit_window_size(
+    requested: gpui_kit::Size<Pixels>,
+    work: Bounds<Pixels>,
+) -> gpui_kit::Size<Pixels> {
+    const MARGIN: f32 = 16.0;
+    let max_w = (f32::from(work.size.width) - 2.0 * MARGIN).max(200.0);
+    let max_h = (f32::from(work.size.height) - 2.0 * MARGIN).max(200.0);
+    size(
+        px(f32::from(requested.width).min(max_w)),
+        px(f32::from(requested.height).min(max_h)),
+    )
+}
+
+fn centered_on_work(work: Bounds<Pixels>, requested: gpui_kit::Size<Pixels>) -> WindowBounds {
+    let fitted = fit_window_size(requested, work);
+    let center = point(
+        px(f32::from(work.origin.x) + f32::from(work.size.width) * 0.5),
+        px(f32::from(work.origin.y) + f32::from(work.size.height) * 0.5),
+    );
+    WindowBounds::Windowed(Bounds::centered_at(center, fitted))
+}
+
 /// Center the settings window on the display that contains the anchor (the
 /// indicator that opened it), so it follows the indicator across monitors.
 /// Falls back to the rectangle probe, then to the default centered placement.
@@ -1781,20 +1866,18 @@ fn settings_window_bounds(
     // `Size` is ambiguous between `gpui::Size<Pixels>` (from `gpui_kit::*`)
     // and the `gpui_component::Size` enum (from `gpui_kit::component::*`);
     // the layout size is the generic geometry type.
-    size: gpui_kit::Size<Pixels>,
+    requested: gpui_kit::Size<Pixels>,
     cx: &App,
 ) -> WindowBounds {
     let Some(anchor) = anchor else {
-        return WindowBounds::centered(size, cx);
+        if let Some(display) = cx.primary_display() {
+            return centered_on_work(display.visible_bounds(), requested);
+        }
+        return WindowBounds::centered(requested, cx);
     };
     if let Some(monitor) = monitor {
         if let Some(display) = cx.displays().into_iter().find(|d| d.id() == monitor) {
-            let work = display.visible_bounds();
-            let center = point(
-                px(f32::from(work.origin.x) + f32::from(work.size.width) * 0.5),
-                px(f32::from(work.origin.y) + f32::from(work.size.height) * 0.5),
-            );
-            return WindowBounds::Windowed(Bounds::centered_at(center, size));
+            return centered_on_work(display.visible_bounds(), requested);
         }
     }
     let probe = point(
@@ -1811,14 +1894,9 @@ fn settings_window_bounds(
                 .find(|d| d.visible_bounds().contains(&probe))
         });
     let Some(display) = display else {
-        return WindowBounds::centered(size, cx);
+        return WindowBounds::centered(requested, cx);
     };
-    let work = display.visible_bounds();
-    let center = point(
-        px(f32::from(work.origin.x) + f32::from(work.size.width) * 0.5),
-        px(f32::from(work.origin.y) + f32::from(work.size.height) * 0.5),
-    );
-    WindowBounds::Windowed(Bounds::centered_at(center, size))
+    centered_on_work(display.visible_bounds(), requested)
 }
 
 /// Quit when the indicator that launched this panel disappears without
