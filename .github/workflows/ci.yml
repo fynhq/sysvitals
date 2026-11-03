@@ -222,20 +222,20 @@ jobs:
               [int]$TimeoutSeconds = 180
             )
             $log = Join-Path $env:TEMP "sysvitals-$Label.log"
-            Write-Host "[smoke] $Label: start"
+            Write-Host "[smoke] ${Label}: start"
             $proc = Start-Process -FilePath $FilePath `
               -ArgumentList ($SetupArgs + "/LOG=`"$log`"") -PassThru
             # `Start-Process -Wait` also waits for processes spawned by Setup
             # (the indicator relaunched after an upgrade), which never exits.
             # Wait for the installer process itself, with a hard timeout.
             if (-not $proc.WaitForExit($TimeoutSeconds * 1000)) {
-              Write-Host "[smoke] $Label: TIMEOUT after $TimeoutSeconds s"
+              Write-Host "[smoke] ${Label}: TIMEOUT after $TimeoutSeconds s"
               if (Test-Path $log) { Get-Content -Path $log -Tail 80 }
               Get-Process SysVitals,SysVitalsSettings,SysVitalsHistory -ErrorAction SilentlyContinue |
                 Format-Table Id, ProcessName, StartTime | Out-String | Write-Host
               throw "$Label timed out after $TimeoutSeconds s"
             }
-            Write-Host "[smoke] $Label: exit $($proc.ExitCode)"
+            Write-Host "[smoke] ${Label}: exit $($proc.ExitCode)"
             return $proc.ExitCode
           }
           $installDir = Join-Path $env:LOCALAPPDATA "Programs\SysVitals"
