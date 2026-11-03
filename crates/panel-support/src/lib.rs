@@ -54,7 +54,7 @@ pub fn os_build_number() -> Option<u32> {
 #[cfg(windows)]
 pub fn hkcu_dword(key: &str, value: &str) -> Option<u32> {
     use windows::Win32::System::Registry::{
-        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, KEY_READ,
+        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, KEY_READ, REG_DWORD,
         REG_VALUE_TYPE,
     };
     let utf16 = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
@@ -88,7 +88,7 @@ pub fn hkcu_dword(key: &str, value: &str) -> Option<u32> {
         )
     };
     let _ = unsafe { RegCloseKey(hkey) };
-    if queried.is_ok() && size >= 4 {
+    if queried.is_ok() && size >= 4 && kind == REG_DWORD {
         Some(u32::from_le_bytes(data))
     } else {
         None
