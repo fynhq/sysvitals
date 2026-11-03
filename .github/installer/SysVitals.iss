@@ -206,9 +206,9 @@ begin
         ', installer={#AppVersion}');
       SuppressibleMsgBox(
         'A newer version of SysVitals (' + InstalledVersion +
-        ') is already installed.' + #13#10 + #13#10 +
+        ') is already installed.' + Chr(13) + Chr(10) + Chr(13) + Chr(10) +
         'This installer is version {#AppVersion}. Downgrading is not supported.' +
-        #13#10 + #13#10 +
+        Chr(13) + Chr(10) + Chr(13) + Chr(10) +
         'Uninstall the newer version first if you need to install this one.',
         mbError, MB_OK, IDOK);
       Result := False;
@@ -220,7 +220,7 @@ begin
     Log('SysVitals is running but no registered installation was found.');
     SuppressibleMsgBox(
       'SysVitals is currently running, but Setup could not find a registered installation.' +
-      #13#10 + #13#10 +
+      Chr(13) + Chr(10) + Chr(13) + Chr(10) +
       'Please close all SysVitals instances and run Setup again.',
       mbError, MB_OK, IDOK);
     Result := False;
