@@ -1,9 +1,10 @@
 //! Sampling layer.
 //!
-//! All OS-specific calls live in this module tree (sysinfo plus two
-//! Windows-only helpers: the PDH CPU counter and the NDIS interface table);
-//! everything else consumes the pure [`Snapshot`] it produces, so each metric
-//! can later be swapped for a native call (`GetSystemTimes`, `GetIfTable2`,
+//! All OS-specific calls live in this module tree (sysinfo plus three
+//! Windows-only helpers: the PDH CPU counter, the NDIS interface table-based
+//! network counters, and the hardware-interface filter used by the sysinfo
+//! fallback); everything else consumes the pure [`Snapshot`] it produces, so
+//! each metric can later be swapped for a native call (`GetSystemTimes`,
 //! `host_statistics`, ...) without changing any caller.
 //!
 //! Correctness rules baked in here, each unit-testable via a
@@ -68,10 +69,12 @@ pub struct Sampler {
 }
 
 impl Sampler {
-    /// Build a sampler and seed the first cumulative-counter / memory
-    /// baselines. `cpu_smoothing` is the `sample.cpu_smoothing` history
-    /// weight (0 disables smoothing); it is fixed for the process lifetime —
-    /// the config poller treats it as a startup-only debug setting.
+    /// Build a sampler and seed the first CPU / memory baseline. The network
+    /// baseline is seeded by the first [`Sampler::sample`] call; on Windows a
+    /// successful native counter read never needs sysinfo's interface list.
+    /// `cpu_smoothing` is the `sample.cpu_smoothing` history weight (0 disables
+    /// smoothing); it is fixed for the process lifetime — the config poller
+    /// treats it as a startup-only debug setting.
     pub fn new(interfaces: NetSelection, cpu_smoothing: f64) -> Self {
         // sysinfo 0.40 made both constructors fallible for platforms without
         // the required backends. They are infallible on every platform this
@@ -84,8 +87,11 @@ impl Sampler {
                 .with_memory(MemoryRefreshKind::nothing().with_ram()),
         )
         .expect("sysinfo system information is supported on this platform");
-        let networks = Networks::new_with_refreshed_list()
-            .expect("sysinfo network enumeration is supported on this platform");
+        // Empty by design: the fallback path refreshes it on first use, and
+        // refreshing here would pay sysinfo's Windows interface/address
+        // enumeration even when the native counter path succeeds.
+        let networks =
+            Networks::new().expect("sysinfo network enumeration is supported on this platform");
         Sampler {
             system,
             networks,
@@ -120,10 +126,6 @@ impl Sampler {
         #[cfg(not(windows))]
         self.system.refresh_cpu_usage();
         self.system.refresh_memory();
-        // `false` keeps interfaces that momentarily disappear from the list so
-        // a transient unplug doesn't destroy the baseline; reconciliation lives
-        // in NetSampler.
-        self.networks.refresh(false);
 
         let now = Instant::now();
         // On the very first tick there is no prior tick; elapsed is 0, and the
@@ -137,7 +139,10 @@ impl Sampler {
         let cpu_raw = self.system.global_cpu_usage() as f64;
         let cpu_pct = self.cpu.update(cpu_raw, elapsed);
         let mem_pct = mem::percent_used(self.system.used_memory(), self.system.total_memory());
-        let (up, down) = self.net.poll(&self.networks, elapsed);
+        // `NetSampler` chooses the native Windows counters when available and
+        // only refreshes the sysinfo list on the fallback path. Passing the
+        // handle mutably keeps that decision in one place.
+        let (up, down) = self.net.poll(&mut self.networks, elapsed);
 
         Snapshot {
             ts: now_unix,

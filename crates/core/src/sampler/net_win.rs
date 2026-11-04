@@ -11,12 +11,63 @@ use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 use windows::Win32::NetworkManagement::IpHelper::{FreeMibTable, GetIfTable2, MIB_IF_TABLE2};
+use windows::Win32::NetworkManagement::Ndis::MediaConnectStateDisconnected;
 
-/// The hardware-interface set changes only on plug/unplug or adapter
-/// enable/disable. Re-enumerating the full NDIS table on every 1–3 s sample
-/// is unnecessary; a few seconds of staleness only means a newly appeared
-/// interface starts contributing on the next refresh.
+use super::net::{CounterFrame, NetSelection};
+
+/// The hardware-interface set is only needed on the sysinfo fallback path.
+/// It changes on plug/unplug or adapter enable/disable, so a few seconds of
+/// staleness only means a newly appeared interface starts contributing on the
+/// next refresh.
 const HARDWARE_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+
+/// One `GetIfTable2` read for the steady counter path: alias, cumulative
+/// octets and the `HardwareInterface` bit all come from the same row, so this
+/// avoids sysinfo's per-refresh adapter/address enumeration entirely.
+/// `None` means the table could not be read and the caller must fall back.
+pub(crate) fn native_counters(selection: &NetSelection) -> Option<CounterFrame> {
+    unsafe {
+        let mut table: *mut MIB_IF_TABLE2 = std::ptr::null_mut();
+        if GetIfTable2(&mut table).0 != 0 {
+            return None;
+        }
+        let rows =
+            std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize);
+        let auto = matches!(selection, NetSelection::Auto);
+        let mut frame = Vec::new();
+        for row in rows {
+            // Match sysinfo's active-link filter: a disconnected or addressless
+            // adapter must not enter an explicit selection with stale counters.
+            if (row.TransmitLinkSpeed == 0 && row.ReceiveLinkSpeed == 0)
+                || row.MediaConnectState == MediaConnectStateDisconnected
+                || row.PhysicalAddressLength == 0
+            {
+                continue;
+            }
+            if auto && row.InterfaceAndOperStatusFlags._bitfield & 0x01 == 0 {
+                continue;
+            }
+            let Some(name) = alias_string(&row.Alias) else {
+                continue;
+            };
+            if let NetSelection::Interfaces(list) = selection {
+                if !list.contains(&name) {
+                    continue;
+                }
+            }
+            frame.push((name, row.InOctets, row.OutOctets));
+        }
+        FreeMibTable(table as *const core::ffi::c_void);
+        Some(frame)
+    }
+}
+
+/// Decode a NUL-terminated NDIS alias; empty aliases are not usable as
+/// selection keys.
+fn alias_string(alias: &[u16]) -> Option<String> {
+    let len = alias.iter().position(|&c| c == 0).unwrap_or(alias.len());
+    (len > 0).then(|| String::from_utf16_lossy(&alias[..len]))
+}
 
 /// Cached alias set of NDIS hardware interfaces.
 pub(crate) struct HardwareInterfaces {
@@ -68,10 +119,8 @@ fn hardware_names() -> Option<HashSet<String>> {
             // Bit 0 of `MIB_IF_ROW2.InterfaceAndOperStatusFlags` is
             // `HardwareInterface`; virtual switches and tunnels report 0.
             if row.InterfaceAndOperStatusFlags._bitfield & 0x01 != 0 {
-                let alias = &row.Alias;
-                let len = alias.iter().position(|&c| c == 0).unwrap_or(alias.len());
-                if len > 0 {
-                    names.insert(String::from_utf16_lossy(&alias[..len]));
+                if let Some(name) = alias_string(&row.Alias) {
+                    names.insert(name);
                 }
             }
         }

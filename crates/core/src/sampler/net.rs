@@ -8,14 +8,15 @@
 //!    and returns bytes/second. It encodes wrap-around handling, adapter
 //!    add/remove reconciliation and the divide-by-zero/first-frame rules. It is
 //!    unit-tested against synthetic counter feeds — no real NIC required.
-//! 2. [`NetSampler::poll`] adapts `sysinfo::Networks` (real cumulative
-//!    counters) into that `(name, rx, tx)` vector after applying interface
-//!    selection, then calls `compute_rates`.
+//! 2. [`NetSampler::poll`] adapts either the native Windows interface table or
+//!    `sysinfo::Networks` (real cumulative counters) into that
+//!    `(name, rx, tx)` vector after applying interface selection, then calls
+//!    `compute_rates`. The native path exists because sysinfo's Windows
+//!    refresh also re-enumerates every adapter's addresses, which a counter
+//!    sampler does not need; macOS keeps sysinfo.
 //!
-//! We use `total_received`/`total_transmitted` (monotonic counters) rather than
-//! sysinfo's own per-refresh diff so the differential policy is entirely ours
-//! and is testable in isolation: sysinfo exposes cumulative counters, so
-//! the differential policy lives entirely here.
+//! We use cumulative counters rather than sysinfo's own per-refresh diff so the
+//! differential policy is entirely ours and is testable in isolation.
 
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -210,9 +211,9 @@ pub fn compute_rates(
 pub struct NetSampler {
     selection: NetSelection,
     baseline: HashMap<String, (u64, u64)>,
-    /// Alias set of NDIS hardware interfaces (Windows only). Refreshed every
-    /// poll so plug/unplug is picked up; `None` until the first successful
-    /// table read.
+    /// Alias set of NDIS hardware interfaces (Windows only). Refreshed on the
+    /// sysinfo fallback path so plug/unplug is picked up; `None` until the
+    /// first successful table read.
     #[cfg(windows)]
     hardware: crate::sampler::net_win::HardwareInterfaces,
 }
@@ -227,32 +228,52 @@ impl NetSampler {
         }
     }
 
-    /// Read `sysinfo` cumulative counters, apply selection, and diff against
-    /// the internal baseline using the measured `elapsed`. Returns `(up_bps,
-    /// down_bps)` (NaN on the first frame / after a reset).
-    pub fn poll(&mut self, networks: &Networks, elapsed: Option<Duration>) -> (f64, f64) {
+    /// Read cumulative counters, apply selection, and diff against the internal
+    /// baseline using the measured `elapsed`. Returns `(up_bps, down_bps)`
+    /// (NaN on the first frame / after a reset).
+    ///
+    /// On Windows this first tries the native interface table: one
+    /// `GetIfTable2` call yields names, counters and the hardware-interface
+    /// flag together, so the steady path never pays for sysinfo's adapter and
+    /// address enumeration. A read failure falls back to sysinfo; the caller
+    /// passes the handle mutably because the fallback is the only path that
+    /// refreshes it.
+    pub fn poll(&mut self, networks: &mut Networks, elapsed: Option<Duration>) -> (f64, f64) {
         let elapsed_secs = match elapsed {
             Some(d) => d.as_secs_f64(),
             None => 0.0,
         };
 
         #[cfg(windows)]
-        let hardware = {
+        {
+            if let Some(frame) = crate::sampler::net_win::native_counters(&self.selection) {
+                return compute_rates(&mut self.baseline, &frame, elapsed_secs);
+            }
+            // `false` keeps interfaces that momentarily disappear from the list
+            // so a transient unplug doesn't destroy the baseline; reconciliation
+            // lives in `compute_rates`.
+            networks.refresh(false);
             self.hardware.refresh();
-            self.hardware.names()
-        };
-        #[cfg(not(windows))]
-        let hardware = None;
+            let frame = collect_frame(networks, &self.selection, self.hardware.names());
+            compute_rates(&mut self.baseline, &frame, elapsed_secs)
+        }
 
-        let frame = collect_frame(networks, &self.selection, hardware);
-        compute_rates(&mut self.baseline, &frame, elapsed_secs)
+        #[cfg(not(windows))]
+        {
+            // `false` keeps interfaces that momentarily disappear from the list
+            // so a transient unplug doesn't destroy the baseline; reconciliation
+            // lives in `compute_rates`.
+            networks.refresh(false);
+            let frame = collect_frame(networks, &self.selection, None);
+            compute_rates(&mut self.baseline, &frame, elapsed_secs)
+        }
     }
 }
 
 /// Extract a filtered counter frame from a `sysinfo::Networks` handle.
 /// Auto mode keeps physical adapters only; `hardware` is the native Windows
-/// hardware set when readable. Split out so a future native backend can reuse
-/// the shape.
+/// hardware set when readable. The native Windows counter path produces the
+/// same shape directly.
 fn collect_frame(
     networks: &Networks,
     selection: &NetSelection,
