@@ -7,7 +7,7 @@ The list covers the components used by the Windows and macOS binaries
 (509 packages in the union of all four shipped targets).
 A package may be present on only some platforms or architectures.
 
-Generated from Cargo.lock. Dependency-set fingerprint: 44a39df4dac181640c1d6e334644fb1084b1ce7a2a08b21f06d6f44c7f04dbb2.
+Generated from Cargo.lock. Dependency-set fingerprint: b4c57927c5df0f237c0ab547dc30aee1f207306ff20210be4ac85f8bd36066ef.
 
 License expressions are shown as declared by the upstream package (usually
 SPDX syntax). Where a component is offered under several licenses, SysVitals
@@ -62,7 +62,6 @@ authoritative.
 | bitflags | 1.3.2 | MIT/Apache-2.0 | https://github.com/bitflags/bitflags |
 | bitflags | 2.13.2 | MIT OR Apache-2.0 | https://github.com/bitflags/bitflags |
 | bitstream-io | 4.10.0 | MIT/Apache-2.0 | https://github.com/tuffy/bitstream-io |
-| block | 0.1.6 | MIT | http://github.com/SSheldon/rust-block |
 | block-buffer | 0.12.1 | MIT OR Apache-2.0 | https://github.com/RustCrypto/utils |
 | block2 | 0.5.1 | MIT | https://github.com/madsmtm/objc2 |
 | block2 | 0.6.2 | MIT | https://github.com/madsmtm/objc2 |
@@ -160,27 +159,27 @@ authoritative.
 | glob | 0.3.4 | MIT OR Apache-2.0 | https://github.com/rust-lang/glob |
 | globset | 0.4.21 | Unlicense OR MIT | https://github.com/BurntSushi/ripgrep/tree/master/crates/globset |
 | globwalk | 0.8.1 | MIT | https://github.com/gilnaa/globwalk |
-| gpui-base | 0.8.1 | Apache-2.0 | https://github.com/longbridge/gpui-kit |
-| gpui-component | 0.8.1 | Apache-2.0 | https://github.com/longbridge/gpui-kit |
-| gpui-component-macros | 0.8.1 | Apache-2.0 | https://crates.io/crates/gpui-component-macros/0.8.1 |
-| gpui-kit | 0.8.1 | Apache-2.0 | https://github.com/longbridge/gpui-kit |
-| gpui-kit-assets | 0.8.1 | Apache-2.0 | https://github.com/longbridge/gpui-kit |
-| gpui-pre | 0.3.10 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-apple | 0.3.10 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-collections | 0.3.10 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-derive-refineable | 0.3.10 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-http-client | 0.3.10 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-macos | 0.3.10 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-macros | 0.3.10 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-platform | 0.3.10 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-refineable | 0.3.10 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-scheduler | 0.3.10 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-shared-string | 0.3.10 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-sum-tree | 0.3.10 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-util | 0.3.10 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-windows | 0.3.10 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-ztracing | 0.3.10 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-ztracing-macro | 0.3.10 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-base | 0.9.0 | Apache-2.0 | https://github.com/longbridge/gpui-kit |
+| gpui-component | 0.9.0 | Apache-2.0 | https://github.com/longbridge/gpui-kit |
+| gpui-component-macros | 0.9.0 | Apache-2.0 | https://crates.io/crates/gpui-component-macros/0.9.0 |
+| gpui-kit | 0.9.0 | Apache-2.0 | https://github.com/longbridge/gpui-kit |
+| gpui-kit-assets | 0.9.0 | Apache-2.0 | https://github.com/longbridge/gpui-kit |
+| gpui-pre | 0.3.11 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-apple | 0.3.11 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-collections | 0.3.11 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-derive-refineable | 0.3.11 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-http-client | 0.3.11 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-macos | 0.3.11 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-macros | 0.3.11 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-platform | 0.3.11 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-refineable | 0.3.11 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-scheduler | 0.3.11 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-shared-string | 0.3.11 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-sum-tree | 0.3.11 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-util | 0.3.11 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-windows | 0.3.11 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-ztracing | 0.3.11 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-ztracing-macro | 0.3.11 | Apache-2.0 | https://github.com/zed-industries/zed |
 | granit-parser | 1.3.0 | MIT OR Apache-2.0 | https://github.com/bourumir-wyngs/granit-parser |
 | half | 2.7.1 | MIT OR Apache-2.0 | https://github.com/VoidStarKat/half-rs |
 | hash32 | 0.3.1 | MIT OR Apache-2.0 | https://github.com/japaric/hash32 |
@@ -196,11 +195,15 @@ authoritative.
 | iana-time-zone | 0.1.65 | MIT OR Apache-2.0 | https://github.com/strawlab/iana-time-zone |
 | icu_collections | 2.4.0 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
 | icu_locale_core | 2.4.0 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
+| icu_locale_fallback | 2.4.0 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
+| icu_locale_fallback_data | 2.4.0 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
 | icu_normalizer | 2.4.0 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
 | icu_normalizer_data | 2.4.0 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
 | icu_properties | 2.4.0 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
 | icu_properties_data | 2.4.0 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
 | icu_provider | 2.4.0 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
+| icu_segmenter | 2.4.0 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
+| icu_segmenter_data | 2.4.0 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
 | idna | 1.1.0 | MIT OR Apache-2.0 | https://github.com/servo/rust-url/ |
 | idna_adapter | 1.2.2 | Apache-2.0 OR MIT | https://github.com/hsivonen/idna_adapter |
 | ignore | 0.4.34 | Unlicense OR MIT | https://github.com/BurntSushi/ripgrep/tree/master/crates/ignore |
@@ -237,14 +240,12 @@ authoritative.
 | lyon_tessellation | 1.0.23 | MIT OR Apache-2.0 | https://github.com/nical/lyon |
 | mac | 0.1.1 | MIT/Apache-2.0 | https://github.com/reem/rust-mac.git |
 | mach2 | 0.6.0 | BSD-2-Clause OR MIT OR Apache-2.0 | https://github.com/JohnTitor/mach2 |
-| malloc_buf | 0.0.6 | MIT | https://github.com/SSheldon/malloc_buf |
 | markdown | 1.0.0 | MIT | https://github.com/wooorm/markdown-rs |
 | markup5ever | 0.12.1 | MIT OR Apache-2.0 | https://github.com/servo/html5ever |
 | markup5ever_rcdom | 0.3.0 | MIT OR Apache-2.0 | https://github.com/servo/html5ever |
 | maybe-rayon | 0.1.1 | MIT | https://github.com/shssoichiro/maybe-rayon |
 | memchr | 2.8.3 | Unlicense OR MIT | https://github.com/BurntSushi/memchr |
 | memmap2 | 0.9.12 | MIT OR Apache-2.0 | https://github.com/RazrFalcon/memmap2-rs |
-| metal | 0.33.0 | MIT OR Apache-2.0 | https://github.com/gfx-rs/metal-rs |
 | mime | 0.3.17 | MIT OR Apache-2.0 | https://github.com/hyperium/mime |
 | mime_guess | 2.0.5 | MIT | https://github.com/abonander/mime_guess |
 | miniz_oxide | 0.8.9 | MIT OR Zlib OR Apache-2.0 | https://github.com/Frommi/miniz_oxide/tree/master/miniz_oxide |
@@ -267,7 +268,6 @@ authoritative.
 | num-rational | 0.4.2 | MIT OR Apache-2.0 | https://github.com/rust-num/num-rational |
 | num-traits | 0.2.19 | MIT OR Apache-2.0 | https://github.com/rust-num/num-traits |
 | num_cpus | 1.17.0 | MIT OR Apache-2.0 | https://github.com/seanmonstar/num_cpus |
-| objc | 0.2.7 | MIT | http://github.com/SSheldon/rust-objc |
 | objc-sys | 0.3.5 | MIT | https://github.com/madsmtm/objc2 |
 | objc2 | 0.5.3 | MIT | https://github.com/madsmtm/objc2 |
 | objc2 | 0.6.5 | MIT | https://github.com/madsmtm/objc2 |
@@ -293,8 +293,8 @@ authoritative.
 | objc2-quartz-core | 0.2.2 | MIT | https://github.com/madsmtm/objc2 |
 | objc2-quartz-core | 0.3.2 | Zlib OR Apache-2.0 OR MIT | https://github.com/madsmtm/objc2 |
 | objc2-security | 0.3.2 | Zlib OR Apache-2.0 OR MIT | https://github.com/madsmtm/objc2 |
+| objc2-uniform-type-identifiers | 0.3.2 | Zlib OR Apache-2.0 OR MIT | https://github.com/madsmtm/objc2 |
 | objc2-user-notifications | 0.3.2 | Zlib OR Apache-2.0 OR MIT | https://github.com/madsmtm/objc2 |
-| objc_exception | 0.1.2 | MIT | http://github.com/SSheldon/rust-objc-exception |
 | object | 0.40.0 | Apache-2.0 OR MIT | https://github.com/gimli-rs/object |
 | once_cell | 1.21.4 | MIT OR Apache-2.0 | https://github.com/matklad/once_cell |
 | option-ext | 0.2.0 | MPL-2.0 | https://github.com/soc/option-ext.git |
@@ -753,7 +753,7 @@ DEALINGS IN THE SOFTWARE.
 
 ### LICENSE / LICENSE-APACHE / aclysma__profiling / master__LICENSE-APACHE / servo__pathfinder / main__LICENSE-APACHE / servo__pathfinder / master__LICENSE-APACHE
 
-Used by: addr2line 0.27.1, aligned 0.4.3, arc-swap 1.9.3, arrayvec 0.7.8, as-slice 0.2.1, async-channel 2.5.0, async-executor 1.14.1, async-fs 2.2.0, async-io 2.6.0, async-lock 3.5.0, async-net 2.0.0, async-process 2.5.0, async-signal 0.2.14, async-task 4.7.1, atomic-waker 1.1.2, backtrace 0.3.77, base64 0.22.1, base64 0.23.1, bitflags 1.3.2, bitflags 2.13.2, bitstream-io 4.10.0, blocking 1.7.0, bstr 1.13.1, bumpalo 3.20.3, cfg-if 1.0.5, concurrent-queue 2.5.0, core-foundation 0.10.1, core-foundation-sys 0.8.7, core-graphics 0.24.0, core-graphics-types 0.2.0, core-text 21.0.0, core_detect 1.0.0, crossbeam-deque 0.8.8, crossbeam-epoch 0.9.21, crossbeam-utils 0.8.23, data-url 0.3.2, displaydoc 0.2.7, either 1.19.0, encoding_rs_io 0.1.8, equivalent 1.0.3, errno 0.3.14, euclid 0.22.14, event-listener 5.4.2, event-listener-strategy 0.5.4, fastrand 2.5.0, flate2 1.1.10, form_urlencoded 1.2.2, futf 0.1.5, futures-lite 2.6.1, gif 0.13.3, gif 0.14.2, gimli 0.34.0, glob 0.3.4, hash32 0.3.1, hashbrown 0.16.1, hashbrown 0.17.1, heapless 0.9.3, heck 0.5.0, html5ever 0.27.0, idna 1.1.0, idna_adapter 1.2.2, indexmap 2.14.2, itertools 0.11.0, itertools 0.13.0, itertools 0.14.0, lazy_static 1.5.1, lock_api 0.4.14, log 0.4.35, markup5ever 0.12.1, markup5ever_rcdom 0.3.0, metal 0.33.0, mime 0.3.17, num-bigint 0.4.8, num-complex 0.4.6, num-derive 0.4.2, num-integer 0.1.47, num-rational 0.4.2, num-traits 0.2.19, num_cpus 1.17.0, object 0.40.0, once_cell 1.21.4, parking 2.2.1, parking_lot 0.12.5, parking_lot_core 0.9.12, pathfinder_geometry 0.5.1, pathfinder_simd 0.5.6, percent-encoding 2.3.2, piper 0.2.5, png 0.17.16, png 0.18.1, polling 3.11.0, pollster 0.4.0, profiling 1.0.18, profiling-procmacros 1.0.18, rayon 1.12.0, rayon-core 1.13.0, regex 1.13.1, regex-automata 0.4.18, regex-syntax 0.8.11, roxmltree 0.20.0, roxmltree 0.21.2, rustc-demangle 0.1.28, rustix 1.1.6, scopeguard 1.2.0, shellexpand 3.1.2, signal-hook-registry 1.4.8, similar 2.7.0, simplecss 0.2.2, smallvec 1.16.4, smol 2.0.2, smol_str 0.3.7, stable_deref_trait 1.2.1, string_cache 0.8.9, svgtypes 0.15.3, svgtypes 0.16.1, tendril 0.4.3, ttf-parser 0.25.1, unicase 2.10.0, unicode-bidi 0.3.18, unicode-bidi-mirroring 0.4.0, unicode-ccc 0.4.0, unicode-id 0.3.7, unicode-properties 0.1.5, unicode-segmentation 1.13.3, unicode-vo 0.1.0, unicode-width 0.2.3, url 2.5.8, uuid 1.29.0, waker-fn 1.2.0, wasm-bindgen 0.2.130, wasm-bindgen-macro 0.2.130, wasm-bindgen-macro-support 0.2.130, wasm-bindgen-shared 0.2.130, weezl 0.1.12, xml5ever 0.18.1, zed-font-kit 0.14.1-zed
+Used by: addr2line 0.27.1, aligned 0.4.3, arc-swap 1.9.3, arrayvec 0.7.8, as-slice 0.2.1, async-channel 2.5.0, async-executor 1.14.1, async-fs 2.2.0, async-io 2.6.0, async-lock 3.5.0, async-net 2.0.0, async-process 2.5.0, async-signal 0.2.14, async-task 4.7.1, atomic-waker 1.1.2, backtrace 0.3.77, base64 0.22.1, base64 0.23.1, bitflags 1.3.2, bitflags 2.13.2, bitstream-io 4.10.0, blocking 1.7.0, bstr 1.13.1, bumpalo 3.20.3, cfg-if 1.0.5, concurrent-queue 2.5.0, core-foundation 0.10.1, core-foundation-sys 0.8.7, core-graphics 0.24.0, core-graphics-types 0.2.0, core-text 21.0.0, core_detect 1.0.0, crossbeam-deque 0.8.8, crossbeam-epoch 0.9.21, crossbeam-utils 0.8.23, data-url 0.3.2, displaydoc 0.2.7, either 1.19.0, encoding_rs_io 0.1.8, equivalent 1.0.3, errno 0.3.14, euclid 0.22.14, event-listener 5.4.2, event-listener-strategy 0.5.4, fastrand 2.5.0, flate2 1.1.10, form_urlencoded 1.2.2, futf 0.1.5, futures-lite 2.6.1, gif 0.13.3, gif 0.14.2, gimli 0.34.0, glob 0.3.4, hash32 0.3.1, hashbrown 0.16.1, hashbrown 0.17.1, heapless 0.9.3, heck 0.5.0, html5ever 0.27.0, idna 1.1.0, idna_adapter 1.2.2, indexmap 2.14.2, itertools 0.11.0, itertools 0.13.0, itertools 0.14.0, lazy_static 1.5.1, lock_api 0.4.14, log 0.4.35, markup5ever 0.12.1, markup5ever_rcdom 0.3.0, mime 0.3.17, num-bigint 0.4.8, num-complex 0.4.6, num-derive 0.4.2, num-integer 0.1.47, num-rational 0.4.2, num-traits 0.2.19, num_cpus 1.17.0, object 0.40.0, once_cell 1.21.4, parking 2.2.1, parking_lot 0.12.5, parking_lot_core 0.9.12, pathfinder_geometry 0.5.1, pathfinder_simd 0.5.6, percent-encoding 2.3.2, piper 0.2.5, png 0.17.16, png 0.18.1, polling 3.11.0, pollster 0.4.0, profiling 1.0.18, profiling-procmacros 1.0.18, rayon 1.12.0, rayon-core 1.13.0, regex 1.13.1, regex-automata 0.4.18, regex-syntax 0.8.11, roxmltree 0.20.0, roxmltree 0.21.2, rustc-demangle 0.1.28, rustix 1.1.6, scopeguard 1.2.0, shellexpand 3.1.2, signal-hook-registry 1.4.8, similar 2.7.0, simplecss 0.2.2, smallvec 1.16.4, smol 2.0.2, smol_str 0.3.7, stable_deref_trait 1.2.1, string_cache 0.8.9, svgtypes 0.15.3, svgtypes 0.16.1, tendril 0.4.3, ttf-parser 0.25.1, unicase 2.10.0, unicode-bidi 0.3.18, unicode-bidi-mirroring 0.4.0, unicode-ccc 0.4.0, unicode-id 0.3.7, unicode-properties 0.1.5, unicode-segmentation 1.13.3, unicode-vo 0.1.0, unicode-width 0.2.3, url 2.5.8, uuid 1.29.0, waker-fn 1.2.0, wasm-bindgen 0.2.130, wasm-bindgen-macro 0.2.130, wasm-bindgen-macro-support 0.2.130, wasm-bindgen-shared 0.2.130, weezl 0.1.12, xml5ever 0.18.1, zed-font-kit 0.14.1-zed
 
 <pre>
 Apache License
@@ -2539,20 +2539,6 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 </pre>
 
-### upstream copyright notice for block 0.1.6
-
-Used by: block 0.1.6
-
-<pre>
-Copyright (c) Steven Sheldon
-
-This component is distributed under the MIT license. The standard license text is reproduced in "Standard license texts".
-
-Source: https://github.com/SSheldon/rust-block
-
-Note: The crate manifest names Steven Sheldon as the author and declares MIT; the packaged crate and upstream repository do not include a license file.
-</pre>
-
 ### LICENSE-APACHE
 
 Used by: block-buffer 0.12.1, const-oid 0.10.2, cpufeatures 0.3.1, crypto-common 0.2.2, digest 0.11.3, hybrid-array 0.4.15, sha2 0.11.1
@@ -2795,7 +2781,7 @@ DEALINGS IN THE SOFTWARE.
 
 ### madsmtm__objc2 / main__LICENSE-APACHE.txt
 
-Used by: block2 0.5.1, block2 0.6.2, dispatch2 0.3.1, objc-sys 0.3.5, objc2 0.5.3, objc2 0.6.5, objc2-app-kit 0.2.2, objc2-app-kit 0.3.2, objc2-cloud-kit 0.3.2, objc2-core-data 0.2.2, objc2-core-data 0.3.2, objc2-core-foundation 0.3.2, objc2-core-graphics 0.3.2, objc2-core-image 0.2.2, objc2-core-image 0.3.2, objc2-core-services 0.3.2, objc2-core-text 0.3.2, objc2-core-video 0.3.2, objc2-encode 4.1.0, objc2-foundation 0.2.2, objc2-foundation 0.3.2, objc2-io-kit 0.3.2, objc2-io-surface 0.3.2, objc2-metal 0.2.2, objc2-metal 0.3.2, objc2-quartz-core 0.2.2, objc2-quartz-core 0.3.2, objc2-security 0.3.2, objc2-user-notifications 0.3.2
+Used by: block2 0.5.1, block2 0.6.2, dispatch2 0.3.1, objc-sys 0.3.5, objc2 0.5.3, objc2 0.6.5, objc2-app-kit 0.2.2, objc2-app-kit 0.3.2, objc2-cloud-kit 0.3.2, objc2-core-data 0.2.2, objc2-core-data 0.3.2, objc2-core-foundation 0.3.2, objc2-core-graphics 0.3.2, objc2-core-image 0.2.2, objc2-core-image 0.3.2, objc2-core-services 0.3.2, objc2-core-text 0.3.2, objc2-core-video 0.3.2, objc2-encode 4.1.0, objc2-foundation 0.2.2, objc2-foundation 0.3.2, objc2-io-kit 0.3.2, objc2-io-surface 0.3.2, objc2-metal 0.2.2, objc2-metal 0.3.2, objc2-quartz-core 0.2.2, objc2-quartz-core 0.3.2, objc2-security 0.3.2, objc2-uniform-type-identifiers 0.3.2, objc2-user-notifications 0.3.2
 
 <pre>
 Apache License
@@ -2980,7 +2966,7 @@ Copyright 2026 Mads Marquart
 
 ### madsmtm__objc2 / main__LICENSE-MIT.txt
 
-Used by: block2 0.5.1, block2 0.6.2, dispatch2 0.3.1, objc-sys 0.3.5, objc2 0.5.3, objc2 0.6.5, objc2-app-kit 0.2.2, objc2-app-kit 0.3.2, objc2-cloud-kit 0.3.2, objc2-core-data 0.2.2, objc2-core-data 0.3.2, objc2-core-foundation 0.3.2, objc2-core-graphics 0.3.2, objc2-core-image 0.2.2, objc2-core-image 0.3.2, objc2-core-services 0.3.2, objc2-core-text 0.3.2, objc2-core-video 0.3.2, objc2-encode 4.1.0, objc2-foundation 0.2.2, objc2-foundation 0.3.2, objc2-io-kit 0.3.2, objc2-io-surface 0.3.2, objc2-metal 0.2.2, objc2-metal 0.3.2, objc2-quartz-core 0.2.2, objc2-quartz-core 0.3.2, objc2-security 0.3.2, objc2-user-notifications 0.3.2
+Used by: block2 0.5.1, block2 0.6.2, dispatch2 0.3.1, objc-sys 0.3.5, objc2 0.5.3, objc2 0.6.5, objc2-app-kit 0.2.2, objc2-app-kit 0.3.2, objc2-cloud-kit 0.3.2, objc2-core-data 0.2.2, objc2-core-data 0.3.2, objc2-core-foundation 0.3.2, objc2-core-graphics 0.3.2, objc2-core-image 0.2.2, objc2-core-image 0.3.2, objc2-core-services 0.3.2, objc2-core-text 0.3.2, objc2-core-video 0.3.2, objc2-encode 4.1.0, objc2-foundation 0.2.2, objc2-foundation 0.3.2, objc2-io-kit 0.3.2, objc2-io-surface 0.3.2, objc2-metal 0.2.2, objc2-metal 0.3.2, objc2-quartz-core 0.2.2, objc2-quartz-core 0.3.2, objc2-security 0.3.2, objc2-uniform-type-identifiers 0.3.2, objc2-user-notifications 0.3.2
 
 <pre>
 Copyright 2026 Mads Marquart
@@ -3012,7 +2998,7 @@ DEALINGS IN THE SOFTWARE.
 
 ### madsmtm__objc2 / main__LICENSE-ZLIB.txt
 
-Used by: block2 0.5.1, block2 0.6.2, dispatch2 0.3.1, objc-sys 0.3.5, objc2 0.5.3, objc2 0.6.5, objc2-app-kit 0.2.2, objc2-app-kit 0.3.2, objc2-cloud-kit 0.3.2, objc2-core-data 0.2.2, objc2-core-data 0.3.2, objc2-core-foundation 0.3.2, objc2-core-graphics 0.3.2, objc2-core-image 0.2.2, objc2-core-image 0.3.2, objc2-core-services 0.3.2, objc2-core-text 0.3.2, objc2-core-video 0.3.2, objc2-encode 4.1.0, objc2-foundation 0.2.2, objc2-foundation 0.3.2, objc2-io-kit 0.3.2, objc2-io-surface 0.3.2, objc2-metal 0.2.2, objc2-metal 0.3.2, objc2-quartz-core 0.2.2, objc2-quartz-core 0.3.2, objc2-security 0.3.2, objc2-user-notifications 0.3.2
+Used by: block2 0.5.1, block2 0.6.2, dispatch2 0.3.1, objc-sys 0.3.5, objc2 0.5.3, objc2 0.6.5, objc2-app-kit 0.2.2, objc2-app-kit 0.3.2, objc2-cloud-kit 0.3.2, objc2-core-data 0.2.2, objc2-core-data 0.3.2, objc2-core-foundation 0.3.2, objc2-core-graphics 0.3.2, objc2-core-image 0.2.2, objc2-core-image 0.3.2, objc2-core-services 0.3.2, objc2-core-text 0.3.2, objc2-core-video 0.3.2, objc2-encode 4.1.0, objc2-foundation 0.2.2, objc2-foundation 0.3.2, objc2-io-kit 0.3.2, objc2-io-surface 0.3.2, objc2-metal 0.2.2, objc2-metal 0.3.2, objc2-quartz-core 0.2.2, objc2-quartz-core 0.3.2, objc2-security 0.3.2, objc2-uniform-type-identifiers 0.3.2, objc2-user-notifications 0.3.2
 
 <pre>
 Copyright 2026 Mads Marquart
@@ -3030,7 +3016,7 @@ Permission is granted to anyone to use this software for any purpose, including 
 
 ### madsmtm__objc2 / main__LICENSE.md / madsmtm__objc2 / master__LICENSE.md
 
-Used by: block2 0.5.1, block2 0.6.2, dispatch2 0.3.1, objc-sys 0.3.5, objc2 0.5.3, objc2 0.6.5, objc2-app-kit 0.2.2, objc2-app-kit 0.3.2, objc2-cloud-kit 0.3.2, objc2-core-data 0.2.2, objc2-core-data 0.3.2, objc2-core-foundation 0.3.2, objc2-core-graphics 0.3.2, objc2-core-image 0.2.2, objc2-core-image 0.3.2, objc2-core-services 0.3.2, objc2-core-text 0.3.2, objc2-core-video 0.3.2, objc2-encode 4.1.0, objc2-foundation 0.2.2, objc2-foundation 0.3.2, objc2-io-kit 0.3.2, objc2-io-surface 0.3.2, objc2-metal 0.2.2, objc2-metal 0.3.2, objc2-quartz-core 0.2.2, objc2-quartz-core 0.3.2, objc2-security 0.3.2, objc2-user-notifications 0.3.2
+Used by: block2 0.5.1, block2 0.6.2, dispatch2 0.3.1, objc-sys 0.3.5, objc2 0.5.3, objc2 0.6.5, objc2-app-kit 0.2.2, objc2-app-kit 0.3.2, objc2-cloud-kit 0.3.2, objc2-core-data 0.2.2, objc2-core-data 0.3.2, objc2-core-foundation 0.3.2, objc2-core-graphics 0.3.2, objc2-core-image 0.2.2, objc2-core-image 0.3.2, objc2-core-services 0.3.2, objc2-core-text 0.3.2, objc2-core-video 0.3.2, objc2-encode 4.1.0, objc2-foundation 0.2.2, objc2-foundation 0.3.2, objc2-io-kit 0.3.2, objc2-io-surface 0.3.2, objc2-metal 0.2.2, objc2-metal 0.3.2, objc2-quartz-core 0.2.2, objc2-quartz-core 0.3.2, objc2-security 0.3.2, objc2-uniform-type-identifiers 0.3.2, objc2-user-notifications 0.3.2
 
 <pre>
 # License
@@ -5804,7 +5790,7 @@ SOFTWARE.
 
 ### LICENSE-APACHE / longbridge__gpui-kit / main__LICENSE-APACHE / longbridge__gpui-kit / master__LICENSE-APACHE
 
-Used by: gpui-base 0.8.1, gpui-component 0.8.1, gpui-component-macros 0.8.1, gpui-kit 0.8.1
+Used by: gpui-base 0.9.0, gpui-component 0.9.0, gpui-component-macros 0.9.0, gpui-kit 0.9.0
 
 <pre>
 Copyright 2024 - 2026 Longbridge <https://longbridge.com>
@@ -6002,7 +5988,7 @@ END OF TERMS AND CONDITIONS
 
 ### LICENSE-LUCIDE
 
-Used by: gpui-kit-assets 0.8.1
+Used by: gpui-kit-assets 0.9.0
 
 <pre>
 ISC License
@@ -6052,7 +6038,7 @@ SOFTWARE.
 
 ### LICENSE-APACHE
 
-Used by: gpui-pre 0.3.10, gpui-pre-apple 0.3.10, gpui-pre-collections 0.3.10, gpui-pre-derive-refineable 0.3.10, gpui-pre-http-client 0.3.10, gpui-pre-macos 0.3.10, gpui-pre-macros 0.3.10, gpui-pre-platform 0.3.10, gpui-pre-refineable 0.3.10, gpui-pre-scheduler 0.3.10, gpui-pre-shared-string 0.3.10, gpui-pre-sum-tree 0.3.10, gpui-pre-util 0.3.10, gpui-pre-windows 0.3.10, gpui-pre-ztracing 0.3.10, gpui-pre-ztracing-macro 0.3.10
+Used by: gpui-pre 0.3.11, gpui-pre-apple 0.3.11, gpui-pre-collections 0.3.11, gpui-pre-derive-refineable 0.3.11, gpui-pre-http-client 0.3.11, gpui-pre-macos 0.3.11, gpui-pre-macros 0.3.11, gpui-pre-platform 0.3.11, gpui-pre-refineable 0.3.11, gpui-pre-scheduler 0.3.11, gpui-pre-shared-string 0.3.11, gpui-pre-sum-tree 0.3.11, gpui-pre-util 0.3.11, gpui-pre-windows 0.3.11, gpui-pre-ztracing 0.3.11, gpui-pre-ztracing-macro 0.3.11
 
 <pre>
 Copyright 2022 - 2025 Zed Industries, Inc.
@@ -7178,7 +7164,7 @@ DEALINGS IN THE SOFTWARE.
 
 ### LICENSE
 
-Used by: icu_collections 2.4.0, icu_locale_core 2.4.0, icu_normalizer 2.4.0, icu_normalizer_data 2.4.0, icu_properties 2.4.0, icu_properties_data 2.4.0, icu_provider 2.4.0, litemap 0.8.3, potential_utf 0.1.6, tinystr 0.8.5, writeable 0.6.4, yoke 0.8.4, yoke-derive 0.8.4, zerofrom 0.1.8, zerofrom-derive 0.1.8, zerotrie 0.2.5, zerovec 0.11.9, zerovec-derive 0.11.7
+Used by: icu_collections 2.4.0, icu_locale_core 2.4.0, icu_locale_fallback 2.4.0, icu_locale_fallback_data 2.4.0, icu_normalizer 2.4.0, icu_normalizer_data 2.4.0, icu_properties 2.4.0, icu_properties_data 2.4.0, icu_provider 2.4.0, icu_segmenter 2.4.0, icu_segmenter_data 2.4.0, litemap 0.8.3, potential_utf 0.1.6, tinystr 0.8.5, writeable 0.6.4, yoke 0.8.4, yoke-derive 0.8.4, zerofrom 0.1.8, zerofrom-derive 0.1.8, zerotrie 0.2.5, zerovec 0.11.9, zerovec-derive 0.11.7
 
 <pre>
 UNICODE LICENSE V3
@@ -7940,34 +7926,6 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 </pre>
 
-### SSheldon__malloc_buf / master__LICENSE
-
-Used by: malloc_buf 0.0.6
-
-<pre>
-MIT License
-
-Copyright (c) 2020 Steven Sheldon
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-</pre>
-
 ### license
 
 Used by: markdown 1.0.0
@@ -8240,38 +8198,6 @@ Used by: memmap2 0.9.12
 <pre>
 Copyright (c) 2020 Yevhenii Reizner
 Copyright (c) 2015 Dan Burkert
-
-Permission is hereby granted, free of charge, to any
-person obtaining a copy of this software and associated
-documentation files (the "Software"), to deal in the
-Software without restriction, including without
-limitation the rights to use, copy, modify, merge,
-publish, distribute, sublicense, and/or sell copies of
-the Software, and to permit persons to whom the Software
-is furnished to do so, subject to the following
-conditions:
-
-The above copyright notice and this permission notice
-shall be included in all copies or substantial portions
-of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
-ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
-TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
-PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
-SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
-CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
-OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
-IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-DEALINGS IN THE SOFTWARE.
-</pre>
-
-### LICENSE-MIT / servo__pathfinder / main__LICENSE-MIT / servo__pathfinder / master__LICENSE-MIT
-
-Used by: metal 0.33.0, pathfinder_geometry 0.5.1, pathfinder_simd 0.5.6, rayon 1.12.0, rayon-core 1.13.0
-
-<pre>
-Copyright (c) 2010 The Rust Project Developers
 
 Permission is hereby granted, free of charge, to any
 person obtaining a copy of this software and associated
@@ -9632,48 +9558,6 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
 </pre>
 
-### LICENSE.txt
-
-Used by: objc 0.2.7
-
-<pre>
-MIT License
-
-Copyright (c) Steven Sheldon
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-</pre>
-
-### upstream copyright notice for objc_exception 0.1.2
-
-Used by: objc_exception 0.1.2
-
-<pre>
-Copyright (c) Steven Sheldon
-
-This component is distributed under the MIT license. The standard license text is reproduced in "Standard license texts".
-
-Source: https://github.com/SSheldon/rust-objc-exception
-
-Note: The crate manifest names Steven Sheldon as the author and declares MIT; the packaged crate and upstream repository do not include a license file.
-</pre>
-
 ### LICENSE-MIT
 
 Used by: object 0.40.0
@@ -10100,6 +9984,38 @@ http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
 <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
 option. All files in the project carrying such notice may not be
 copied, modified, or distributed except according to those terms.
+</pre>
+
+### LICENSE-MIT / servo__pathfinder / main__LICENSE-MIT / servo__pathfinder / master__LICENSE-MIT
+
+Used by: pathfinder_geometry 0.5.1, pathfinder_simd 0.5.6, rayon 1.12.0, rayon-core 1.13.0
+
+<pre>
+Copyright (c) 2010 The Rust Project Developers
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
 </pre>
 
 ### LICENSE
