@@ -25,7 +25,7 @@ publish = false
 
 [workspace.dependencies]
 # Single source of truth for versions; crates inherit with `workspace = true`.
-sysinfo = { version = "=0.40.0", default-features = false, features = ["system", "network"] }
+sysinfo = { version = "=0.40.1", default-features = false, features = ["system", "network"] }
 serde = { version = "=1.0.229", features = ["derive"] }
 toml = "=1.1.8"
 anyhow = "=1.0.104"
