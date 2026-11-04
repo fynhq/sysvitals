@@ -329,14 +329,14 @@ struct VisibleQuery {
 /// seconds makes the chart follow the indicator in near real time.
 const REFRESH_INTERVAL: Duration = Duration::from_secs(3);
 
-/// Shared-state poll cadence. A visible popup needs tight polling so the
-/// indicator's close request and blur dismissal feel immediate; the resident
-/// process without a window is idle and can wake 10 times, not 25 times, per
-/// second. Only Windows has the resident loop.
+/// Shared-state poll cadence. A visible popup still polls tighter than an idle
+/// resident so the indicator's close request feels immediate; the no-window
+/// loop only needs to notice a click and the parent's exit, so it wakes 4
+/// times per second instead of 10. Only Windows has the resident loop.
 #[cfg(windows)]
-const ACTIVE_POLL_MS: u64 = 40;
+const ACTIVE_POLL_MS: u64 = 100;
 #[cfg(windows)]
-const IDLE_POLL_MS: u64 = 100;
+const IDLE_POLL_MS: u64 = 250;
 
 /// How many x-axis tick labels the panel draws, spread evenly across the
 /// visible time window (not across the data points, so gaps do not move
