@@ -32,8 +32,10 @@ windows = { workspace = true }
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "=0.2.191"
 
-[target.'cfg(windows)'.build-dependencies]
-winres = "=0.1.12"
+[build-dependencies]
+# Host-agnostic: returns `NotWindows` and does nothing when the target is not
+# Windows, so it stays a plain build-dependency on every host.
+embed-resource = "=3.0.12"
 
 [[bin]]
 name = "SysVitalsHistory"
