@@ -49,7 +49,7 @@ mod win {
     use std::cell::RefCell;
     use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, AtomicU32, AtomicU64, Ordering};
     use std::sync::{Arc, Mutex, OnceLock, RwLock};
-    use std::time::{Instant, SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use sysvitals_core::format::FormattedRow;
     use sysvitals_core::{
@@ -303,10 +303,30 @@ mod win {
         /// Width only grows; a config/orientation/DPI change resets it.
         win_w: i32,
         win_h: i32,
+        /// Last rectangle handed to `MoveWindow`. Placement runs every second
+        /// and after every sample; an unchanged rect needs no window-manager
+        /// work. `None` until the first successful placement.
+        last_rect: Option<(i32, i32, i32, i32)>,
+        /// A render was skipped because the overlay was hidden (auto-hide,
+        /// fullscreen taskbar, restored window). The next visible tick must
+        /// repaint instead of showing the pre-hide frame.
+        needs_render: bool,
     }
 
     fn overlay_by_hwnd(hwnd: HWND) -> Option<Overlay> {
         OVERLAYS.with(|slot| slot.borrow().iter().find(|o| o.hwnd == hwnd).copied())
+    }
+
+    fn set_overlay_needs_render(hwnd: HWND, needs_render: bool) {
+        OVERLAYS.with(|slot| {
+            if let Some(ov) = slot.borrow_mut().iter_mut().find(|o| o.hwnd == hwnd) {
+                ov.needs_render = needs_render;
+            }
+        });
+    }
+
+    fn overlay_needs_render(hwnd: HWND) -> bool {
+        overlay_by_hwnd(hwnd).is_some_and(|o| o.needs_render)
     }
 
     /// Reset one overlay's grow-only width so a fresh measurement takes effect
@@ -335,6 +355,10 @@ mod win {
         /// missing data dir or a failed spawn never blocks the indicator.
         static HISTORY_WRITER: RefCell<Option<HistoryWriter>> = const { RefCell::new(None) };
         static HISTORY_WRITER_FAILED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        /// Last occlusion probe; the diagnostic is throttled to 5 s because
+        /// `WindowFromPoint` is not free and an occluder is not actionable.
+        static LAST_OCCLUSION_PROBE: std::cell::Cell<Option<Instant>> =
+            const { std::cell::Cell::new(None) };
         /// Shared command/status block between this overlay and the resident
         /// history process. The mapping handle is kept alive for the process
         /// lifetime.
@@ -1154,6 +1178,8 @@ mod win {
                 );
             }
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            // A restored window may have skipped renders while it was hidden.
+            set_overlay_needs_render(hwnd, true);
         } else {
             OVERLAY_SHOWN_ONCE.store(true, Ordering::Relaxed);
         }
@@ -1281,6 +1307,7 @@ mod win {
             // The hide is intentional; the next visible tick should restore
             // without reporting it as an unexpected disappearance.
             VISIBILITY_ANOMALY.store(true, Ordering::Relaxed);
+            set_overlay_needs_render(hwnd, true);
             let _ = ShowWindow(hwnd, SW_HIDE);
             return;
         };
@@ -1319,6 +1346,13 @@ mod win {
             relayout_overlay(hwnd);
             return;
         }
+        // `maintain_visibility` may have just restored a hidden/minimized
+        // overlay, and a sample tick may have skipped its render meanwhile.
+        // Repaint with the current snapshot before the normal move-only path.
+        if overlay_needs_render(hwnd) {
+            relayout_overlay(hwnd);
+            return;
+        }
         apply_position_with_info(hwnd, info);
     }
 
@@ -1340,6 +1374,7 @@ mod win {
             // The hide is intentional; the next visible tick should restore
             // without reporting it as an unexpected disappearance.
             VISIBILITY_ANOMALY.store(true, Ordering::Relaxed);
+            set_overlay_needs_render(hwnd, true);
             let _ = ShowWindow(hwnd, SW_HIDE);
             return;
         };
@@ -1413,13 +1448,46 @@ mod win {
                 return; // would leave the monitor; keep last position
             }
         }
-        let _ = MoveWindow(hwnd, x, y, w, h, true);
+        let rect = (x, y, w, h);
+        let already_placed = OVERLAYS.with(|slot| {
+            slot.borrow()
+                .iter()
+                .find(|o| o.hwnd == hwnd)
+                .is_some_and(|o| o.last_rect == Some(rect))
+        });
+        let moved = if already_placed {
+            false
+        } else if MoveWindow(hwnd, x, y, w, h, true).is_ok() {
+            OVERLAYS.with(|slot| {
+                if let Some(ov) = slot.borrow_mut().iter_mut().find(|o| o.hwnd == hwnd) {
+                    ov.last_rect = Some(rect);
+                }
+            });
+            true
+        } else {
+            false
+        };
         // Only re-show when actually hidden (e.g. returning from auto-hide).
         if !IsWindowVisible(hwnd).as_bool() {
             log_event("INFO", "overlay re-shown after being hidden");
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         }
-        log_occlusion(hwnd);
+        // Occlusion is a diagnostic: probing every second buys nothing, but a
+        // fresh placement is worth checking immediately.
+        let probe = LAST_OCCLUSION_PROBE.with(|cell| {
+            let now = Instant::now();
+            let due = moved
+                || cell
+                    .get()
+                    .is_none_or(|last| now.duration_since(last) >= Duration::from_secs(5));
+            if due {
+                cell.set(Some(now));
+            }
+            due
+        });
+        if probe {
+            log_occlusion(hwnd);
+        }
     }
 
     // ------------------------------------------------------- measurement/render
@@ -1613,11 +1681,18 @@ mod win {
     /// milliseconds and paint a bogus spike. Only the periodic timer (and
     /// startup) samples.
     unsafe fn relayout_overlay(hwnd: HWND) {
-        let Some(snapshot) = LAST_SNAPSHOT.with(|s| *s.borrow()) else {
-            sample_tick();
+        let Some(ov) = overlay_by_hwnd(hwnd) else {
             return;
         };
-        let Some(ov) = overlay_by_hwnd(hwnd) else {
+        // Auto-hide and fullscreen hide the overlay between sample ticks.
+        // Measuring/formatting/painting a window nobody can see is pure waste;
+        // the visible tick repaints from the latest snapshot.
+        if !IsWindowVisible(hwnd).as_bool() {
+            set_overlay_needs_render(hwnd, true);
+            return;
+        }
+        let Some(snapshot) = LAST_SNAPSHOT.with(|s| *s.borrow()) else {
+            sample_tick();
             return;
         };
         let cfg = config();
@@ -1630,7 +1705,14 @@ mod win {
         // Re-place with the new size before painting: a right-anchored window
         // must not grow into the tray until the next one-second move tick.
         apply_position(hwnd);
+        // `apply_position` may hide the overlay if the taskbar vanished between
+        // the check above and placement; do not paint a hidden window.
+        if !IsWindowVisible(hwnd).as_bool() {
+            set_overlay_needs_render(hwnd, true);
+            return;
+        }
         render_layered(hwnd, &row, ov.vertical);
+        set_overlay_needs_render(hwnd, false);
     }
 
     /// Queue the current CPU/MEM sample for the background history writer.
@@ -3089,6 +3171,8 @@ mod win {
                     left_edge,
                     win_w: 0,
                     win_h: 0,
+                    last_rect: None,
+                    needs_render: false,
                 })
             });
             log_event(
