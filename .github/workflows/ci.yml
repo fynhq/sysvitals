@@ -283,6 +283,14 @@ jobs:
             throw "installer failed with exit code $exit"
           }
           Write-Host "[smoke] clean install verified"
+          # Apps & features must show the bare app name; the version has
+          # its own DisplayVersion line.
+          $uninstallKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\{7E2F6C1A-4B3D-4F8E-9A21-6C5D8B7E9F10}_is1"
+          $displayName = (Get-ItemProperty -Path $uninstallKey -Name DisplayName).DisplayName
+          if ($displayName -ne "SysVitals") {
+            throw "Apps & features DisplayName is '$displayName', expected 'SysVitals'"
+          }
+          Write-Host "[smoke] Apps & features display name verified"
           $installed = @(
             "SysVitals.exe",
             "SysVitalsSettings.exe",
@@ -357,7 +365,6 @@ jobs:
           }
           Write-Host "[smoke] indicator stopped"
           # Downgrade guard: a higher installed version must block Setup.
-          $uninstallKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\{7E2F6C1A-4B3D-4F8E-9A21-6C5D8B7E9F10}_is1"
           if (!(Test-Path $uninstallKey)) { throw "uninstall registry key not found" }
           $realVersion = (Get-ItemProperty -Path $uninstallKey -Name DisplayVersion).DisplayVersion
           if (-not $realVersion) { throw "uninstall registry key has no DisplayVersion" }
