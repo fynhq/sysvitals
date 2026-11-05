@@ -504,6 +504,17 @@ struct HistoryView {
     /// the first (offscreen) frame. The loop activates it after the first
     /// data load.
     hidden_start: bool,
+    /// Logical size the anchored popup was laid out for. Windows creates the
+    /// window on whichever monitor the OS picks and then moves it to the
+    /// target display; crossing a DPI boundary makes the OS suggest a
+    /// rectangle scaled by the DPI ratio, so a 680x390 popup opened from a
+    /// 125% primary on a 100% secondary shrinks to 542x311. Re-assert the
+    /// intended size once the move has settled.
+    #[cfg(windows)]
+    fixed_size: Option<gpui_kit::Size<Pixels>>,
+    /// One-shot guard for [`Self::restore_popup_size`].
+    #[cfg(windows)]
+    size_fixed: bool,
     range: TimeRange,
     buckets: Vec<Bucket>,
     /// Window the current `buckets` were queried for; `points()` pads it to
@@ -569,13 +580,20 @@ impl HistoryView {
         lang: Language,
         csv_scope: CsvScope,
         hidden_start: bool,
+        fixed_size: Option<gpui_kit::Size<Pixels>>,
         first_load: Arc<AtomicBool>,
         shared: Option<Arc<HistoryShared>>,
         cx: &mut Context<Self>,
     ) -> Self {
+        #[cfg(not(windows))]
+        let _ = fixed_size;
         let mut view = Self {
             lang,
             hidden_start,
+            #[cfg(windows)]
+            fixed_size,
+            #[cfg(windows)]
+            size_fixed: false,
             range: TimeRange::Hour1,
             buckets: Vec::new(),
             query: None,
@@ -683,6 +701,44 @@ impl HistoryView {
         self._appearance = Some(subscription);
     }
 
+    /// Re-assert the logical size the anchored popup was laid out for after
+    /// the window has been moved to the indicator's display.
+    ///
+    /// Windows places the freshly created window on the OS's default monitor
+    /// and `SetWindowPlacement` then moves it to the anchor's display. When
+    /// that move crosses a DPI boundary, the `WM_DPICHANGED` suggested
+    /// rectangle is derived from the *old* DPI, so a window already sized for
+    /// the target DPI is scaled a second time (a 680x390 popup opened from a
+    /// 125% primary on a 100% secondary came out 542x311, leaving a visible
+    /// gap above the taskbar). GPUI applies that suggestion, so the intended
+    /// size has to be re-applied once the move is done. A same-DPI open
+    /// leaves the size within a pixel of the target and is left untouched.
+    #[cfg(windows)]
+    fn restore_popup_size(&mut self, window: &mut Window) {
+        if self.size_fixed {
+            return;
+        }
+        let Some(target) = self.fixed_size else {
+            return;
+        };
+        self.size_fixed = true;
+        let current = window.bounds().size;
+        let width = f32::from(current.width);
+        let height = f32::from(current.height);
+        let target_width = f32::from(target.width);
+        let target_height = f32::from(target.height);
+        if (width - target_width).abs() <= 1.0 && (height - target_height).abs() <= 1.0 {
+            return;
+        }
+        log_event(
+            "INFO",
+            &format!(
+                "history: restoring popup size after moving displays ({width}x{height} -> {target_width}x{target_height})"
+            ),
+        );
+        window.resize(target);
+    }
+
     /// Watch the window's activation and dismiss the popup when it loses
     /// focus after having been focused once. Idempotent.
     fn observe_activation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -695,6 +751,8 @@ impl HistoryView {
         // state, otherwise the first click-away would not close the popup.
         if window.is_window_active() {
             self.ever_active = true;
+            #[cfg(windows)]
+            self.restore_popup_size(window);
         }
         // On Windows the popup can open *without* ever being activated: the
         // indicator overlay was the foreground process when it launched this
@@ -717,11 +775,15 @@ impl HistoryView {
             // not see an edge; seed the guard from the post-activation state.
             if window.is_window_active() {
                 self.ever_active = true;
+                #[cfg(windows)]
+                self.restore_popup_size(window);
             }
         }
         let subscription = cx.observe_window_activation(window, |view, window, _| {
             if window.is_window_active() {
                 view.ever_active = true;
+                #[cfg(windows)]
+                view.restore_popup_size(window);
             } else if view.ever_active {
                 // Clicked away: dismiss the popup like a native menu.
                 view.mark_hidden();
@@ -1569,13 +1631,22 @@ fn apply_theme_and_accent(cx: &mut App) {
 /// `hidden_start` is passed to the view so its activation observer does not
 /// claim activation for the offscreen first frame: the resident launcher
 /// activates the window itself once the chart data is ready.
+///
+/// Returns the intended logical size of the anchored popup alongside the
+/// window, so the resident loop can restore it when the OS refused to
+/// activate (and therefore never delivered the activation edge the view
+/// uses for the same correction).
 fn open_history_window(
     cx: &mut App,
     anchor: Option<AnchorRect>,
     monitor: Option<DisplayId>,
     hidden_start: bool,
     shared: Option<Arc<HistoryShared>>,
-) -> Option<(AnyWindowHandle, Arc<AtomicBool>)> {
+) -> Option<(
+    AnyWindowHandle,
+    Arc<AtomicBool>,
+    Option<gpui_kit::Size<Pixels>>,
+)> {
     let cfg = match config_path().and_then(|p| Config::load(&p).map(|(c, _)| c)) {
         Ok(cfg) => cfg,
         Err(e) => {
@@ -1597,7 +1668,7 @@ fn open_history_window(
     // placed against, so a work area narrower than the default width
     // shrinks the popup instead of pinning it flush to a screen edge.
     let popup_size = size(px(680.), px(390.));
-    let window_bounds = match anchor.as_ref() {
+    let (window_bounds, layout_size) = match anchor.as_ref() {
         Some(a) => {
             let work = anchor_work_area(a, monitor, cx);
             let work_w = f32::from(work.size.width);
@@ -1605,9 +1676,12 @@ fn open_history_window(
             let width = f32::from(popup_size.width).min((work_w - 2.0 * POPUP_GAP).max(1.0));
             let height = f32::from(popup_size.height).min((work_h - 2.0 * POPUP_GAP).max(200.0));
             let popup_size = size(px(width), px(height));
-            Bounds::new(anchor_origin(a, width, height, &work), popup_size)
+            (
+                Bounds::new(anchor_origin(a, width, height, &work), popup_size),
+                Some(popup_size),
+            )
         }
-        None => Bounds::centered(None, popup_size, cx),
+        None => (Bounds::centered(None, popup_size, cx), None),
     };
     let anchored = anchor.is_some();
 
@@ -1678,7 +1752,17 @@ fn open_history_window(
         let first_load = first_load.clone();
         let shared = shared.clone();
         move |_window, cx| {
-            cx.new(|cx| HistoryView::new(lang, csv_scope, hidden_start, first_load, shared, cx))
+            cx.new(|cx| {
+                HistoryView::new(
+                    lang,
+                    csv_scope,
+                    hidden_start,
+                    layout_size,
+                    first_load,
+                    shared,
+                    cx,
+                )
+            })
         }
     });
     let (window_handle, _view) = match opened {
@@ -1689,7 +1773,7 @@ fn open_history_window(
         }
     };
     WINDOW_CREATED_MS.store(elapsed_ms() as u64, Ordering::Relaxed);
-    Some((window_handle, first_load))
+    Some((window_handle, first_load, layout_size))
 }
 
 /// Resident loop used on Windows: keep the process (and GPUI/DirectX) warm
@@ -1730,6 +1814,7 @@ fn run_resident(cx: &mut App) {
     cx.spawn(async move |cx| {
         let mut window: Option<AnyWindowHandle> = None;
         let mut first_load: Option<Arc<AtomicBool>> = None;
+        let mut popup_size: Option<gpui_kit::Size<Pixels>> = None;
         let mut activated = false;
         let mut opened_at: Option<Instant> = None;
         let mut last_activation_attempt: Option<Instant> = None;
@@ -1769,6 +1854,7 @@ fn run_resident(cx: &mut App) {
                     dismissed_generation = Some(open_generation);
                     window = None;
                     first_load = None;
+                    popup_size = None;
                     activated = false;
                     opened_at = None;
                     last_activation_attempt = None;
@@ -1794,6 +1880,7 @@ fn run_resident(cx: &mut App) {
                     unsafe { shared.mark_hidden() };
                     window = None;
                     first_load = None;
+                    popup_size = None;
                     activated = false;
                     opened_at = None;
                     last_activation_attempt = None;
@@ -1828,9 +1915,10 @@ fn run_resident(cx: &mut App) {
                         open_history_window(app, Some(anchor), monitor, true, Some(shared.clone()))
                     });
                     match reopened {
-                        Some((new_handle, ready)) => {
+                        Some((new_handle, ready, new_size)) => {
                             window = Some(new_handle);
                             first_load = Some(ready);
+                            popup_size = new_size;
                             activated = false;
                             opened_at = Some(Instant::now());
                             last_activation_attempt = None;
@@ -1846,6 +1934,7 @@ fn run_resident(cx: &mut App) {
                             unsafe { shared.mark_hidden() };
                             window = None;
                             first_load = None;
+                            popup_size = None;
                             log_event("WARN", "history: reopen at the new anchor failed");
                         }
                     }
@@ -1900,6 +1989,13 @@ fn run_resident(cx: &mut App) {
                         // armed. Log once for diagnosis.
                         activated = true;
                         unsafe { shared.set_visible(true) };
+                        // No activation edge means the view's observer never
+                        // ran, so restore the pre-move size here.
+                        if let Some(size) = popup_size {
+                            let _ = cx.update(|app| {
+                                handle.update(app, |_view, window, _| window.resize(size))
+                            });
+                        }
                         log_event(
                             "WARN",
                             &format!(
@@ -1931,9 +2027,10 @@ fn run_resident(cx: &mut App) {
                     open_history_window(app, anchor, monitor, true, Some(shared.clone()))
                 });
                 match opened {
-                    Some((handle, ready)) => {
+                    Some((handle, ready, size)) => {
                         window = Some(handle);
                         first_load = Some(ready);
+                        popup_size = size;
                         activated = false;
                         opened_at = Some(Instant::now());
                         last_activation_attempt = None;
