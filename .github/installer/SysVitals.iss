@@ -45,9 +45,8 @@ AppId={{7E2F6C1A-4B3D-4F8E-9A21-6C5D8B7E9F10}
 AppName=SysVitals
 ; AppVerName is deliberately omitted: Inno uses it as the Apps & features
 ; DisplayName, and the version already has its own DisplayVersion line.
-; Keep the Setup wizard title versioned instead.
+; The Setup wizard title therefore falls back to the app name.
 AppVersion={#AppVersion}
-SetupWindowTitle=Setup - SysVitals {#AppVersion}
 AppPublisher=SysVitals
 AppPublisherURL=https://github.com/fynhq/sysvitals
 AppSupportURL=https://github.com/fynhq/sysvitals
