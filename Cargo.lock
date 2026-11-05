@@ -196,6 +196,7 @@ dependencies = [
  "embed-resource",
  "gpui-kit",
  "libc",
+ "raw-window-handle",
  "sysvitals-core",
  "sysvitals-panel",
  "windows 0.62.2",

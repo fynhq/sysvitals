@@ -19,7 +19,11 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(windows)]
-use windows::Win32::Foundation::{CloseHandle, WAIT_TIMEOUT};
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+#[cfg(windows)]
+use windows::Win32::Foundation::{CloseHandle, HWND, WAIT_TIMEOUT};
+#[cfg(windows)]
+use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, HMONITOR, MONITORINFO};
 #[cfg(windows)]
 use windows::Win32::System::Memory::{
     MapViewOfFile, OpenFileMappingW, FILE_MAP_READ, FILE_MAP_WRITE,
@@ -32,6 +36,10 @@ use windows::Win32::System::Threading::{
 #[cfg(windows)]
 use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+};
+#[cfg(windows)]
+use windows::Win32::UI::WindowsAndMessaging::{
+    SetWindowPos, SWP_NOACTIVATE, SWP_NOREDRAW, SWP_NOSIZE, SWP_NOZORDER,
 };
 
 use chrono::{DateTime, Local};
@@ -217,6 +225,46 @@ fn anchor_origin(
         (work_bottom - size_h).max(work_top)
     };
     point(px(clamp_x(center_x - size_w * 0.5)), px(y))
+}
+
+/// Move the still-hidden popup onto the display it will open on, before GPUI
+/// activates it.
+///
+/// Windows creates the window on its default monitor and GPUI only moves it
+/// to the anchor's display when it is activated. When those displays use
+/// different DPIs, that move makes Windows resize the window by the DPI
+/// ratio, which is visible as the popup growing right after it opens. Moving
+/// the hidden window onto the target display first lets the DPI change happen
+/// while nothing can be seen; activation then only repositions it at the same
+/// DPI. Returns whether the window could be moved.
+#[cfg(windows)]
+fn preplace_hidden_popup(window: &mut Window, monitor: DisplayId) -> bool {
+    let Ok(handle) = HasWindowHandle::window_handle(&*window) else {
+        return false;
+    };
+    let RawWindowHandle::Win32(raw) = handle.as_raw() else {
+        return false;
+    };
+    let hwnd = HWND(raw.hwnd.get() as *mut _);
+    let mut info = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    if !unsafe { GetMonitorInfoW(HMONITOR(u64::from(monitor) as _), &mut info) }.as_bool() {
+        return false;
+    }
+    unsafe {
+        SetWindowPos(
+            hwnd,
+            None,
+            info.rcWork.left,
+            info.rcWork.top,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW,
+        )
+    }
+    .is_ok()
 }
 
 /// Time range options for the chart.
@@ -1772,6 +1820,29 @@ fn open_history_window(
             return None;
         }
     };
+    // The resident path opens the window hidden. Crossing a display DPI
+    // boundary during activation would make Windows resize it in view, so
+    // move it onto the target display now; the resize then happens while the
+    // window is still invisible.
+    #[cfg(windows)]
+    if hidden_start && anchored {
+        if let Some(monitor) = monitor {
+            let placed = window_handle
+                .update(cx, |_view, window, _| {
+                    preplace_hidden_popup(window, monitor)
+                })
+                .unwrap_or(false);
+            if !placed {
+                log_event(
+                    "WARN",
+                    &format!(
+                        "history: could not pre-place the popup on display 0x{:x}",
+                        u64::from(monitor)
+                    ),
+                );
+            }
+        }
+    }
     WINDOW_CREATED_MS.store(elapsed_ms() as u64, Ordering::Relaxed);
     Some((window_handle, first_load, layout_size))
 }
