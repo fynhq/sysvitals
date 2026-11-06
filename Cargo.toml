@@ -16,7 +16,7 @@ members = [
 default-members = ["crates/core"]
 
 [workspace.package]
-version = "0.4.2"
+version = "0.4.3"
 edition = "2021"
 rust-version = "1.95"
 license = "MIT"

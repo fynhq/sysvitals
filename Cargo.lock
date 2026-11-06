@@ -189,7 +189,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "app-history"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "arboard",
  "chrono",
@@ -204,7 +204,7 @@ dependencies = [
 
 [[package]]
 name = "app-mac"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "block2 0.6.2",
  "chrono",
@@ -217,7 +217,7 @@ dependencies = [
 
 [[package]]
 name = "app-settings"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "embed-resource",
  "gpui-kit",
@@ -233,7 +233,7 @@ dependencies = [
 
 [[package]]
 name = "app-win"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "embed-resource",
  "sysvitals-core",
@@ -6351,7 +6351,7 @@ dependencies = [
 
 [[package]]
 name = "sysvitals-core"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "anyhow",
  "directories",
@@ -6364,7 +6364,7 @@ dependencies = [
 
 [[package]]
 name = "sysvitals-panel"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "chrono",
  "gpui-kit",
