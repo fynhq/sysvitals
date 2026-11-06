@@ -388,6 +388,10 @@ impl Config {
             name.push_str(&format!(".{}.tmp", std::process::id()));
             dir_join(path.parent(), &name)
         };
+        // A crashed writer leaves its pid-stamped temp file behind forever;
+        // sweep stale ones (not our own, not a concurrent writer's fresh
+        // file) before writing so the config directory stays clean.
+        remove_orphan_tmp_files(path, &tmp);
         let text = self.to_toml_string()?;
 
         let write = (|| -> anyhow::Result<()> {
@@ -422,6 +426,48 @@ fn snap_u32(value: u32, allowed: &[u32]) -> u32 {
         .iter()
         .min_by_key(|x| x.abs_diff(value))
         .expect("allowed must be non-empty")
+}
+
+/// Best-effort cleanup of orphaned save temp files next to `path`. A crash
+/// between temp write and rename leaves `config.toml.<pid>.tmp` behind, and
+/// no live process ever removes it (the name embeds the dead writer's pid).
+/// Only files older than a minute are touched so a concurrently saving
+/// process keeps its fresh temp file.
+fn remove_orphan_tmp_files(path: &std::path::Path, own_tmp: &std::path::Path) {
+    let Some(dir) = path.parent() else {
+        return;
+    };
+    let Some(base) = path.file_name().and_then(|n| n.to_str()) else {
+        return;
+    };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    let cutoff = std::time::SystemTime::now().checked_sub(std::time::Duration::from_secs(60));
+    for entry in entries.flatten() {
+        if entry.path() == own_tmp {
+            continue;
+        }
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else {
+            continue;
+        };
+        let is_tmp = name.starts_with(&format!("{base}."))
+            && name.ends_with(".tmp")
+            && name[base.len()..].starts_with('.');
+        if !is_tmp {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .zip(cutoff)
+            .is_some_and(|(modified, cutoff)| modified <= cutoff);
+        if stale {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// Trim outer whitespace, drop control chars, cap to MAX_PREFIX_CHARS.
@@ -725,6 +771,27 @@ mod tests {
         let (c, issues) = Config::load(&path).unwrap();
         assert_eq!(c, Config::default());
         assert!(issues.is_empty());
+    }
+
+    #[test]
+    fn save_sweeps_stale_orphan_tmp_files_but_not_fresh_ones() {
+        let path = temp_config_path("orphans");
+        // A crashed writer's stale temp file (backdated past the one-minute
+        // guard) must be swept; a fresh temp file may belong to a concurrent
+        // saver and must survive; unrelated files are never touched.
+        let stale = path.with_file_name("config.toml.1111.tmp");
+        let fresh = path.with_file_name("config.toml.2222.tmp");
+        let decoy = path.with_file_name("notes.txt");
+        for f in [&stale, &fresh, &decoy] {
+            fs::write(f, b"x").unwrap();
+        }
+        let file = fs::File::options().write(true).open(&stale).unwrap();
+        file.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(120))
+            .unwrap();
+        Config::default().save(&path).unwrap();
+        assert!(!stale.exists(), "stale orphan temp file swept");
+        assert!(fresh.exists(), "fresh temp file kept for its writer");
+        assert!(decoy.exists(), "unrelated file untouched");
     }
 
     #[test]

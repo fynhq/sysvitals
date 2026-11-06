@@ -12,6 +12,7 @@
 //! so either can be swapped without changing the public surface.
 
 pub mod backdrop;
+pub mod cli;
 pub mod color;
 pub mod config;
 pub mod format;

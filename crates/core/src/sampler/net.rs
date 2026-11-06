@@ -33,6 +33,9 @@ pub enum NetSelection {
     #[default]
     Auto,
     /// Aggregate exactly these interface names (user override in settings).
+    ///
+    /// Reserved capability: fully implemented and tested, but no settings UI
+    /// exposes it yet — the display layers currently always pass `Auto`.
     Interfaces(Vec<String>),
 }
 
