@@ -21,7 +21,10 @@ mod macos {
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use chrono::Local;
+    // Shared process plumbing (daily-file logging, panic hook) lives in
+    // `sysvitals-support` so the indicator and the GPUI panels cannot drift.
+    use sysvitals_support::{log_event, prune_old_logs};
+
     use objc2::rc::Retained;
     use objc2::runtime::{AnyClass, AnyObject, Bool, ProtocolObject};
     use objc2::{define_class, msg_send, sel, ClassType, MainThreadMarker, MainThreadOnly};
@@ -78,69 +81,11 @@ mod macos {
         None => concat!("v", env!("CARGO_PKG_VERSION")),
     };
 
-    /// Local date (`YYYY-MM-DD`) and time (`HH:MM:SS`) for the log stamp, from
-    /// chrono's local clock (the macOS counterpart of the Windows overlay's
-    /// `GetLocalTime`-based `local_now`).
-    fn local_now() -> (String, String) {
-        let now = Local::now();
-        (
-            now.format("%Y-%m-%d").to_string(),
-            now.format("%H:%M:%S%.3f").to_string(),
-        )
-    }
-
-    /// Append one line to today's log under the data dir (mirrors the Windows
-    /// overlay: `core::logger` is platform-neutral, only the clock differs).
-    /// Logging must never break the indicator, so failures are ignored.
-    fn log_event(level: &str, message: &str) {
-        let Ok(dir) = sysvitals_core::config::data_dir() else {
-            return;
-        };
-        let (date, time) = local_now();
-        sysvitals_core::logger::log_line(&dir, &date, &time, level, message);
-    }
-
-    /// Remove log files older than the retention window. Run once at startup.
-    fn prune_old_logs() {
-        let Ok(dir) = sysvitals_core::config::data_dir() else {
-            return;
-        };
-        let (date, _) = local_now();
-        sysvitals_core::logger::prune_logs(
-            &dir,
-            &date,
-            sysvitals_core::logger::DEFAULT_RETENTION_DAYS,
-        );
-    }
-
-    /// Rust panic hook writing the panic to the log before the process dies.
-    /// The macOS counterpart of the Windows crash diagnostics minus the Win32
-    /// unhandled-exception filter (a SEH-only API; a mach-exception port
-    /// handler was judged out of scope — panics and normal exits are covered).
-    fn install_panic_hook() {
-        std::panic::set_hook(Box::new(|info| {
-            let msg = if let Some(s) = info.payload().downcast_ref::<&str>() {
-                s.to_string()
-            } else if let Some(s) = info.payload().downcast_ref::<String>() {
-                s.clone()
-            } else {
-                "unknown panic".to_string()
-            };
-            let loc = info
-                .location()
-                .map(|l| format!("{}:{}", l.file(), l.line()))
-                .unwrap_or_else(|| "unknown location".to_string());
-            let thread = std::thread::current()
-                .name()
-                .unwrap_or("unnamed")
-                .to_string();
-            let backtrace = std::backtrace::Backtrace::force_capture();
-            log_event(
-                "FATAL",
-                &format!("panic in thread {thread} at {loc}: {msg} | backtrace: {backtrace}"),
-            );
-        }));
-    }
+    // Logging (`log_event`, `prune_old_logs`) and the Rust panic hook come
+    // from `sysvitals-support`, shared with the Windows overlay and the GPUI
+    // panels. The macOS side additionally logs uncaught Objective-C
+    // exceptions below; a mach-exception port handler was judged out of
+    // scope — panics and normal exits are covered.
 
     /// Log uncaught Objective-C exceptions before AppKit turns them into a
     /// SIGABRT. Rust's panic hook cannot see these, so a crash inside an
@@ -360,9 +305,25 @@ mod macos {
         match Config::load_with_source(&path) {
             Ok((cfg, issues, source)) => {
                 log_config_issues(&issues);
+                // The sampler fixes `cpu_smoothing` at construction; a
+                // changed value drops it so the next tick rebuilds it
+                // (re-primes the CPU EMA and re-seeds the network baseline —
+                // one "--" frame, the same cost as a restart).
+                let smoothing_changed =
+                    CONFIG.with(|c| c.borrow().sample.cpu_smoothing != cfg.sample.cpu_smoothing);
                 CONFIG_MTIME.with(|m| *m.borrow_mut() = mtime);
                 CONFIG_ERROR_MTIME.set(0);
                 CONFIG.with(|c| *c.borrow_mut() = cfg.clone());
+                if smoothing_changed {
+                    SAMPLER.with(|s| *s.borrow_mut() = None);
+                    log_event(
+                        "INFO",
+                        &format!(
+                            "cpu_smoothing changed to {}: sampler rebuilds on the next tick",
+                            cfg.sample.cpu_smoothing
+                        ),
+                    );
+                }
                 if source == sysvitals_core::config::ConfigSource::File {
                     apply_auto_start(&cfg);
                 } else {
@@ -740,7 +701,9 @@ mod macos {
     /// reference-counted away.
     fn render_indicator(row: &FormattedRow, cfg: &Config) {
         let dual = cfg.display.dual_row && row.lines.len() > 1;
-        let spacing = f64::from(cfg.display.item_spacing.max(1));
+        // `sanitize` constrains `item_spacing` to {4, 8, 16, 32}, so no
+        // extra lower bound is needed here.
+        let spacing = f64::from(cfg.display.item_spacing);
         if !cfg.display.show_resources && !cfg.display.show_network {
             return;
         }
@@ -1554,119 +1517,128 @@ mod macos {
         // else, mirroring the Windows overlay's startup sequence. A second
         // launch exits quietly; the lock is held via an fd that is deliberately
         // leaked (see `acquire_single_instance`).
-        install_panic_hook();
+        sysvitals_support::install_panic_hook();
         if !acquire_single_instance() {
             log_event("INFO", "another instance is already running; exiting");
             return;
         }
         install_exception_logging();
 
-        // Get MainThreadMarker — must be on main thread.
-        let mtm = MainThreadMarker::new().expect("must run on main thread");
-        MTM.with(|m| *m.borrow_mut() = Some(mtm));
+        // Everything from the AppKit setup through the first tick runs
+        // before `app.run()` installs an autorelease pool per event-loop
+        // pass. Wrap it in an explicit pool so autoreleased objects (the
+        // status-bar button lookups, system font lookups, login-item
+        // plumbing) drain at the end of startup instead of leaking for
+        // the process lifetime.
+        let app = objc2::rc::autoreleasepool(|_pool| {
+            // Get MainThreadMarker — must be on main thread.
+            let mtm = MainThreadMarker::new().expect("must run on main thread");
+            MTM.with(|m| *m.borrow_mut() = Some(mtm));
 
-        // NSApplication setup — must happen on the main thread.
-        let app = NSApplication::sharedApplication(mtm);
-        app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+            // NSApplication setup — must happen on the main thread.
+            let app = NSApplication::sharedApplication(mtm);
+            app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
 
-        // Create the status item with variable width.
-        let status_bar = NSStatusBar::systemStatusBar();
-        let status_item = status_bar.statusItemWithLength(NSVariableStatusItemLength);
+            // Create the status item with variable width.
+            let status_bar = NSStatusBar::systemStatusBar();
+            let status_item = status_bar.statusItemWithLength(NSVariableStatusItemLength);
 
-        // Set initial title so something shows immediately.
-        if let Some(button) = status_item.button(mtm) {
-            let title = NSString::from_str("SysVitals");
-            button.setTitle(&title);
-        }
-
-        // Action handler (kept alive for the process lifetime).
-        let handler = ActionHandler::new(mtm);
-
-        // Wire button action (single click opens the chart, right click opens
-        // the context menu).
-        if let Some(button) = status_item.button(mtm) {
-            // SAFETY: setting a valid target and selector on the button.
-            unsafe {
-                button.setTarget(Some(&handler));
-                button.setAction(Some(sel!(buttonClicked:)));
+            // Set initial title so something shows immediately.
+            if let Some(button) = status_item.button(mtm) {
+                let title = NSString::from_str("SysVitals");
+                button.setTitle(&title);
             }
-            // Status-item buttons default to firing on mouse-down only, so a
-            // right-click never reaches the action and the context menu could
-            // not be raised from `buttonClicked:`. Subscribe explicitly to both
-            // mouse-up events (Apple's documented pattern for status items).
-            let mask = NSEventMask::LeftMouseUp | NSEventMask::RightMouseUp;
-            let _ = button.sendActionOn(mask);
-            // No pressed/selected backdrop: clear the cell's highlight masks so
-            // AppKit does not paint its own highlight behind the glyphs.
-            disable_button_highlight(&button);
-        }
 
-        // The application delegate is a weak reference; the handler stored in
-        // `ACTION_HANDLER` below is what keeps it alive for the process
-        // lifetime. The delegate hook covers the quit Apple Event macOS sends
-        // at log out / shutdown, which otherwise bypasses the menu's cleanup.
-        app.setDelegate(Some(ProtocolObject::from_ref(&*handler)));
+            // Action handler (kept alive for the process lifetime).
+            let handler = ActionHandler::new(mtm);
 
-        // Keep the handler alive for the process lifetime, addressable so the
-        // context menu can name it as the action target (see ACTION_HANDLER).
-        // The stored clone is sufficient; leaking the original as well would
-        // just retain one extra reference forever.
-        ACTION_HANDLER.with(|h| *h.borrow_mut() = Some(handler));
-
-        // Store the status item for the tick callback.
-        STATUS_ITEM.with(|si| *si.borrow_mut() = Some(status_item));
-
-        // Load initial config and seed the mtime cache with the same read.
-        // Without the seed the first tick reloads the file and logs a
-        // spurious "config reloaded" line on every normal launch.
-        let mut initial_config_ok = false;
-        if let Ok(path) = config_path() {
-            if let Ok((cfg, issues, source)) = Config::load_with_source(&path) {
-                log_config_issues(&issues);
-                CONFIG.with(|c| *c.borrow_mut() = cfg);
-                CONFIG_MTIME.with(|m| *m.borrow_mut() = config_mtime());
-                initial_config_ok = source == sysvitals_core::config::ConfigSource::File;
+            // Wire button action (single click opens the chart, right click opens
+            // the context menu).
+            if let Some(button) = status_item.button(mtm) {
+                // SAFETY: setting a valid target and selector on the button.
+                unsafe {
+                    button.setTarget(Some(&handler));
+                    button.setAction(Some(sel!(buttonClicked:)));
+                }
+                // Status-item buttons default to firing on mouse-down only, so a
+                // right-click never reaches the action and the context menu could
+                // not be raised from `buttonClicked:`. Subscribe explicitly to both
+                // mouse-up events (Apple's documented pattern for status items).
+                let mask = NSEventMask::LeftMouseUp | NSEventMask::RightMouseUp;
+                let _ = button.sendActionOn(mask);
+                // No pressed/selected backdrop: clear the cell's highlight masks so
+                // AppKit does not paint its own highlight behind the glyphs.
+                disable_button_highlight(&button);
             }
-        }
 
-        // Daily-file logging: prune stale logs once, then stamp the start and
-        // the effective config (same shape as the Windows overlay's startup
-        // log, so a user can just send this file when something looks wrong).
-        prune_old_logs();
-        let cfg = CONFIG.with(|c| c.borrow().clone());
-        log_event(
-            "INFO",
-            &format!(
-                "SysVitals (mac) starting (version={}, build={})",
-                env!("CARGO_PKG_VERSION"),
-                SV_BUILD_ID
-            ),
-        );
-        log_event(
-            "INFO",
-            &format!(
-                "config loaded: interval={}ms language={:?} theme={:?} dual_row={} \
-                 show_resources={} show_network={} item_spacing={}px auto_start={}",
-                cfg.sample.interval_ms,
-                cfg.display.language,
-                cfg.display.theme,
-                cfg.display.dual_row,
-                cfg.display.show_resources,
-                cfg.display.show_network,
-                cfg.display.item_spacing,
-                cfg.startup.auto_start,
-            ),
-        );
-        // A malformed config must not silently remove a login item the user
-        // enabled earlier; only apply after a successful initial read.
-        if initial_config_ok {
-            apply_auto_start(&cfg);
-            log_event("INFO", "startup: login-item state applied");
-        }
+            // The application delegate is a weak reference; the handler stored in
+            // `ACTION_HANDLER` below is what keeps it alive for the process
+            // lifetime. The delegate hook covers the quit Apple Event macOS sends
+            // at log out / shutdown, which otherwise bypasses the menu's cleanup.
+            app.setDelegate(Some(ProtocolObject::from_ref(&*handler)));
 
-        // Initial tick: primes the repeating sample timer and lazily creates
-        // the background history writer on the first enabled sample.
-        tick();
+            // Keep the handler alive for the process lifetime, addressable so the
+            // context menu can name it as the action target (see ACTION_HANDLER).
+            // The stored clone is sufficient; leaking the original as well would
+            // just retain one extra reference forever.
+            ACTION_HANDLER.with(|h| *h.borrow_mut() = Some(handler));
+
+            // Store the status item for the tick callback.
+            STATUS_ITEM.with(|si| *si.borrow_mut() = Some(status_item));
+
+            // Load initial config and seed the mtime cache with the same read.
+            // Without the seed the first tick reloads the file and logs a
+            // spurious "config reloaded" line on every normal launch.
+            let mut initial_config_ok = false;
+            if let Ok(path) = config_path() {
+                if let Ok((cfg, issues, source)) = Config::load_with_source(&path) {
+                    log_config_issues(&issues);
+                    CONFIG.with(|c| *c.borrow_mut() = cfg);
+                    CONFIG_MTIME.with(|m| *m.borrow_mut() = config_mtime());
+                    initial_config_ok = source == sysvitals_core::config::ConfigSource::File;
+                }
+            }
+
+            // Daily-file logging: prune stale logs once, then stamp the start and
+            // the effective config (same shape as the Windows overlay's startup
+            // log, so a user can just send this file when something looks wrong).
+            prune_old_logs();
+            let cfg = CONFIG.with(|c| c.borrow().clone());
+            log_event(
+                "INFO",
+                &format!(
+                    "SysVitals (mac) starting (version={}, build={})",
+                    env!("CARGO_PKG_VERSION"),
+                    SV_BUILD_ID
+                ),
+            );
+            log_event(
+                "INFO",
+                &format!(
+                    "config loaded: interval={}ms language={:?} theme={:?} dual_row={} \
+                     show_resources={} show_network={} item_spacing={}px auto_start={}",
+                    cfg.sample.interval_ms,
+                    cfg.display.language,
+                    cfg.display.theme,
+                    cfg.display.dual_row,
+                    cfg.display.show_resources,
+                    cfg.display.show_network,
+                    cfg.display.item_spacing,
+                    cfg.startup.auto_start,
+                ),
+            );
+            // A malformed config must not silently remove a login item the user
+            // enabled earlier; only apply after a successful initial read.
+            if initial_config_ok {
+                apply_auto_start(&cfg);
+                log_event("INFO", "startup: login-item state applied");
+            }
+
+            // Initial tick: primes the repeating sample timer and lazily creates
+            // the background history writer on the first enabled sample.
+            tick();
+            app
+        });
 
         // Enter the application event loop (blocks forever). Quit goes through
         // `terminate:`, which exits the process; returning here means the run
