@@ -19,27 +19,15 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(windows)]
-use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-#[cfg(windows)]
-use windows::Win32::Foundation::{CloseHandle, HWND, WAIT_TIMEOUT};
-#[cfg(windows)]
-use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, HMONITOR, MONITORINFO};
+use windows::Win32::Foundation::{CloseHandle, WAIT_TIMEOUT};
 #[cfg(windows)]
 use windows::Win32::System::Memory::{
-    MapViewOfFile, OpenFileMappingW, FILE_MAP_READ, FILE_MAP_WRITE,
+    MapViewOfFile, OpenFileMappingW, UnmapViewOfFile, FILE_MAP_READ, FILE_MAP_WRITE,
 };
 #[cfg(windows)]
 use windows::Win32::System::Threading::{
     GetCurrentProcess, OpenProcess, SetProcessWorkingSetSize, WaitForSingleObject,
     PROCESS_SYNCHRONIZE,
-};
-#[cfg(windows)]
-use windows::Win32::UI::HiDpi::{
-    SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
-};
-#[cfg(windows)]
-use windows::Win32::UI::WindowsAndMessaging::{
-    SetWindowPos, SWP_NOACTIVATE, SWP_NOREDRAW, SWP_NOSIZE, SWP_NOZORDER,
 };
 
 use chrono::{DateTime, Local};
@@ -51,51 +39,26 @@ use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
+use sysvitals_core::cli::AnchorRect;
 use sysvitals_core::config::{config_path, history_path, Config, CsvScope};
 use sysvitals_core::i18n::{t, Language};
 use sysvitals_core::store::{floor_to_grid, Bucket, Store};
 #[cfg(windows)]
 use sysvitals_panel::panel_font_family;
 use sysvitals_panel::{
-    backdrop_for, detect_material, system_accent_hex, PanelSurface, CONTROL_RADIUS,
+    anchor_visible_bounds, backdrop_for, detect_material, log_event, observe_system_appearance,
+    restore_window_size_after_move, spawn_accent_watch, PanelSurface, CONTROL_RADIUS,
 };
+#[cfg(windows)]
+use sysvitals_panel::{preplace_hidden_window, set_per_monitor_dpi_aware, utf16, window_hwnd};
 
-/// Screen rectangle of the indicator, passed by the overlay in GPUI's
-/// global logical pixel space (top-left origin, y growing downward).
-/// Both platform overlays convert their native coordinates to that space
-/// before launching.
-struct AnchorRect {
-    left: f32,
-    top: f32,
-    right: f32,
-    bottom: f32,
-}
-
-/// Parse `--anchor L T R B` from the process arguments. Absent, malformed,
-/// or degenerate rectangles yield `None`, which keeps the old centered
-/// behavior — a bad argument must never prevent the window from opening.
+/// Parse `--anchor L T R B`; the pure parsing lives in `core::cli` (shared
+/// with the settings panel). Absent, malformed, or degenerate rectangles
+/// yield `None`, which keeps the old centered behavior — a bad argument must
+/// never prevent the window from opening.
 fn parse_anchor() -> Option<AnchorRect> {
-    let mut args = env::args().skip(1);
-    while let Some(arg) = args.next() {
-        if arg != "--anchor" {
-            continue;
-        }
-        let mut nums = [0f32; 4];
-        for slot in nums.iter_mut() {
-            *slot = args.next()?.trim().parse().ok()?;
-        }
-        if !nums.iter().all(|n| n.is_finite()) {
-            return None;
-        }
-        let [left, top, right, bottom] = nums;
-        return (right > left && bottom > top).then_some(AnchorRect {
-            left,
-            top,
-            right,
-            bottom,
-        });
-    }
-    None
+    let args: Vec<String> = env::args().skip(1).collect();
+    sysvitals_core::cli::parse_anchor(&args)
 }
 
 /// Parse `--anchor-monitor <handle>` from the process arguments: the native
@@ -115,36 +78,13 @@ fn parse_anchor_monitor() -> Option<DisplayId> {
 
 /// The usable area of the display an anchor sits on (taskbar/dock excluded),
 /// used to flip and clamp the popup inside a screen the indicator is on.
-///
-/// When the indicator passed its native display handle, that display is
-/// selected directly: GPUI scales each monitor's logical space by its own
-/// factor, so a rectangle alone can fall inside two displays' bounds on a
-/// mixed-DPI setup. The rectangle probe remains as the fallback for launches
-/// without the handle (older companion process, macOS).
+/// Display selection is shared with the settings window
+/// (`sysvitals_panel::anchor_visible_bounds`: the native monitor handle is
+/// authoritative when passed, the rectangle midpoint probe is the fallback
+/// for launches without it); this wrapper adds the last-resort defaults.
 fn anchor_work_area(anchor: &AnchorRect, monitor: Option<DisplayId>, cx: &App) -> Bounds<Pixels> {
-    if let Some(monitor) = monitor {
-        if let Some(display) = cx.displays().into_iter().find(|d| d.id() == monitor) {
-            return display.visible_bounds();
-        }
-    }
-    let probe = point(
-        px((anchor.left + anchor.right) * 0.5),
-        px((anchor.top + anchor.bottom) * 0.5),
-    );
-    cx.displays()
-        .into_iter()
-        // The indicator lies inside the taskbar/menu bar, i.e. outside the
-        // *work* area. Match against the full monitor bounds first, then use
-        // that monitor's work area for placement; otherwise a secondary
-        // taskbar would fall back to the primary display.
-        .find(|display| display.bounds().contains(&probe))
-        .or_else(|| {
-            cx.displays()
-                .into_iter()
-                .find(|display| display.visible_bounds().contains(&probe))
-        })
-        .or_else(|| cx.primary_display())
-        .map(|display| display.visible_bounds())
+    anchor_visible_bounds(cx, anchor, monitor)
+        .or_else(|| cx.primary_display().map(|display| display.visible_bounds()))
         .unwrap_or_else(|| Bounds::new(point(px(0.), px(0.)), size(px(1280.), px(720.))))
 }
 
@@ -227,53 +167,12 @@ fn anchor_origin(
     point(px(clamp_x(center_x - size_w * 0.5)), px(y))
 }
 
-/// Native window handle of a GPUI window, if it has one.
-#[cfg(windows)]
-fn popup_hwnd(window: &Window) -> Option<HWND> {
-    let handle = HasWindowHandle::window_handle(window).ok()?;
-    let RawWindowHandle::Win32(raw) = handle.as_raw() else {
-        return None;
-    };
-    Some(HWND(raw.hwnd.get() as *mut _))
-}
-
-/// Move the still-hidden popup onto the display it will open on, before GPUI
-/// activates it.
-///
-/// Windows creates the window on its default monitor and GPUI only moves it
-/// to the anchor's display when it is activated. When those displays use
-/// different DPIs, that move makes Windows resize the window by the DPI
-/// ratio, which is visible as the popup growing right after it opens. Moving
-/// the hidden window onto the target display first lets the DPI change happen
-/// while nothing can be seen; activation then only repositions it at the same
-/// DPI. Returns whether the window could be moved.
-///
-/// Must run outside an App update: `SetWindowPos` synchronously delivers
-/// `WM_MOVE`/`WM_SIZE`, and those messages re-enter GPUI's window callbacks
-/// (`AsyncApp::update`) while the app is already borrowed, panicking with
-/// "RefCell already borrowed".
-#[cfg(windows)]
-fn preplace_hidden_popup(hwnd: HWND, monitor: DisplayId) -> bool {
-    let mut info = MONITORINFO {
-        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-        ..Default::default()
-    };
-    if !unsafe { GetMonitorInfoW(HMONITOR(u64::from(monitor) as _), &mut info) }.as_bool() {
-        return false;
-    }
-    unsafe {
-        SetWindowPos(
-            hwnd,
-            None,
-            info.rcWork.left,
-            info.rcWork.top,
-            0,
-            0,
-            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW,
-        )
-    }
-    .is_ok()
-}
+// The native window handle helper (`window_hwnd`) and the hidden-window
+// pre-placement (`preplace_hidden_window`) live in `sysvitals_panel`, shared
+// with the settings window. Pre-placement must run outside an App update:
+// `SetWindowPos` synchronously delivers `WM_MOVE`/`WM_SIZE`, which re-enter
+// GPUI's window callbacks while the app is already borrowed, panicking with
+// "RefCell already borrowed".
 
 /// Time range options for the chart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -385,6 +284,13 @@ struct VisibleQuery {
 /// seconds makes the chart follow the indicator in near real time.
 const REFRESH_INTERVAL: Duration = Duration::from_secs(3);
 
+/// Bucket width at or above which a query runs off the UI thread. The 1 d
+/// view (bucket 120 s) and 1 mo view (3600 s) scan the whole retention
+/// window; in the raw-only fallback (a failed rollup backfill) that is the
+/// full raw table. Narrower views read a few hundred rows and stay on the
+/// in-view connection.
+const ASYNC_MIN_BUCKET_SECS: i64 = 120;
+
 /// Shared-state poll cadence. A visible popup still polls tighter than an idle
 /// resident so the indicator's close request feels immediate; the no-window
 /// loop only needs to notice a click and the parent's exit, so it wakes 4
@@ -444,11 +350,6 @@ fn transparent_color() -> Hsla {
 
 // ------------------------------------------------------- resident mode (Windows)
 
-#[cfg(windows)]
-fn utf16(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(std::iter::once(0)).collect()
-}
-
 /// The command/status block created by the indicator. The resident process
 /// keeps a read/write view of it for its whole lifetime; the one-shot macOS
 /// path never maps it.
@@ -485,9 +386,10 @@ impl HistoryShared {
     fn mark_hidden(&self) {}
 }
 
-/// Open the indicator-owned state block. A missing block means this process
-/// was not started by a resident-capable overlay, so it exits instead of
-/// lingering invisibly.
+/// Open the indicator-owned state block. A missing block — or one that fails
+/// the magic/version check, i.e. was not created by this project's overlay —
+/// means this process was not started by a resident-capable overlay, so it
+/// exits instead of lingering invisibly.
 #[cfg(windows)]
 fn open_history_state() -> Option<*mut sysvitals_core::HistoryState> {
     let name = utf16(sysvitals_core::HISTORY_STATE_MAP);
@@ -506,42 +408,39 @@ fn open_history_state() -> Option<*mut sysvitals_core::HistoryState> {
             std::mem::size_of::<sysvitals_core::HistoryState>(),
         );
         let _ = CloseHandle(mapping);
-        (!view.Value.is_null()).then_some(view.Value as *mut sysvitals_core::HistoryState)
+        if view.Value.is_null() {
+            return None;
+        }
+        let ptr = view.Value as *mut sysvitals_core::HistoryState;
+        // Validate the header before trusting any flag: a block without the
+        // expected magic/version is not ours (or is corrupt), and consuming
+        // its `desired_open` could open or close popups spuriously.
+        let header = sysvitals_core::HistoryState::read_consistent(ptr);
+        if header.magic != sysvitals_core::HISTORY_STATE_MAGIC
+            || header.version != sysvitals_core::HISTORY_STATE_VERSION
+        {
+            let _ = UnmapViewOfFile(view);
+            return None;
+        }
+        Some(ptr)
     }
 }
 
 /// `--parent-pid <pid>`: the process exits when the indicator does, even if
-/// the launcher never gets a chance to terminate it.
+/// the launcher never gets a chance to terminate it. The pure parsing lives
+/// in `core::cli` (shared with the settings panel).
 fn parse_parent_pid() -> Option<u32> {
-    let mut args = env::args().skip(1);
-    while let Some(arg) = args.next() {
-        if arg == "--parent-pid" {
-            return args.next()?.parse().ok();
-        }
-    }
-    None
+    let args: Vec<String> = env::args().skip(1).collect();
+    sysvitals_core::cli::parse_parent_pid(&args)
 }
 
 /// macOS one-shot popup: quit when the menu-bar indicator goes away instead
 /// of lingering as an orphan window. Windows resident mode has the stronger
-/// process-handle check in `run_resident`.
+/// process-handle check in `run_resident`. Shared one-second poll in
+/// `sysvitals_panel::watch_parent`.
 #[cfg(target_os = "macos")]
 fn watch_parent(cx: &mut App) {
-    let Some(pid) = parse_parent_pid() else {
-        return;
-    };
-    log_event("INFO", &format!("history: watching parent pid {pid}"));
-    cx.spawn(async move |cx| loop {
-        cx.background_executor().timer(Duration::from_secs(1)).await;
-        if unsafe { libc::kill(pid as i32, 0) } != 0
-            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
-        {
-            log_event("INFO", "history: parent process gone; exiting");
-            cx.update(|app| app.quit());
-            break;
-        }
-    })
-    .detach();
+    sysvitals_panel::watch_parent(cx, "history");
 }
 
 #[cfg(windows)]
@@ -576,6 +475,10 @@ struct HistoryView {
     /// Window the current `buckets` were queried for; `points()` pads it to
     /// one slot per bucket so the category x axis stays time-linear.
     query: Option<VisibleQuery>,
+    /// Generation ticket for wide background queries: a result whose ticket
+    /// no longer matches the current one (the range switched mid-flight) is
+    /// dropped instead of painting stale points under a new axis.
+    load_seq: u64,
     /// One connection kept for the window's lifetime. Reopening SQLite every
     /// three seconds re-ran WAL/schema setup and contended with the
     /// indicator's writer for no benefit.
@@ -653,6 +556,7 @@ impl HistoryView {
             range: TimeRange::Hour1,
             buckets: Vec::new(),
             query: None,
+            load_seq: 0,
             store: None,
             data_error_logged: false,
             csv_scope,
@@ -693,33 +597,13 @@ impl HistoryView {
     /// with the view entity, i.e. when the window closes. Same shape as the
     /// settings window's accent poll.
     fn start_accent_watch(&mut self, cx: &mut Context<Self>) {
-        cx.spawn(async move |this, cx| loop {
-            cx.background_executor()
-                .timer(Duration::from_millis(500))
-                .await;
-            let alive = this
-                .update(cx, |view: &mut HistoryView, cx| {
-                    let current = system_accent_hex();
-                    if current == view.last_accent {
-                        return true;
-                    }
-                    view.last_accent = current;
-                    if current.is_some() {
-                        sysvitals_panel::apply_accent(cx);
-                    } else {
-                        // The OS moved back to "multicolor": reload the palette
-                        // so the old accent override is removed.
-                        apply_theme_and_accent(cx);
-                    }
-                    cx.notify();
-                    true
-                })
-                .unwrap_or(false);
-            if !alive {
-                break;
-            }
-        })
-        .detach();
+        // Shared 500 ms accent poll (`sysvitals_panel`); it stops with the
+        // view entity, i.e. when the window closes.
+        spawn_accent_watch(
+            cx,
+            |view: &mut HistoryView| &mut view.last_accent,
+            |cx| apply_theme_and_accent(cx),
+        );
     }
 
     /// Dismiss the popup when Esc is pressed.
@@ -746,15 +630,14 @@ impl HistoryView {
         if self._appearance.is_some() {
             return;
         }
-        let subscription = cx.observe_window_appearance(window, |_view: &mut Self, _w, cx| {
-            // The popup always mirrors the OS light/dark appearance; a
-            // live system flip repaints it with the same palette that the
-            // rest of the desktop is now using. Accent override must be
-            // re-applied because a palette reload replaces every field.
+        // The popup always mirrors the OS light/dark appearance; a live
+        // system flip repaints it with the palette the rest of the desktop is
+        // now using. Accent override must be re-applied because a palette
+        // reload replaces every field. Shared registration lives in
+        // `sysvitals_panel::observe_system_appearance`.
+        self._appearance = Some(observe_system_appearance(cx, window, |cx| {
             apply_theme_and_accent(cx);
-            cx.notify();
-        });
-        self._appearance = Some(subscription);
+        }));
     }
 
     /// Re-assert the logical size the anchored popup was laid out for after
@@ -771,28 +654,11 @@ impl HistoryView {
     /// leaves the size within a pixel of the target and is left untouched.
     #[cfg(windows)]
     fn restore_popup_size(&mut self, window: &mut Window) {
-        if self.size_fixed {
-            return;
-        }
         let Some(target) = self.fixed_size else {
             return;
         };
-        self.size_fixed = true;
-        let current = window.bounds().size;
-        let width = f32::from(current.width);
-        let height = f32::from(current.height);
-        let target_width = f32::from(target.width);
-        let target_height = f32::from(target.height);
-        if (width - target_width).abs() <= 1.0 && (height - target_height).abs() <= 1.0 {
-            return;
-        }
-        log_event(
-            "INFO",
-            &format!(
-                "history: restoring popup size after moving displays ({width}x{height} -> {target_width}x{target_height})"
-            ),
-        );
-        window.resize(target);
+        // Shared cross-DPI size correction (`sysvitals_panel`).
+        restore_window_size_after_move(window, &mut self.size_fixed, target);
     }
 
     /// Watch the window's activation and dismiss the popup when it loses
@@ -816,25 +682,20 @@ impl HistoryView {
         // activation attempt — then `ever_active` never flips and a click away
         // never closes the window (the reported bug: a fast double click opens
         // the popup but clicking elsewhere leaves it stuck; a single click
-        // usually activates fine). When the first-frame seed found the window
-        // inactive, claim activation through GPUI's own `activate_window` path
-        // (reassert placement + inject an Alt press so `SetForegroundWindow`
-        // is permitted). The resulting WM_ACTIVATE edge flows through the
-        // observer below and arms the blur-close. macOS is deliberately
-        // untouched: its panel is an accessory app's window with its own
-        // key-window lifecycle, unverified at runtime, and the bug was only
-        // ever reproduced on Windows.
-        #[cfg(windows)]
-        if !self.ever_active && !self.hidden_start {
-            window.activate_window();
-            // If activation completed synchronously, the observer below will
-            // not see an edge; seed the guard from the post-activation state.
-            if window.is_window_active() {
-                self.ever_active = true;
-                #[cfg(windows)]
-                self.restore_popup_size(window);
-            }
-        }
+        // usually activates fine). The one-shot launch therefore claims
+        // activation through GPUI's own `activate_window` path (reassert
+        // placement + inject an Alt press so `SetForegroundWindow` is
+        // permitted) — but that call runs as a foreground task from the
+        // launch site, never from this render pass: `activate_window`
+        // internally calls `SetForegroundWindow`/`SetWindowPos`, which
+        // synchronously dispatch WM_ACTIVATE/WM_MOVE into GPUI while the app
+        // is already borrowed (the same re-entrancy documented on
+        // `sysvitals_panel::preplace_hidden_window`). The resulting
+        // WM_ACTIVATE edge flows through the observer below and arms the
+        // blur-close. macOS is deliberately untouched: its panel is an
+        // accessory app's window with its own key-window lifecycle,
+        // unverified at runtime, and the bug was only ever reproduced on
+        // Windows.
         let subscription = cx.observe_window_activation(window, |view, window, _| {
             if window.is_window_active() {
                 view.ever_active = true;
@@ -899,7 +760,7 @@ impl HistoryView {
             if this
                 .update(cx, |view: &mut HistoryView, cx| {
                     view.reload_config();
-                    view.load_data();
+                    view.load_data(cx);
                     view.first_load.store(true, Ordering::Release);
                     log_event(
                         "INFO",
@@ -931,7 +792,7 @@ impl HistoryView {
                         // config changed something visible.
                         let live = view.range.auto_refresh();
                         if live {
-                            view.load_data();
+                            view.load_data(cx);
                         }
                         if live || config_changed {
                             cx.notify();
@@ -1003,20 +864,66 @@ impl HistoryView {
         }
     }
 
-    fn load_data(&mut self) {
+    fn load_data(&mut self, cx: &mut Context<Self>) {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
         let query = self.visible_query(now);
         self.query = Some(query);
-        // Clear on failure: otherwise a range switch would keep showing the
-        // previous range's points under the new axis.
+        // Every load advances the ticket: a pending wide query whose range
+        // was replaced (by another wide range or by a narrow synchronous
+        // load) is dropped when it delivers.
+        self.load_seq = self.load_seq.wrapping_add(1);
+        if query.bucket < ASYNC_MIN_BUCKET_SECS {
+            self.load_data_sync(query);
+            return;
+        }
+        // Wide ranges query in the background: the 1 d / 1 mo views scan the
+        // whole retention window, and in the raw-only fallback (a failed
+        // rollup backfill) that is the full raw table, which froze the popup
+        // on slow disks. A fresh read-only connection is opened inside the
+        // task because the view's `Store` is not `Send`; the generation
+        // ticket drops a stale result when the range switched mid-flight.
+        // Clear immediately so the previous range's points never render
+        // under the new axis.
+        self.buckets = Vec::new();
+        let seq = self.load_seq;
+        let executor = cx.background_executor().clone();
+        cx.spawn(async move |this, cx| {
+            let loaded = executor
+                .spawn(async move {
+                    let path = history_path().map_err(|e| e.to_string())?;
+                    let store = Store::open(&path).map_err(|e| e.to_string())?;
+                    query_buckets(&store, query)
+                })
+                .await;
+            let _ = this.update(cx, |view: &mut HistoryView, cx| {
+                if view.load_seq != seq {
+                    return;
+                }
+                match loaded {
+                    Ok(buckets) => {
+                        view.buckets = buckets;
+                        view.data_error_logged = false;
+                    }
+                    Err(e) => view.log_data_error(format!("history: query failed: {e}")),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Synchronous path for narrow buckets: reuse the window's long-lived
+    /// connection (see `ensure_store`). Clears on failure so a range switch
+    /// never shows the previous range's points under the new axis.
+    fn load_data_sync(&mut self, query: VisibleQuery) {
+        // The curve draws at the fine CSV bucket width; axis labels are
+        // generated independently from the time window (see `axis_labels`).
+        // One query serves both — no coarse pass.
         let mut buckets = Vec::new();
         if self.ensure_store() {
-            // The curve draws at the fine CSV bucket width; axis labels are
-            // generated independently from the time window (see
-            // `axis_labels`). One query serves both — no coarse pass.
             let result = self.store.as_ref().map(|store| query_buckets(store, query));
             match result {
                 Some(Ok(loaded)) => {
@@ -1342,12 +1249,6 @@ fn elapsed_ms() -> u128 {
         .unwrap_or(0)
 }
 
-/// Append one milestone line to the shared daily log. The log path never
-/// fails the popup: errors are swallowed inside `logger::log_line`.
-fn log_event(level: &str, message: &str) {
-    sysvitals_panel::log_event(level, message);
-}
-
 impl Render for HistoryView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let lang = self.lang;
@@ -1387,7 +1288,7 @@ impl Render for HistoryView {
                 .label(label)
                 .on_click(cx.listener(move |this: &mut Self, _: &ClickEvent, _, cx| {
                     this.range = r;
-                    this.load_data();
+                    this.load_data(cx);
                     cx.notify();
                 }));
             range_buttons = range_buttons.child(btn);
@@ -1833,20 +1734,20 @@ fn open_history_window(
     // move it onto the target display now; the resize then happens while the
     // window is still invisible. The move runs as a foreground task because
     // `SetWindowPos` must not be called while the app is borrowed (see
-    // `preplace_hidden_popup`); the task still executes well before the
-    // resident loop activates the window.
+    // `sysvitals_panel::preplace_hidden_window`); the task still executes
+    // well before the resident loop activates the window.
     #[cfg(windows)]
     if hidden_start && anchored {
         if let Some(monitor) = monitor {
             let hwnd = window_handle
-                .update(cx, |_view, window, _| popup_hwnd(&*window))
+                .update(cx, |_view, window, _| window_hwnd(&*window))
                 .ok()
                 .flatten();
             match hwnd {
                 Some(hwnd) => {
                     cx.foreground_executor()
                         .spawn(async move {
-                            if !preplace_hidden_popup(hwnd, monitor) {
+                            if !preplace_hidden_window(hwnd, monitor) {
                                 log_event(
                                     "WARN",
                                     &format!(
@@ -2174,9 +2075,7 @@ fn main() {
     // is treated as DPI-unaware and Windows bitmap-stretches the whole window
     // on a scaled display, which is what makes the text look soft.
     #[cfg(windows)]
-    unsafe {
-        let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-    }
+    set_per_monitor_dpi_aware();
 
     // Windows resident mode: the overlay starts this process once and keeps
     // it alive with no window. macOS keeps the one-shot launch used by its
@@ -2213,7 +2112,12 @@ fn main() {
             .with_assets(gpui_kit::assets::Assets)
             .with_quit_mode(QuitMode::Explicit)
     } else {
-        gpui_kit::application().with_assets(gpui_kit::assets::Assets)
+        // One-shot instance (manual launch): quit with the last window
+        // instead of lingering invisibly after the popup closes. The default
+        // application() keeps the process alive past its last window.
+        gpui_kit::application()
+            .with_assets(gpui_kit::assets::Assets)
+            .with_quit_mode(QuitMode::LastWindowClosed)
     };
     #[cfg(not(any(windows, target_os = "macos")))]
     let app = gpui_kit::application().with_assets(gpui_kit::assets::Assets);
@@ -2248,8 +2152,29 @@ fn main() {
                 monitor
             ),
         );
-        if open_history_window(cx, anchor, monitor, false, None).is_none() {
-            cx.quit();
+        match open_history_window(cx, anchor, monitor, false, None) {
+            Some((_window_handle, _ready, _size)) => {
+                // One-shot launch: the popup can land without activation when
+                // the foreground lock refuses the launching process, so claim
+                // activation as a foreground task — never inside render (see
+                // `observe_activation`) — and seed the blur-close guard from
+                // the post-activation state, which the observer cannot see
+                // when activation completed before it registered.
+                #[cfg(windows)]
+                cx.spawn(async move |cx| {
+                    let _ = cx.update(|app| {
+                        _window_handle.update(app, |view: &mut HistoryView, window, _| {
+                            window.activate_window();
+                            if window.is_window_active() {
+                                view.ever_active = true;
+                                view.restore_popup_size(window);
+                            }
+                        })
+                    });
+                })
+                .detach();
+            }
+            None => cx.quit(),
         }
     });
     log_event("INFO", "history: exited");
