@@ -1031,12 +1031,13 @@ mod win {
 
     /// Horizontal anchor for an indicator inside one taskbar: the left edge of
     /// its notification area when the bar shows tray icons, otherwise the left
-    /// edge of the show-desktop button, otherwise the bar's right edge.
+    /// edge of the show-desktop button, otherwise the clock's left edge, and
+    /// finally the bar's right edge.
     ///
     /// Secondary bars have no `TrayNotifyWnd` until "show tray icons on all
     /// displays" is enabled. Anchoring such a bar to its raw right edge would
-    /// put the indicator on top of the show-desktop button, so that button —
-    /// when present — is the better boundary.
+    /// put the indicator on top of the date/time — the only thing on that end
+    /// of the bar — so the clock is resolved through UI Automation first.
     unsafe fn taskbar_anchor_left(bar: HWND) -> i32 {
         if let Some(left) = visible_child_left(bar, "TrayNotifyWnd") {
             return left;
@@ -1045,11 +1046,149 @@ mod win {
             return left;
         }
         let mut rect = RECT::default();
-        if GetWindowRect(bar, &mut rect).is_ok() {
-            rect.right
-        } else {
-            0
+        if GetWindowRect(bar, &mut rect).is_err() {
+            return 0;
         }
+        if let Some(left) = clock_anchor_left(bar, rect) {
+            return left;
+        }
+        rect.right
+    }
+
+    /// Cached clock-button anchor for one taskbar. UIA crosses into Explorer
+    /// and costs tens of milliseconds, so the value is re-read at most once
+    /// every two minutes (or immediately when the bar's rect changes); a
+    /// failed lookup is retried after ten seconds.
+    #[derive(Clone, Copy)]
+    struct ClockAnchorCache {
+        bar: isize,
+        bar_rect: RECT,
+        at: Instant,
+        left: Option<i32>,
+    }
+
+    static CLOCK_ANCHOR: Mutex<Vec<ClockAnchorCache>> = Mutex::new(Vec::new());
+
+    fn rect_eq(a: RECT, b: RECT) -> bool {
+        a.left == b.left && a.top == b.top && a.right == b.right && a.bottom == b.bottom
+    }
+
+    /// Left edge of the clock button on a taskbar, resolved through UI
+    /// Automation. On secondary bars without mirrored tray icons the clock is
+    /// drawn by the XAML taskbar and has no child window, so the automation
+    /// tree is the only way to know where it starts. The right-most visible
+    /// `SystemTray.*` element (ignoring the show-desktop button) is the clock.
+    fn uia_clock_left(bar: HWND) -> Option<i32> {
+        use windows::Win32::UI::Accessibility::{
+            CUIAutomation, IUIAutomation, TreeScope_Descendants,
+        };
+        let automation: IUIAutomation = unsafe {
+            CoCreateInstance(
+                &CUIAutomation,
+                None::<&windows::core::IUnknown>,
+                CLSCTX_INPROC_SERVER,
+            )
+        }
+        .ok()?;
+        let root = unsafe { automation.ElementFromHandle(bar) }.ok()?;
+        let condition = unsafe { automation.CreateTrueCondition() }.ok()?;
+        let elements = unsafe { root.FindAll(TreeScope_Descendants, &condition) }.ok()?;
+        let count = unsafe { elements.Length() }.ok()?;
+        let mut best: Option<i32> = None;
+        for index in 0..count {
+            let Ok(element) = (unsafe { elements.GetElement(index) }) else {
+                continue;
+            };
+            let Ok(class) = (unsafe { element.CurrentClassName() }) else {
+                continue;
+            };
+            let class = class.to_string();
+            if !class.starts_with("SystemTray.") || class.contains("ShowDesktop") {
+                continue;
+            }
+            let Ok(offscreen) = (unsafe { element.CurrentIsOffscreen() }) else {
+                continue;
+            };
+            if offscreen.as_bool() {
+                continue;
+            }
+            let Ok(rect) = (unsafe { element.CurrentBoundingRectangle() }) else {
+                continue;
+            };
+            if rect.right <= rect.left || rect.bottom <= rect.top {
+                continue;
+            }
+            best = Some(best.map_or(rect.left, |best| best.max(rect.left)));
+        }
+        best
+    }
+
+    fn clock_anchor_left(bar: HWND, bar_rect: RECT) -> Option<i32> {
+        let now = Instant::now();
+        if let Ok(guard) = CLOCK_ANCHOR.lock() {
+            if let Some(cached) = guard
+                .iter()
+                .find(|c| c.bar == bar.0 as isize && rect_eq(c.bar_rect, bar_rect))
+            {
+                let ttl = if cached.left.is_some() {
+                    Duration::from_secs(120)
+                } else {
+                    Duration::from_secs(10)
+                };
+                if now.duration_since(cached.at) < ttl {
+                    return cached.left;
+                }
+            }
+        }
+        let left = uia_clock_left(bar);
+        if let Ok(mut guard) = CLOCK_ANCHOR.lock() {
+            let changed = match guard.iter_mut().find(|c| c.bar == bar.0 as isize) {
+                Some(cached) => {
+                    let changed = cached.left != left || !rect_eq(cached.bar_rect, bar_rect);
+                    *cached = ClockAnchorCache {
+                        bar: bar.0 as isize,
+                        bar_rect,
+                        at: now,
+                        left,
+                    };
+                    changed
+                }
+                None => {
+                    // Bars come and go with monitor changes; keep the cache
+                    // bounded instead of accumulating stale handles.
+                    if guard.len() >= 8 {
+                        guard.clear();
+                    }
+                    guard.push(ClockAnchorCache {
+                        bar: bar.0 as isize,
+                        bar_rect,
+                        at: now,
+                        left,
+                    });
+                    true
+                }
+            };
+            drop(guard);
+            if changed {
+                match left {
+                    Some(left) => log_event(
+                        "INFO",
+                        &format!(
+                            "taskbar 0x{:x}: clock anchor at x={left}",
+                            bar.0 as usize
+                        ),
+                    ),
+                    None => log_event(
+                        "WARN",
+                        &format!(
+                            "taskbar 0x{:x}: no tray or clock anchor; falling back to the bar's right edge",
+                            bar.0 as usize
+                        ),
+                    ),
+                }
+            }
+        }
+        left
     }
 
     /// Every taskbar window: the main bar plus one per extra monitor. All
