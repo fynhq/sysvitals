@@ -1004,8 +1004,14 @@ impl SettingsView {
 }
 
 /// A section heading: WinUI group headers are 12px semibold and muted.
-fn section_label(text: String, dim: Hsla) -> impl IntoElement {
-    div().text_xs().font_semibold().text_color(dim).child(text)
+/// A muted 16px icon anchors the left edge of each group, matching the
+/// single-color row icons below.
+fn section_label(text: String, icon: IconName, dim: Hsla) -> impl IntoElement {
+    h_flex()
+        .items_center()
+        .gap_2()
+        .child(Icon::new(icon).text_color(dim))
+        .child(div().text_xs().font_semibold().text_color(dim).child(text))
 }
 
 /// A grouped option surface. Windows keeps the WinUI card (8px radius plus
@@ -1050,10 +1056,15 @@ fn card_divider(dark: bool, scale_factor: f32) -> Div {
 }
 
 /// A section heading paired with its card at the tight 4px label gap.
-fn settings_section(title: String, card: impl IntoElement, dim: Hsla) -> impl IntoElement {
+fn settings_section(
+    title: String,
+    icon: IconName,
+    card: impl IntoElement,
+    dim: Hsla,
+) -> impl IntoElement {
     v_flex()
         .gap_1()
-        .child(section_label(title, dim))
+        .child(section_label(title, icon, dim))
         .child(card)
 }
 
@@ -1064,25 +1075,48 @@ fn blur_on_outside(element: Div) -> Div {
     element.on_mouse_down_out(|_, window, cx| window.blur(cx))
 }
 
-/// A labelled control row: title on the left, a wrapped tile group on the
-/// right. Centered vertically like a WinUI settings row.
-fn labeled_row(title: String, control: impl IntoElement) -> impl IntoElement {
+/// A labelled control row: a muted single-color icon and title on the left,
+/// a wrapped tile group on the right. Centered vertically like a WinUI
+/// settings row.
+fn labeled_row(
+    title: String,
+    icon: IconName,
+    control: impl IntoElement,
+    dim: Hsla,
+) -> impl IntoElement {
     h_flex()
         .justify_between()
         .items_center()
         .gap_4()
         .py_2()
-        .child(title)
+        .child(
+            h_flex()
+                .items_center()
+                .gap_2()
+                .child(Icon::new(icon).text_color(dim))
+                .child(title),
+        )
         .child(control)
 }
 
 /// A labelled on/off row with the WinUI row height.
-fn switch_row(title: String, control: impl IntoElement) -> impl IntoElement {
+fn switch_row(
+    title: String,
+    icon: IconName,
+    control: impl IntoElement,
+    dim: Hsla,
+) -> impl IntoElement {
     h_flex()
         .justify_between()
         .items_center()
         .py_2()
-        .child(title)
+        .child(
+            h_flex()
+                .items_center()
+                .gap_2()
+                .child(Icon::new(icon).text_color(dim))
+                .child(title),
+        )
         .child(control)
 }
 
@@ -1408,16 +1442,21 @@ impl Render for SettingsView {
         let general_card = settings_card(card_bg, card_border)
             .child(labeled_row(
                 t(lang, "settings.language").to_string(),
+                IconName::Globe,
                 lang_row,
+                dim,
             ))
             .child(card_divider(dark, scale_factor))
             .child(labeled_row(
                 t(lang, "settings.sample_interval").to_string(),
+                IconName::RefreshCw,
                 interval_row,
+                dim,
             ))
             .child(card_divider(dark, scale_factor))
             .child(switch_row(
                 t(lang, "settings.auto_start").to_string(),
+                IconName::Play,
                 Switch::new("auto-start")
                     .checked(self.auto_start)
                     .on_click(cx.listener(|this, checked: &bool, _, cx| {
@@ -1426,6 +1465,7 @@ impl Render for SettingsView {
                         this.save(cx);
                         cx.notify();
                     })),
+                dim,
             ))
             .when(cfg!(not(target_os = "macos")), |this| {
                 // Offered only where the choice is actually honored. On
@@ -1434,13 +1474,16 @@ impl Render for SettingsView {
                 this.child(card_divider(dark, scale_factor))
                     .child(labeled_row(
                         t(lang, "settings.theme").to_string(),
+                        IconName::Palette,
                         theme_row,
+                        dim,
                     ))
             });
 
         let display_card = settings_card(card_bg, card_border)
             .child(switch_row(
                 t(lang, "settings.dual_row").to_string(),
+                IconName::GalleryVerticalEnd,
                 Switch::new("dual-row")
                     .checked(self.dual_row)
                     .on_click(cx.listener(|this, checked: &bool, _, cx| {
@@ -1448,10 +1491,12 @@ impl Render for SettingsView {
                         this.save(cx);
                         cx.notify();
                     })),
+                dim,
             ))
             .child(card_divider(dark, scale_factor))
             .child(switch_row(
                 t(lang, "settings.group_resources").to_string(),
+                IconName::Cpu,
                 Switch::new("show-res")
                     .checked(self.show_resources)
                     .on_click(cx.listener(|this, checked: &bool, _, cx| {
@@ -1459,10 +1504,12 @@ impl Render for SettingsView {
                         this.save(cx);
                         cx.notify();
                     })),
+                dim,
             ))
             .child(card_divider(dark, scale_factor))
             .child(switch_row(
                 t(lang, "settings.group_network").to_string(),
+                IconName::Network,
                 Switch::new("show-net")
                     .checked(self.show_network)
                     .on_click(cx.listener(|this, checked: &bool, _, cx| {
@@ -1470,11 +1517,14 @@ impl Render for SettingsView {
                         this.save(cx);
                         cx.notify();
                     })),
+                dim,
             ))
             .child(card_divider(dark, scale_factor))
             .child(labeled_row(
                 t(lang, "settings.item_spacing").to_string(),
+                IconName::Frame,
                 spacing_control,
+                dim,
             ));
 
         // One layout card holds the anchor and margin rows together; either
@@ -1485,7 +1535,9 @@ impl Render for SettingsView {
         if self.layout_available && !self.vertical_taskbar {
             layout_card = layout_card.child(labeled_row(
                 t(lang, "settings.anchor").to_string(),
+                IconName::PanelLeft,
                 anchor_control,
+                dim,
             ));
             show_layout = true;
         }
@@ -1501,7 +1553,13 @@ impl Render for SettingsView {
                 } else {
                     t(lang, "settings.left_margin").to_string()
                 },
+                if self.vertical_taskbar {
+                    IconName::ArrowUp
+                } else {
+                    IconName::ArrowLeft
+                },
                 margin_control,
+                dim,
             ));
             show_layout = true;
         }
@@ -1518,12 +1576,14 @@ impl Render for SettingsView {
                             .gap_4()
                             .child(prefix_cell(
                                 t(lang, "settings.cpu").to_string(),
+                                IconName::Cpu,
                                 &self.prefix_cpu,
                                 dim,
                                 control,
                             ))
                             .child(prefix_cell(
                                 t(lang, "settings.mem").to_string(),
+                                IconName::MemoryStick,
                                 &self.prefix_mem,
                                 dim,
                                 control,
@@ -1534,12 +1594,14 @@ impl Render for SettingsView {
                             .gap_4()
                             .child(prefix_cell(
                                 t(lang, "settings.upload").to_string(),
+                                IconName::ArrowUp,
                                 &self.prefix_up,
                                 dim,
                                 control,
                             ))
                             .child(prefix_cell(
                                 t(lang, "settings.download").to_string(),
+                                IconName::ArrowDown,
                                 &self.prefix_down,
                                 dim,
                                 control,
@@ -1562,23 +1624,27 @@ impl Render for SettingsView {
             .overflow_y_scrollbar()
             .child(settings_section(
                 t(lang, "settings.general").to_string(),
+                IconName::Settings,
                 general_card,
                 dim,
             ))
             .child(settings_section(
                 t(lang, "settings.display").to_string(),
+                IconName::LayoutDashboard,
                 display_card,
                 dim,
             ))
             .when(show_layout, |this| {
                 this.child(settings_section(
                     t(lang, "settings.layout").to_string(),
+                    IconName::PanelBottom,
                     layout_card,
                     dim,
                 ))
             })
             .child(settings_section(
                 t(lang, "settings.prefixes").to_string(),
+                IconName::CaseSensitive,
                 prefix_card,
                 dim,
             ))
@@ -1688,6 +1754,7 @@ const REPO_URL: &str = env!("CARGO_PKG_REPOSITORY");
 /// the child call.
 fn prefix_cell(
     label: String,
+    icon: IconName,
     input: &Entity<InputState>,
     label_color: Hsla,
     control: Option<(Hsla, Hsla, f32)>,
@@ -1699,7 +1766,13 @@ fn prefix_cell(
     v_flex()
         .flex_1()
         .gap_1()
-        .child(div().text_xs().text_color(label_color).child(label))
+        .child(
+            h_flex()
+                .items_center()
+                .gap_1()
+                .child(Icon::new(icon).text_color(label_color))
+                .child(div().text_xs().text_color(label_color).child(label)),
+        )
         .child(blur_on_outside(div().w_full()).child(field))
 }
 
