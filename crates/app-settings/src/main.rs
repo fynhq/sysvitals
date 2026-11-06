@@ -18,21 +18,6 @@
 
 use std::time::Instant;
 
-#[cfg(windows)]
-use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-#[cfg(windows)]
-use windows::Win32::Foundation::HWND;
-#[cfg(windows)]
-use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, HMONITOR, MONITORINFO};
-#[cfg(windows)]
-use windows::Win32::UI::HiDpi::{
-    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
-};
-#[cfg(windows)]
-use windows::Win32::UI::WindowsAndMessaging::{
-    SWP_NOACTIVATE, SWP_NOREDRAW, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos,
-};
-
 use gpui_kit::component::button::*;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::scroll::ScrollableElement as _;
@@ -48,91 +33,32 @@ use gpui_kit::component::*;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
+use sysvitals_core::cli::AnchorRect;
 use sysvitals_core::config::{
     ALLOWED_INTERVAL_MS, ALLOWED_ITEM_SPACING_PX, ALLOWED_LEFT_MARGIN_PX, MAX_PREFIX_CHARS,
 };
-use sysvitals_core::{Anchor, Config, Language, Theme, t};
+use sysvitals_core::{t, Anchor, Config, Language, Theme};
 use sysvitals_panel::{
-    CONTROL_RADIUS, PanelSurface, backdrop_for, detect_material, system_accent_hex,
+    anchor_visible_bounds, backdrop_for, detect_material, log_event, observe_system_appearance,
+    restore_window_size_after_move, spawn_accent_watch, PanelSurface, CONTROL_RADIUS,
 };
 #[cfg(windows)]
-use sysvitals_panel::{hkcu_dword, panel_font_family};
-
-/// File logger for this windowed-subsystem binary. `eprintln!` has no visible
-/// destination in normal use, so every diagnostic goes to the shared daily
-/// file instead (see core::logger for rotation/retention).
-fn log_event(level: &str, message: &str) {
-    sysvitals_panel::log_event(level, message);
-}
-
-/// Native window handle of a GPUI window, if it has one.
-#[cfg(windows)]
-fn window_hwnd(window: &Window) -> Option<HWND> {
-    let handle = HasWindowHandle::window_handle(window).ok()?;
-    let RawWindowHandle::Win32(raw) = handle.as_raw() else {
-        return None;
-    };
-    Some(HWND(raw.hwnd.get() as *mut _))
-}
-
-/// Move the still-hidden settings window onto the display it will open on.
-///
-/// Windows creates the window on the OS default monitor and GPUI moves it
-/// to the anchor's display when the window is shown. A cross-DPI move makes
-/// Windows re-scale the window from the previous DPI, which used to run
-/// while the panel was already visible (the "growing" flash on a 4K
-/// secondary display). Moving the hidden window first lets the DPI change
-/// happen off-screen; activation then only applies the final placement.
-///
-/// Must run outside an App update: `SetWindowPos` synchronously delivers
-/// `WM_MOVE`/`WM_SIZE`, and those messages re-enter GPUI's window callbacks
-/// (`AsyncApp::update`) while the app is already borrowed, panicking with
-/// "RefCell already borrowed".
-#[cfg(windows)]
-fn preplace_hidden_window(hwnd: HWND, monitor: DisplayId) -> bool {
-    let mut info = MONITORINFO {
-        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-        ..Default::default()
-    };
-    if !unsafe { GetMonitorInfoW(HMONITOR(u64::from(monitor) as _), &mut info) }.as_bool() {
-        return false;
-    }
-    unsafe {
-        SetWindowPos(
-            hwnd,
-            None,
-            info.rcWork.left,
-            info.rcWork.top,
-            0,
-            0,
-            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW,
-        )
-    }
-    .is_ok()
-}
+use sysvitals_panel::{
+    panel_font_family, preplace_hidden_window, set_per_monitor_dpi_aware, taskbar_al, utf16,
+    window_hwnd,
+};
 
 // ---------------------------------------------------------------------------
 // Platform gate for the layout section
 // ---------------------------------------------------------------------------
 
-/// HKCU explorer keys, mirroring what the overlay reads: the Win11 centered-
-/// taskbar flag decides whether the far-left anchor is offered, so the
-/// settings window must consult the very same value.
-#[cfg(windows)]
-const TASKBAR_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced";
-#[cfg(windows)]
-const TASKBAR_VALUE: &str = "TaskbarAl";
-
-#[cfg(windows)]
-fn utf16(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(std::iter::once(0)).collect()
-}
-
 /// Whether the indicator's layout section is offered on this machine: the
-/// far-left anchor exists only on Windows 11 with a centered taskbar.
+/// far-left anchor exists only on Windows 11 with a centered taskbar. Reads
+/// the very same HKCU value as the overlay (`sysvitals_support::taskbar_al`)
+/// so the two can never disagree.
 #[cfg(windows)]
 fn layout_available() -> bool {
-    hkcu_dword(TASKBAR_KEY, TASKBAR_VALUE) == Some(1)
+    taskbar_al() == Some(1)
 }
 
 #[cfg(not(windows))]
@@ -149,7 +75,7 @@ fn layout_available() -> bool {
 #[cfg(windows)]
 fn taskbar_is_vertical() -> bool {
     use windows::Win32::UI::Shell::{
-        ABE_LEFT, ABE_RIGHT, ABM_GETTASKBARPOS, APPBARDATA, SHAppBarMessage,
+        SHAppBarMessage, ABE_LEFT, ABE_RIGHT, ABM_GETTASKBARPOS, APPBARDATA,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
@@ -203,7 +129,7 @@ mod macos_select {
     use std::cell::Cell;
 
     use objc2::rc::Retained;
-    use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
+    use objc2::{define_class, msg_send, sel, MainThreadMarker, MainThreadOnly};
     use objc2_app_kit::{
         NSAppearanceCustomization, NSApplication, NSControlStateValueOn, NSEvent, NSMenu,
         NSMenuItem, NSView,
@@ -785,43 +711,14 @@ impl SettingsView {
         // layer filters `WM_SETTINGCHANGE` to `ImmersiveColorSet` with a mode
         // change); the user changing the accent in the system Settings app
         // does not re-run it, so the panel would keep the old primary color
-        // until it reopens. Poll the accent source every 500 ms and re-apply
-        // the override only when the value actually moved; the loop stops
-        // with the view entity, i.e. when the window closes. Same shape as
-        // the history popup's data-refresh loop. The probe runs inside
-        // `update` on purpose: on macOS `system_accent_hex` reads AppKit
-        // (`controlAccentColor`), which belongs to the main thread — the same
-        // thread `update` runs on.
-        cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(500))
-                    .await;
-                let alive = this
-                    .update(cx, |view: &mut SettingsView, cx| {
-                        let current = system_accent_hex();
-                        if current == view.last_accent {
-                            return true;
-                        }
-                        view.last_accent = current;
-                        if current.is_some() {
-                            sysvitals_panel::apply_accent(cx);
-                        } else {
-                            // The OS moved back to "multicolor" (or the accent
-                            // probe failed): reload the palette so the old accent
-                            // override is removed.
-                            apply_theme_and_accent(cx);
-                        }
-                        cx.notify();
-                        true
-                    })
-                    .unwrap_or(false);
-                if !alive {
-                    break;
-                }
-            }
-        })
-        .detach();
+        // until it reopens. The shared poll (`sysvitals_panel`) re-applies
+        // the override only when the value actually moved and stops with the
+        // view entity, i.e. when the window closes.
+        spawn_accent_watch(
+            cx,
+            |view: &mut SettingsView| &mut view.last_accent,
+            |cx| apply_theme_and_accent(cx),
+        );
         view
     }
 
@@ -833,28 +730,10 @@ impl SettingsView {
     /// suggested rectangle from the *previous* DPI, so a 400x720 panel
     /// opened from a 125% primary on a 100% secondary came out 318x575.
     /// GPUI applies that suggestion; restore the intended size once, after
-    /// the move. A same-DPI open matches within a pixel and is untouched.
+    /// the move (shared cross-DPI correction in `sysvitals_panel`).
     #[cfg(windows)]
     fn restore_window_size(&mut self, window: &mut Window) {
-        if self.size_fixed {
-            return;
-        }
-        self.size_fixed = true;
-        let current = window.bounds().size;
-        let width = f32::from(current.width);
-        let height = f32::from(current.height);
-        let target_width = f32::from(self.initial_size.width);
-        let target_height = f32::from(self.initial_size.height);
-        if (width - target_width).abs() <= 1.0 && (height - target_height).abs() <= 1.0 {
-            return;
-        }
-        log_event(
-            "INFO",
-            &format!(
-                "settings: restoring window size after cross-DPI placement ({width}x{height} -> {target_width}x{target_height})"
-            ),
-        );
-        window.resize(self.initial_size);
+        restore_window_size_after_move(window, &mut self.size_fixed, self.initial_size);
     }
 
     fn current_lang(&self) -> Language {
@@ -1160,11 +1039,9 @@ impl Render for SettingsView {
         // view's empty active-node stack would panic the unwrap inside
         // `window.on_key_event`).
         if self._appearance.is_none() {
-            let sub = cx.observe_window_appearance(window, |_this: &mut Self, _w, cx| {
+            self._appearance = Some(observe_system_appearance(cx, window, |cx| {
                 apply_theme_and_accent(cx);
-                cx.notify();
-            });
-            self._appearance = Some(sub);
+            }));
         }
 
         // Every label comes from the core i18n table, keyed on the
@@ -1876,7 +1753,7 @@ fn load_config_with_backup() -> Config {
 /// one's edits on its next save, so duplicate launches exit quietly.
 #[cfg(windows)]
 fn acquire_single_instance() -> bool {
-    use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError};
+    use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
     use windows::Win32::System::Threading::CreateMutexW;
     let name = utf16("Local\\SysVitalsSettings_SingleInstance");
     match unsafe { CreateMutexW(None, false, windows::core::PCWSTR(name.as_ptr())) } {
@@ -1954,51 +1831,20 @@ static SETTINGS_INSTANCE: std::sync::Mutex<Option<isize>> = std::sync::Mutex::ne
 static SETTINGS_INSTANCE_FILE: std::sync::Mutex<Option<std::fs::File>> =
     std::sync::Mutex::new(None);
 
+/// Parse `--parent-pid <pid>`; the pure parsing lives in `core::cli`
+/// (unit-tested there).
 fn parse_parent_pid() -> Option<u32> {
-    let mut args = std::env::args().skip(1);
-    while let Some(arg) = args.next() {
-        if arg == "--parent-pid" {
-            return args.next()?.parse().ok();
-        }
-    }
-    None
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    sysvitals_core::cli::parse_parent_pid(&args)
 }
 
-/// The indicator rect in GPUI logical pixels, passed with `--anchor` so the
-/// settings window can open on the same monitor as the indicator that opened
-/// it (multi-monitor).
-struct AnchorRect {
-    left: f32,
-    top: f32,
-    right: f32,
-    bottom: f32,
-}
-
-/// Parse `--anchor L T R B` from the process arguments. Absent, malformed, or
-/// degenerate rectangles yield `None`, which keeps the default centered
-/// placement — a bad argument must never prevent the window from opening.
+/// Parse `--anchor L T R B`; the pure parsing lives in `core::cli`. Absent,
+/// malformed, or degenerate rectangles yield `None`, which keeps the default
+/// centered placement — a bad argument must never prevent the window from
+/// opening.
 fn parse_anchor() -> Option<AnchorRect> {
-    let mut args = std::env::args().skip(1);
-    while let Some(arg) = args.next() {
-        if arg != "--anchor" {
-            continue;
-        }
-        let mut nums = [0f32; 4];
-        for slot in nums.iter_mut() {
-            *slot = args.next()?.trim().parse().ok()?;
-        }
-        if !nums.iter().all(|n| n.is_finite()) {
-            return None;
-        }
-        let [left, top, right, bottom] = nums;
-        return (right > left && bottom > top).then_some(AnchorRect {
-            left,
-            top,
-            right,
-            bottom,
-        });
-    }
-    None
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    sysvitals_core::cli::parse_anchor(&args)
 }
 
 /// Parse `--anchor-monitor <handle>` from the process arguments: the native
@@ -2044,11 +1890,9 @@ fn centered_on_work(work: Bounds<Pixels>, requested: gpui_kit::Size<Pixels>) -> 
 
 /// Center the settings window on the display that contains the anchor (the
 /// indicator that opened it), so it follows the indicator across monitors.
-/// Falls back to the rectangle probe, then to the default centered placement.
-///
-/// The native display handle is preferred: GPUI scales each monitor's logical
-/// space by its own factor, so on mixed-DPI setups the anchor rectangle can
-/// fall inside two displays' bounds and the probe would pick the wrong one.
+/// Display selection is shared with the history popup
+/// (`sysvitals_panel::anchor_visible_bounds`: native monitor handle first,
+/// rectangle probe fallback); this function only centers on the result.
 fn settings_window_bounds(
     anchor: Option<&AnchorRect>,
     monitor: Option<DisplayId>,
@@ -2064,28 +1908,12 @@ fn settings_window_bounds(
         }
         return WindowBounds::centered(requested, cx);
     };
-    if let Some(monitor) = monitor {
-        if let Some(display) = cx.displays().into_iter().find(|d| d.id() == monitor) {
-            return centered_on_work(display.visible_bounds(), requested);
-        }
-    }
-    let probe = point(
-        px((anchor.left + anchor.right) * 0.5),
-        px((anchor.top + anchor.bottom) * 0.5),
-    );
-    let display = cx
-        .displays()
-        .into_iter()
-        .find(|d| d.bounds().contains(&probe))
-        .or_else(|| {
-            cx.displays()
-                .into_iter()
-                .find(|d| d.visible_bounds().contains(&probe))
-        });
-    let Some(display) = display else {
+    let work = anchor_visible_bounds(cx, anchor, monitor)
+        .or_else(|| cx.primary_display().map(|display| display.visible_bounds()));
+    let Some(work) = work else {
         return WindowBounds::centered(requested, cx);
     };
-    centered_on_work(display.visible_bounds(), requested)
+    centered_on_work(work, requested)
 }
 
 /// Quit when the indicator that launched this panel disappears without
@@ -2096,7 +1924,7 @@ fn settings_window_bounds(
 fn watch_parent(cx: &mut App) {
     use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_TIMEOUT};
     use windows::Win32::System::Threading::{
-        OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+        OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
     };
     let Some(pid) = parse_parent_pid() else {
         return;
@@ -2133,25 +1961,8 @@ fn watch_parent(cx: &mut App) {
 
 #[cfg(target_os = "macos")]
 fn watch_parent(cx: &mut App) {
-    let Some(pid) = parse_parent_pid() else {
-        return;
-    };
-    log_event("INFO", &format!("settings: watching parent pid {pid}"));
-    cx.spawn(async move |cx| {
-        loop {
-            cx.background_executor()
-                .timer(std::time::Duration::from_secs(1))
-                .await;
-            if unsafe { libc::kill(pid as i32, 0) } != 0
-                && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
-            {
-                log_event("INFO", "settings: parent process gone; exiting");
-                cx.update(|app| app.quit());
-                break;
-            }
-        }
-    })
-    .detach();
+    // Shared one-second poll on the launcher pid (see `sysvitals_panel`).
+    sysvitals_panel::watch_parent(cx, "settings");
 }
 
 #[cfg(not(any(windows, target_os = "macos")))]
@@ -2188,9 +1999,7 @@ fn main() {
     // is treated as DPI-unaware and Windows bitmap-stretches the whole window
     // on a scaled display, which is what makes the text look soft.
     #[cfg(windows)]
-    unsafe {
-        let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-    }
+    sysvitals_panel::set_per_monitor_dpi_aware();
 
     let cfg = load_config_with_backup();
 
@@ -2312,11 +2121,19 @@ fn main() {
             ..Default::default()
         };
 
-        let (window_handle, _view) =
-            gpui_kit::open_window(window_options, cx, move |window, cx| {
-                cx.new(|cx| SettingsView::new(cfg, window, cx, initial_size))
-            })
-            .expect("Failed to open settings window");
+        // A failed window creation must not panic the process (the history
+        // popup already degrades this way): log and quit instead.
+        let opened = gpui_kit::open_window(window_options, cx, move |window, cx| {
+            cx.new(|cx| SettingsView::new(cfg, window, cx, initial_size))
+        });
+        let (window_handle, _view) = match opened {
+            Ok(opened) => opened,
+            Err(e) => {
+                log_event("WARN", &format!("settings: open window failed: {e}"));
+                cx.quit();
+                return;
+            }
+        };
 
         // Windows: the window was created hidden on the OS default monitor.
         // Move it to the anchor's display while hidden, apply the intended
