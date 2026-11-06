@@ -19,7 +19,7 @@ mod macos {
     use std::os::fd::AsRawFd;
     use std::process::Child;
     use std::sync::Arc;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     // Shared process plumbing (daily-file logging, panic hook) lives in
     // `sysvitals-support` so the indicator and the GPUI panels cannot drift.
@@ -156,6 +156,9 @@ mod macos {
         true
     }
 
+    /// How long a failed history-writer spawn waits before retrying.
+    const HISTORY_WRITER_RETRY_COOLDOWN: Duration = Duration::from_secs(300);
+
     thread_local! {
         static SAMPLER: RefCell<Option<Sampler>> = const { RefCell::new(None) };
         static CONFIG: RefCell<Config> = RefCell::new(Config::default());
@@ -169,7 +172,11 @@ mod macos {
         // insert / prune on the main RunLoop (up to the 250 ms busy timeout)
         // could freeze the menu bar and its menus on a slow disk.
         static HISTORY_WRITER: RefCell<Option<HistoryWriter>> = const { RefCell::new(None) };
-        static HISTORY_WRITER_FAILED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        /// When the last writer spawn failed. A failed spawn (thread creation
+        /// refused under resource pressure) retries after a cooldown instead
+        /// of disabling history for the rest of the process lifetime.
+        static HISTORY_WRITER_FAILED_AT: std::cell::Cell<Option<Instant>> =
+            const { std::cell::Cell::new(None) };
         // The repeating sample timer, kept so the interval can be re-applied
         // when the config file changes it (parity with the Windows overlay,
         // which re-seeds its sample timer on config hot-reload).
@@ -502,19 +509,30 @@ mod macos {
         }
         HISTORY_WRITER.with(|slot| {
             let mut writer = slot.borrow_mut();
-            if writer.is_none() && !HISTORY_WRITER_FAILED.with(|failed| failed.get()) {
+            // A failed spawn (thread creation refused under resource
+            // pressure) retries after a cooldown instead of disabling history
+            // for the rest of the process lifetime.
+            let retry_due = HISTORY_WRITER_FAILED_AT.with(|last| {
+                last.get()
+                    .is_none_or(|at| at.elapsed() >= HISTORY_WRITER_RETRY_COOLDOWN)
+            });
+            if writer.is_none() && retry_due {
                 let log: sysvitals_core::history_writer::LogFn =
                     Arc::new(|level: &str, message: &str| log_event(level, message));
                 match HistoryWriter::spawn(log) {
                     Ok(started) => {
+                        HISTORY_WRITER_FAILED_AT.with(|last| last.set(None));
                         log_event("INFO", "history writer started");
                         *writer = Some(started);
                     }
                     Err(e) => {
-                        HISTORY_WRITER_FAILED.with(|failed| failed.set(true));
+                        HISTORY_WRITER_FAILED_AT.with(|last| last.set(Some(Instant::now())));
                         log_event(
                             "WARN",
-                            &format!("history writer unavailable: {e}; history disabled"),
+                            &format!(
+                                "history writer unavailable: {e}; retrying in {}s",
+                                HISTORY_WRITER_RETRY_COOLDOWN.as_secs()
+                            ),
                         );
                     }
                 }
