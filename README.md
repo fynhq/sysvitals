@@ -6,150 +6,40 @@
 
 # SysVitals
 
-A lightweight CPU / memory / network monitor for the Windows taskbar and macOS menu bar. It shows live percentages and transfer rates, follows system font, DPI and appearance, and opens a CPU / memory history chart when clicked. Built in Rust, it aims to look native and stay cheap to run 24/7.
+SysVitals is a lightweight CPU / memory / network monitor for the Windows taskbar and macOS menu bar. It shows live percentages and transfer rates, follows system font, DPI, and light/dark appearance, and opens a CPU / memory history chart when clicked.
+
+The status bar is thin native code; settings and history run as separate GPUI processes, keeping the resident indicator small — about 9 MB on Windows 11 and 18 MB on macOS (Apple Silicon), release build with default settings. It runs on Windows 10 2004+ / 11 (x64, arm64) and macOS 13+ (Apple Silicon, Intel).
 
 English | [中文](#chinese)
 
-## Supported systems
-
-- Windows 10 2004+ / 11 (x64 or arm64)
-- macOS 13+ (Apple Silicon or Intel)
-
-## Footprint
-
-Measured with the release build running normally (all groups on, default 2 s sampling, no popup):
-
-- Windows 11 taskbar: **~9 MB** resident
-- macOS 27 (Apple Silicon) menu bar: **~18 MB** resident
-
 ## Install
 
-**Windows**
+**Windows** — Download `SysVitals_Windows_<arch>_v<version>_setup.exe` from [Releases](https://github.com/fynhq/sysvitals/releases) and run it. Setup installs per-user under `%LOCALAPPDATA%\Programs\SysVitals` and needs no administrator rights. The portable `..._portable.zip` extracts to one `SysVitals/` folder with three executables; run `SysVitals.exe` and keep all three together. The build is unsigned: if SmartScreen appears, choose **More info → Run anyway**.
 
-Installer (recommended):
+**macOS** — Download the dmg, drag `SysVitals.app` to `/Applications` (or `~/Applications`), and launch the app, not the binaries inside `Contents/MacOS`. The build is ad-hoc signed without notarization; if macOS blocks it, remove the quarantine flag:
 
-1. Download `SysVitals_Windows_<arch>_v<version>_setup.exe` from the [Releases page](https://github.com/fynhq/sysvitals/releases) and run it.
-2. The installer is per-user: it installs under `%LOCALAPPDATA%\Programs\SysVitals` and does not require administrator rights.
-3. Launch SysVitals from the Start menu; Settings and History are launched by the indicator.
-4. The build is unsigned. If SmartScreen appears, choose **More info → Run anyway**.
+```sh
+xattr -d -r com.apple.quarantine /Applications/SysVitals.app
+```
 
-Portable (no install):
+Use your actual path when installed in `~/Applications`; add `sudo` on permission errors. SysVitals runs in the menu bar with no Dock icon (Settings may show one while open).
 
-1. Download `SysVitals_Windows_<arch>_v<version>_portable.zip` and extract it.
-2. The archive contains one `SysVitals/` folder with `SysVitals.exe`, `SysVitalsSettings.exe`, `SysVitalsHistory.exe`, `LICENSE`, and `THIRD_PARTY_NOTICES.md`. Keep the three executables together.
-3. Run `SysVitals.exe`; Settings and History are launched by the indicator.
-4. The build is unsigned. If SmartScreen appears, choose **More info → Run anyway**.
-
-Both Windows builds keep settings, history and logs in `%APPDATA%\SysVitals`.
-
-**macOS**
-
-1. Download the dmg for your Mac from the [Releases page](https://github.com/fynhq/sysvitals/releases) and open it.
-2. Drag `SysVitals.app` to `/Applications` (or to `~/Applications` if you do not have administrator rights; create that folder if needed). Launch the app, not the binaries inside `Contents/MacOS`.
-3. The build is ad-hoc signed but has no Developer ID signature or notarization. If macOS blocks it, remove the quarantine flag:
-
-   ```sh
-   xattr -d -r com.apple.quarantine /Applications/SysVitals.app
-   ```
-
-   If you installed the app in `~/Applications`, use that path instead. If you get a permission error, run the same command with `sudo`. On macOS 13/14 you can also try right-click → **Open**.
-4. SysVitals appears in the menu bar; the indicator has no Dock icon (Settings may show one while open).
-
-Asset names and available formats can differ between releases; use the files listed on the release page.
-
-## Upgrade
-
-SysVitals has no built-in auto-update; install a newer release manually.
-
-**Windows**
-
-Installer:
-
-1. Download the new `_setup.exe` and run it; it upgrades the existing per-user installation.
-2. If SysVitals is running, Setup offers to close it and restarts it after the upgrade; silent installs close and restart it automatically.
-3. Downgrades are blocked: if the installed version is newer than the setup, Setup exits with an error.
-4. Settings, history and logs in `%APPDATA%\SysVitals` are kept.
-
-Portable:
-
-1. Quit SysVitals.
-2. Download the new `_portable.zip` and replace the existing `SysVitals/` folder; keep the three executables together.
-3. Run `SysVitals.exe` again. Settings, history and logs in `%APPDATA%\SysVitals` are kept.
-
-**macOS**
-
-1. Quit SysVitals.
-2. Download the new dmg and open it.
-3. Drag the new `SysVitals.app` over the existing copy in `/Applications` (or `~/Applications`); leave `~/Library/Application Support/SysVitals` untouched.
-4. A newly downloaded app is quarantined again, so the command **must be re-run**:
-
-   ```sh
-   xattr -d -r com.apple.quarantine /Applications/SysVitals.app
-   ```
-
-   If you installed the app in `~/Applications`, use that path instead. If you get a permission error, run the same command with `sudo`.
-5. Launch the new `SysVitals.app`.
+**Upgrade and uninstall** — Settings, history, and logs live in `%APPDATA%\SysVitals` on Windows and `~/Library/Application Support/SysVitals` on macOS, and are kept across upgrades. There is no auto-update: run the new Windows setup over the existing install (or replace the portable folder), or replace the macOS app and run the quarantine command again. To uninstall, use Settings → Apps on Windows (or delete the portable folder) and move the app to the Trash on macOS; delete the data folder too to erase settings, history, and logs. On macOS, turn off Launch at login first.
 
 ## Usage
 
 - Click the indicator to open the CPU / memory history chart; click again, click away, or press Esc to close.
-- On Windows, every visible taskbar gets its own indicator (enable "Show my taskbar on all displays" to show it on secondary screens); clicking an indicator on another screen moves the history chart there.
-- Right-click for the menu:
-  - Windows: Task Manager, Settings, Restart, Quit.
-  - macOS: Activity Monitor, Settings, Restart, Quit.
-- Settings save immediately; there is no Apply button. Quit closes the indicator and any open panels.
-- Configure language, sampling interval (1/2/3 s; default 2 s), layout, spacing, prefixes, indicator theme (Windows), and Windows taskbar anchor/margin. Vertical taskbars are supported.
-- Launch at login can be enabled in Settings and is off by default. On macOS the first enable may need approval in **System Settings → General → Login Items & Extensions**.
-- Settings and history follow system appearance and accent color; the Windows indicator theme can be auto/light/dark.
-- History ranges: 5 minutes, 1 hour, 1 day, 1 month; up to one month is retained.
-- The copy button exports the visible range as tab-separated rows with a UTF-8 BOM.
-- Network rates are live-only; history and CSV cover CPU and memory.
-- All data stays local; no telemetry, cloud service, or account.
-
-## Verify the download
-
-Each release provides a single `SHA256SUMS` file covering all release files. Download it and the files you want to check into the same folder.
-
-**Windows (PowerShell)**
-
-```powershell
-Get-Content .\SHA256SUMS | ForEach-Object {
-  $hash, $file = $_ -split '\s+', 2
-  $file = $file.Trim()
-  if (Test-Path ".\$file") {
-    $actual = (Get-FileHash ".\$file" -Algorithm SHA256).Hash.ToLower()
-    "{0}: {1}" -f $file, $(if ($actual -eq $hash) { "OK" } else { "MISMATCH" })
-  }
-}
-```
-
-**macOS**
-
-```sh
-shasum -a 256 -c --ignore-missing SHA256SUMS
-```
-
-Files you did not download are skipped. Checksums verify download integrity, not a signature.
-
-## Data and uninstall
-
-**Windows**
-
-- Data: `%APPDATA%\SysVitals`.
-- Installer: uninstall from **Settings → Apps → Installed apps** (or **Apps & features**).
-- Portable: quit SysVitals and delete the extracted `SysVitals/` folder.
-- To remove settings, history and logs, delete the data folder as well.
-
-**macOS**
-
-- Data: `~/Library/Application Support/SysVitals`.
-- Uninstall: if **Launch at login** is enabled, turn it off in Settings first; quit SysVitals, move `SysVitals.app` to the Trash, and delete the data folder to remove settings, history and logs.
-
-History is kept for up to one month; logs older than 7 days are removed.
+- Right-click for Task Manager (Windows) or Activity Monitor (macOS), Settings, Restart, and Quit.
+- Settings save immediately. Configure language, sampling interval (1/2/3 s; default 2 s), layout, spacing, prefixes, indicator theme, and Windows taskbar anchor/margin; vertical taskbars are supported.
+- Settings and history follow system appearance and accent color; the Windows indicator theme can be auto, light, or dark.
+- Launch at login is off by default; on macOS the first enable may need approval in **System Settings → General → Login Items & Extensions**.
+- History ranges are 5 minutes, 1 hour, 1 day, and 1 month; data is retained for up to one month, and logs older than 7 days are removed. The copy button exports the visible range as TSV with a UTF-8 BOM; network rates are live-only.
+- On Windows, each visible taskbar gets its own indicator; enable "Show my taskbar on all displays" to show it on secondary screens.
+- All data stays local; there is no telemetry, cloud service, or account.
 
 ## Build from source
 
-Requires a stable Rust toolchain. Windows uses MSVC; macOS uses the Xcode command-line tools.
+Requires a stable Rust toolchain (MSVC on Windows, Xcode command-line tools on macOS). `cargo build` and `cargo test` cover the cross-platform core:
 
 ```sh
 cargo build
@@ -157,7 +47,7 @@ cargo test
 cargo run -p sysvitals-core --example monitor
 ```
 
-`cargo build` and `cargo test` cover the cross-platform core crate. The official Windows/macOS packages are built by CI; contributors can build a platform crate on the matching OS if needed:
+Official packages are built by CI. To build a platform crate on its native OS:
 
 ```sh
 cargo build -p app-win
@@ -165,10 +55,6 @@ cargo build -p app-mac
 cargo build -p app-settings
 cargo build -p app-history
 ```
-
-## Design notes
-
-Counter differencing, wrap-around protection, NIC aggregation, units and layout live in the pure-Rust `core` crate and are unit-tested. The status bar is drawn by thin platform-native code: a topmost layered window on Windows and an `NSStatusItem` on macOS. Settings and history run as separate GPUI processes, keeping the resident indicator minimal.
 
 ## License
 
@@ -180,150 +66,40 @@ Released under the MIT License. See [LICENSE](LICENSE).
 
 # SysVitals
 
-常驻 Windows 任务栏 / macOS 菜单栏的轻量 CPU、内存、网速监控。实时显示占用百分比与上下行速度，字号、DPI 与亮暗跟随系统，点击可查看 CPU / 内存历史走势图；Rust 构建，目标是与系统原生一致且长期运行开销低。
+SysVitals 是常驻 Windows 任务栏 / macOS 菜单栏的轻量 CPU、内存、网速监控：实时显示占用百分比与上下行速度，字号、DPI 与亮暗跟随系统，点击即可查看 CPU / 内存历史走势图。
+
+状态栏由轻量原生代码绘制，设置与走势图为独立 GPUI 进程，常驻指示器约 9 MB（Windows 11）/ 18 MB（macOS Apple Silicon）。支持 Windows 10 2004+ / 11（x64 / arm64）与 macOS 13+（Apple Silicon / Intel）。
 
 [English](#english) | 中文
 
-## 支持系统
-
-- Windows 10 2004+ / 11（x64 / arm64）
-- macOS 13+（Apple Silicon / Intel）
-
-## 资源占用
-
-真机实测，release 构建正常运行（指标全开、默认 2 秒采样、无弹窗）：
-
-- Windows 11 任务栏：常驻 **约 9 MB**
-- macOS 27（Apple Silicon）菜单栏：常驻 **约 18 MB**
-
 ## 安装
 
-**Windows**
+**Windows** — 从 [Releases 页面](https://github.com/fynhq/sysvitals/releases) 下载 `SysVitals_Windows_<arch>_v<version>_setup.exe` 并运行。安装器按当前用户安装到 `%LOCALAPPDATA%\Programs\SysVitals`，无需管理员权限。便携版 `..._portable.zip` 解压后为单一 `SysVitals/` 目录，含三个 exe；运行 `SysVitals.exe`，三个文件请保持在一起。构建未签名；如出现 SmartScreen，选择“更多信息”→“仍要运行”。
 
-安装版（推荐）：
+**macOS** — 下载 dmg，把 `SysVitals.app` 拖到 `/Applications`（或 `~/Applications`），启动 `.app`，不要直接运行 `Contents/MacOS` 内的二进制。构建只有 ad-hoc 签名、未公证；如被系统拦截，移除隔离标记：
 
-1. 从 [Releases 页面](https://github.com/fynhq/sysvitals/releases) 下载 `SysVitals_Windows_<arch>_v<version>_setup.exe` 并运行。
-2. 安装器按当前用户安装到 `%LOCALAPPDATA%\Programs\SysVitals`，不需要管理员权限。
-3. 从开始菜单启动 SysVitals；设置与走势图由指示器自动拉起。
-4. 构建未签名。首次启动如出现 SmartScreen，选择“更多信息”→“仍要运行”。
+```sh
+xattr -d -r com.apple.quarantine /Applications/SysVitals.app
+```
 
-便携版（免安装）：
+装在 `~/Applications` 时请替换路径；权限不足可在命令前加 `sudo`。SysVitals 常驻菜单栏，无 Dock 图标（设置窗打开时可能显示）。
 
-1. 下载 `SysVitals_Windows_<arch>_v<version>_portable.zip` 并解压。
-2. 压缩包内是单一 `SysVitals/` 目录，含 `SysVitals.exe`、`SysVitalsSettings.exe`、`SysVitalsHistory.exe`、`LICENSE` 和 `THIRD_PARTY_NOTICES.md`；三个 exe 请保持在一起。
-3. 运行 `SysVitals.exe`；设置与走势图由指示器自动拉起。
-4. 构建未签名。首次启动如出现 SmartScreen，选择“更多信息”→“仍要运行”。
-
-两种 Windows 形式都把设置、历史与日志保存在 `%APPDATA%\SysVitals`。
-
-**macOS**
-
-1. 从 [Releases 页面](https://github.com/fynhq/sysvitals/releases) 下载对应 Mac 的 dmg 并打开。
-2. 把 `SysVitals.app` 拖到 `/Applications`（没有管理员权限时拖到 `~/Applications`，没有该目录就新建一个），启动 `.app`（不要直接运行 `Contents/MacOS` 里的二进制）。
-3. 构建只做了 ad-hoc 签名，未做 Developer ID 签名/公证。如被拦截，移除隔离标记：
-
-   ```sh
-   xattr -d -r com.apple.quarantine /Applications/SysVitals.app
-   ```
-
-   如果装在 `~/Applications`，请把路径换成对应位置。如遇权限问题，可尝试在命令前加 `sudo` 执行。macOS 13/14 也可以先试右键→“打开”。
-4. SysVitals 出现在菜单栏；指示器无 Dock 图标（设置窗打开时可能显示）。
-
-不同版本提供的资产名称/形式可能不同；请以对应 Release 页面列出的文件为准。
-
-## 升级
-
-SysVitals 没有内置自动更新；需要手动安装新版。
-
-**Windows**
-
-安装版：
-
-1. 下载新的 `_setup.exe` 并运行，会原地升级当前用户的安装。
-2. 如果 SysVitals 正在运行，安装器会提示关闭它，并在升级完成后重新启动；静默安装会自动关闭并重启。
-3. 不支持降级：如果已安装版本高于安装包，安装器会提示并退出。
-4. `%APPDATA%\SysVitals` 中的设置、历史与日志保留。
-
-便携版：
-
-1. 退出 SysVitals。
-2. 下载新的 `_portable.zip`，替换旧的 `SysVitals/` 目录；三个 exe 保持在一起。
-3. 重新运行 `SysVitals.exe`。`%APPDATA%\SysVitals` 中的设置、历史与日志保留。
-
-**macOS**
-
-1. 退出 SysVitals。
-2. 下载新的 dmg 并打开。
-3. 把新的 `SysVitals.app` 拖到 `/Applications`（或 `~/Applications`）覆盖旧版本；保留 `~/Library/Application Support/SysVitals`。
-4. 新下载的 app 会重新带上隔离标记，**必须重新执行**：
-
-   ```sh
-   xattr -d -r com.apple.quarantine /Applications/SysVitals.app
-   ```
-
-   如果装在 `~/Applications`，请把路径换成对应位置。如遇权限问题，可尝试在命令前加 `sudo` 执行。
-5. 启动新版 `SysVitals.app`。
+**升级与卸载** — 设置、历史与日志保存在 `%APPDATA%\SysVitals`（Windows）或 `~/Library/Application Support/SysVitals`（macOS），升级后保留。没有自动更新：Windows 运行新的 setup 覆盖安装（便携版替换目录），macOS 替换 app 后需重新执行隔离命令。卸载时，Windows 在“设置 → 应用”中卸载（便携版直接删除目录），macOS 把 app 移到废纸篓；如需清除设置、历史与日志，再删除数据目录。macOS 请先关闭开机自启。
 
 ## 使用
 
 - 单击指示器打开 CPU / 内存走势图；再次单击、点击别处或按 Esc 关闭。
-- Windows 上每个可见任务栏都有独立指示器（在系统中开启“在所有显示器上显示任务栏”后副屏才会出现）；点击其他屏幕的指示器会把走势图移到该屏。
-- 右键菜单：
-  - Windows：任务管理器、设置、重启、退出。
-  - macOS：活动监视器、设置、重启、退出。
-- 设置即时保存，没有应用按钮。退出会关闭指示器及所有打开的窗口。
-- 可配置语言、采样间隔（1/2/3 秒，默认 2 秒）、布局、间距、前缀、指示器主题（Windows）、Windows 任务栏锚位/边距。支持垂直任务栏。
-- 设置中可开启开机自启，默认关闭。macOS 首次开启时可能需要在“系统设置 → 通用 → 登录项与扩展”中允许。
+- 右键菜单：任务管理器（Windows）/ 活动监视器（macOS）、设置、重启、退出。
+- 设置即时保存。可配置语言、采样间隔（1/2/3 秒，默认 2 秒）、布局、间距、前缀、指示器主题、Windows 任务栏锚位/边距；支持垂直任务栏。
 - 设置与走势图跟随系统亮暗与强调色；Windows 指示器主题可选自动/亮色/暗色。
-- 走势图范围：5 分钟、1 小时、1 天、1 个月；历史最多保留一个月。
-- 复制按钮导出当前可视范围，Tab 分隔 + UTF-8 BOM。
-- 网速只实时显示；历史与 CSV 覆盖 CPU / 内存。
+- 开机自启默认关闭；macOS 首次开启可能需要在“系统设置 → 通用 → 登录项与扩展”中允许。
+- 走势图范围：5 分钟、1 小时、1 天、1 个月，历史最多保留一个月，日志超过 7 天自动清理。复制按钮导出当前可视范围为 TSV（UTF-8 BOM）；网速只实时显示。
+- Windows 上每个可见任务栏都有独立指示器；开启“在所有显示器上显示任务栏”后副屏才会出现。
 - 所有数据都在本地；无遥测、云服务或账号。
-
-## 校验下载
-
-每次发布提供一个 `SHA256SUMS`，覆盖全部发布文件。把它与要校验的文件下载到同一目录。
-
-**Windows（PowerShell）**
-
-```powershell
-Get-Content .\SHA256SUMS | ForEach-Object {
-  $hash, $file = $_ -split '\s+', 2
-  $file = $file.Trim()
-  if (Test-Path ".\$file") {
-    $actual = (Get-FileHash ".\$file" -Algorithm SHA256).Hash.ToLower()
-    "{0}: {1}" -f $file, $(if ($actual -eq $hash) { "OK" } else { "MISMATCH" })
-  }
-}
-```
-
-**macOS**
-
-```sh
-shasum -a 256 -c --ignore-missing SHA256SUMS
-```
-
-未下载的文件会被跳过。校验只保证下载完整，不代表签名。
-
-## 数据与卸载
-
-**Windows**
-
-- 数据：`%APPDATA%\SysVitals`。
-- 安装版：在 **设置 → 应用 → 已安装的应用**（或“应用和功能”）中卸载。
-- 便携版：退出 SysVitals，删除解压出的 `SysVitals/` 目录。
-- 如需清除设置、历史与日志，再删除数据目录。
-
-**macOS**
-
-- 数据：`~/Library/Application Support/SysVitals`。
-- 卸载：如已开启**开机自启**，先在设置中关闭；退出 SysVitals，把 `SysVitals.app` 移到废纸篓；如需清除设置、历史与日志，再删除数据目录。
-
-历史最多保留一个月；日志超过 7 天自动清理。
 
 ## 从源码构建
 
-要求 stable Rust 工具链。Windows 用 MSVC，macOS 用 Xcode 命令行工具。
+要求 stable Rust 工具链（Windows 用 MSVC，macOS 用 Xcode 命令行工具）。`cargo build` 与 `cargo test` 覆盖跨平台 core：
 
 ```sh
 cargo build
@@ -331,7 +107,7 @@ cargo test
 cargo run -p sysvitals-core --example monitor
 ```
 
-`cargo build` / `cargo test` 覆盖跨平台 core crate；官方 Windows/macOS 包由 CI 构建；贡献者如需本地调试，可在对应系统显式编译：
+官方包由 CI 构建。贡献者可在对应系统编译平台 crate：
 
 ```sh
 cargo build -p app-win
@@ -339,10 +115,6 @@ cargo build -p app-mac
 cargo build -p app-settings
 cargo build -p app-history
 ```
-
-## 设计说明
-
-计数器差分、回绕保护、网卡聚合、单位与排版都放在纯 Rust 的 `core` crate 中并做单元测试。状态栏由薄的平台原生代码绘制：Windows 为 topmost 分层窗口，macOS 为 `NSStatusItem`。设置与走势图是独立 GPUI 进程，常驻指示器保持精简。
 
 ## 许可
 
