@@ -496,6 +496,17 @@ struct SettingsView {
     /// Taskbar-shape probes are syscalls/registry reads; refresh them at most
     /// once a second on interaction-driven renders.
     last_taskbar_probe: Option<Instant>,
+    /// The logical size the window was opened at. Windows derives a
+    /// `WM_DPICHANGED` suggested rectangle from the *previous* display's DPI
+    /// when the window is placed on a monitor with a different scale factor,
+    /// so the first activation restores this size (same correction as the
+    /// history popup).
+    #[cfg(windows)]
+    initial_size: gpui_kit::Size<Pixels>,
+    /// One-shot guard for [`Self::restore_window_size`], so a user resize
+    /// after the window has settled is never overwritten.
+    #[cfg(windows)]
+    size_fixed: bool,
     /// Keep event subscriptions alive for the lifetime of the view.
     _subscriptions: Vec<Subscription>,
     /// Flush guard: saves the current state whenever the window loses focus,
@@ -515,7 +526,14 @@ struct SettingsView {
 }
 
 impl SettingsView {
-    fn new(cfg: Config, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(
+        cfg: Config,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        initial_size: gpui_kit::Size<Pixels>,
+    ) -> Self {
+        #[cfg(not(windows))]
+        let _ = initial_size;
         let prefix_cpu =
             cx.new(|cx| InputState::new(window, cx).default_value(&cfg.display.prefix.cpu));
         let prefix_mem =
@@ -695,6 +713,10 @@ impl SettingsView {
             save_failed: std::cell::Cell::new(false),
             last_saved_toml,
             last_taskbar_probe: Some(Instant::now()),
+            #[cfg(windows)]
+            initial_size,
+            #[cfg(windows)]
+            size_fixed: false,
             _subscriptions,
             _deactivation: None,
             _appearance: None,
@@ -744,6 +766,38 @@ impl SettingsView {
         })
         .detach();
         view
+    }
+
+    /// Re-assert the logical size the window was opened at after Windows
+    /// placed it on the indicator's display.
+    ///
+    /// The window is created on the OS's default monitor and then moved to
+    /// the anchor's display. A cross-DPI move makes Windows derive the
+    /// suggested rectangle from the *previous* DPI, so a 400x720 panel
+    /// opened from a 125% primary on a 100% secondary came out 318x575.
+    /// GPUI applies that suggestion; restore the intended size once, after
+    /// the move. A same-DPI open matches within a pixel and is untouched.
+    #[cfg(windows)]
+    fn restore_window_size(&mut self, window: &mut Window) {
+        if self.size_fixed {
+            return;
+        }
+        self.size_fixed = true;
+        let current = window.bounds().size;
+        let width = f32::from(current.width);
+        let height = f32::from(current.height);
+        let target_width = f32::from(self.initial_size.width);
+        let target_height = f32::from(self.initial_size.height);
+        if (width - target_width).abs() <= 1.0 && (height - target_height).abs() <= 1.0 {
+            return;
+        }
+        log_event(
+            "INFO",
+            &format!(
+                "settings: restoring window size after cross-DPI placement ({width}x{height} -> {target_width}x{target_height})"
+            ),
+        );
+        window.resize(self.initial_size);
     }
 
     fn current_lang(&self) -> Language {
@@ -977,6 +1031,10 @@ fn switch_row(title: String, control: impl IntoElement) -> impl IntoElement {
 
 impl Render for SettingsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Windows re-scales the window when the cross-DPI placement lands;
+        // correct it on the first frame (the guard makes this one-shot).
+        #[cfg(windows)]
+        self.restore_window_size(window);
         // Re-probe the taskbar shape at most once a second: the user can move
         // or auto-hide the bar while this window stays open, but a registry
         // read plus `SHAppBarMessage` on every keystroke-triggered repaint is
@@ -995,7 +1053,12 @@ impl Render for SettingsView {
         // user clicks away.
         if self._deactivation.is_none() {
             let sub = cx.observe_window_activation(window, |this: &mut Self, window, cx| {
-                if !window.is_window_active() {
+                if window.is_window_active() {
+                    // The first frame may have rendered before activation
+                    // settled; retry the one-shot correction here.
+                    #[cfg(windows)]
+                    this.restore_window_size(window);
+                } else {
                     this.save(cx);
                 }
             });
@@ -2088,15 +2151,19 @@ fn main() {
             }
         };
 
+        let window_bounds = settings_window_bounds(
+            anchor.as_ref(),
+            monitor,
+            // 400x720: leave room for the launch-at-login switch added to
+            // the General card; 680px did not account for the extra row.
+            size(px(400.), px(720.)),
+            cx,
+        );
+        // Logical size after fitting the work area; the view restores it
+        // once if Windows' cross-DPI placement rescaled the window.
+        let initial_size = window_bounds.get_bounds().size;
         let window_options = WindowOptions {
-            window_bounds: Some(settings_window_bounds(
-                anchor.as_ref(),
-                monitor,
-                // 400x720: leave room for the launch-at-login switch added to
-                // the General card; 680px did not account for the extra row.
-                size(px(400.), px(720.)),
-                cx,
-            )),
+            window_bounds: Some(window_bounds),
             // Select the indicator's display explicitly; see
             // `settings_window_bounds` for why the rectangle alone is not
             // enough on mixed-DPI setups.
@@ -2113,7 +2180,7 @@ fn main() {
 
         let (window_handle, _view) =
             gpui_kit::open_window(window_options, cx, move |window, cx| {
-                cx.new(|cx| SettingsView::new(cfg, window, cx))
+                cx.new(|cx| SettingsView::new(cfg, window, cx, initial_size))
             })
             .expect("Failed to open settings window");
 
