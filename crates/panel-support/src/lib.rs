@@ -1,10 +1,15 @@
-//! Shared theme plumbing for the two GPUI panels (`app-settings` and
-//! `app-history`).
+//! Shared theme and window plumbing for the two GPUI panels (`app-settings`
+//! and `app-history`).
 //!
 //! Both windows follow the system light/dark appearance, the OS accent and
-//! the same backdrop-material fallback rules. Keeping the platform probes and
-//! theme patches in one place removes a ~300-line copy that had to be fixed
-//! twice whenever a token changed.
+//! the same backdrop-material fallback rules, and both need the same hidden-
+//! window placement, DPI and parent-watch mechanics. Keeping the probes,
+//! theme patches and window helpers in one place removes copy-paste that
+//! would otherwise have to be fixed twice whenever a token changes.
+//!
+//! GPUI-free process plumbing (logging, the panic hook, registry probes)
+//! lives in `sysvitals-support` and is re-exported here so panel call sites
+//! have a single import surface.
 
 use gpui_kit::component::theme::Theme as UiTheme;
 use gpui_kit::*;
@@ -16,6 +21,12 @@ use sysvitals_core::backdrop::{
     material_tint_alpha, material_tint_alpha_macos, material_tint_alpha_settings, should_tint,
     Material,
 };
+
+// Process plumbing shared by every panel (and, directly, by the platform
+// indicators): daily-file logging, the crash hook and the Windows probes.
+#[cfg(windows)]
+pub use sysvitals_support::{hkcu_dword, os_build_number, taskbar_al, utf16};
+pub use sysvitals_support::{install_panic_hook, log_event, prune_old_logs};
 
 /// Which panel is asking for the material tint. The history popup sits
 /// directly on the chart and keeps the standard tint; the settings page is
@@ -34,82 +45,16 @@ pub const CONTROL_RADIUS: f32 = 4.0;
 #[cfg(not(windows))]
 pub const CONTROL_RADIUS: f32 = 6.0;
 
-/// The Windows OS build number, or `None` if the version probe fails.
-///
-/// `RtlGetVersion` is the documented way to read the real build (the classic
-/// `GetVersionEx` is version-helpered and lies on 8.1+).
-#[cfg(windows)]
-pub fn os_build_number() -> Option<u32> {
-    use windows::Wdk::System::SystemServices::RtlGetVersion;
-    use windows::Win32::System::SystemInformation::OSVERSIONINFOW;
-    let mut info = OSVERSIONINFOW::default();
-    info.dwOSVersionInfoSize = std::mem::size_of::<OSVERSIONINFOW>() as u32;
-    if unsafe { RtlGetVersion(&mut info) }.is_err() {
-        return None;
-    }
-    Some(info.dwBuildNumber)
-}
-
-/// Read a DWORD from HKCU; `None` when the key or value is absent.
-#[cfg(windows)]
-pub fn hkcu_dword(key: &str, value: &str) -> Option<u32> {
-    use windows::Win32::System::Registry::{
-        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, KEY_READ, REG_DWORD,
-        REG_VALUE_TYPE,
-    };
-    let utf16 = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
-    let key_w = utf16(key);
-    let value_w = utf16(value);
-    let mut hkey = HKEY::default();
-    if unsafe {
-        RegOpenKeyExW(
-            HKEY_CURRENT_USER,
-            windows::core::PCWSTR(key_w.as_ptr()),
-            None,
-            KEY_READ,
-            &mut hkey,
-        )
-    }
-    .is_err()
-    {
-        return None;
-    }
-    let mut data = [0u8; 4];
-    let mut size = 4u32;
-    let mut kind = REG_VALUE_TYPE::default();
-    let queried = unsafe {
-        RegQueryValueExW(
-            hkey,
-            windows::core::PCWSTR(value_w.as_ptr()),
-            None,
-            Some(&mut kind),
-            Some(data.as_mut_ptr()),
-            Some(&mut size),
-        )
-    };
-    let _ = unsafe { RegCloseKey(hkey) };
-    if queried.is_ok() && size >= 4 && kind == REG_DWORD {
-        Some(u32::from_le_bytes(data))
-    } else {
-        None
-    }
-}
-
-#[cfg(not(windows))]
-pub fn hkcu_dword(_key: &str, _value: &str) -> Option<u32> {
-    None
-}
-
 /// The backdrop material this Windows host supports, honoring the user's
 /// transparency-effects preference.
 #[cfg(windows)]
 pub fn detect_material() -> Material {
     const PERSONALIZE_KEY: &str =
         "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize";
-    let transparency = hkcu_dword(PERSONALIZE_KEY, "EnableTransparency")
+    let transparency = sysvitals_support::hkcu_dword(PERSONALIZE_KEY, "EnableTransparency")
         .map(|v| v != 0)
         .unwrap_or(true);
-    choose_windows_material(os_build_number(), transparency)
+    choose_windows_material(sysvitals_support::os_build_number(), transparency)
 }
 
 /// macOS always requests the blur material: `NSVisualEffectView` exists on
@@ -138,7 +83,7 @@ pub fn backdrop_for(material: Material) -> WindowBackgroundAppearance {
 /// text. Older builds keep the system-resolved font.
 #[cfg(windows)]
 pub fn panel_font_family() -> Option<&'static str> {
-    os_build_number()
+    sysvitals_support::os_build_number()
         .filter(|build| *build >= 22000)
         .map(|_| "Segoe UI Variable")
 }
@@ -159,7 +104,7 @@ pub fn panel_font_family() -> Option<&'static str> {
 #[cfg(windows)]
 pub fn system_accent_hex() -> Option<u32> {
     const ACCENT_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Accent";
-    if let Some(abgr) = hkcu_dword(ACCENT_KEY, "AccentColorMenu") {
+    if let Some(abgr) = sysvitals_support::hkcu_dword(ACCENT_KEY, "AccentColorMenu") {
         return Some(sysvitals_core::color::abgr_to_rgb(abgr));
     }
     use windows::Win32::Graphics::Dwm::DwmGetColorizationColor;
@@ -259,7 +204,7 @@ pub fn apply_accent(cx: &mut App) {
 }
 
 /// Sync the window palette to the OS light/dark appearance.
-pub fn apply_system_theme(cx: &mut App) {
+fn apply_system_theme(cx: &mut App) {
     UiTheme::sync_system_appearance(None, cx);
 }
 
@@ -294,51 +239,229 @@ pub fn apply_theme_and_accent(cx: &mut App, surface: PanelSurface) {
     apply_material(cx, surface);
 }
 
-/// Append one line to the shared daily log with millisecond precision.
+/// Poll the OS accent color and re-apply the theme patch when it changes.
 ///
-/// The GPUI panels are windowed-subsystem binaries: `eprintln!` has no visible
-/// destination unless a developer attaches a console, so diagnostics that only
-/// go to stderr are effectively lost. Every panel event worth keeping goes
-/// through this helper instead.
-pub fn log_event(level: &str, message: &str) {
-    let Ok(dir) = sysvitals_core::config::data_dir() else {
-        return;
-    };
-    let now = chrono::Local::now();
-    sysvitals_core::logger::log_line(
-        &dir,
-        &now.format("%Y-%m-%d").to_string(),
-        &now.format("%H:%M:%S%.3f").to_string(),
-        level,
-        message,
-    );
+/// `state` reaches into the view's cached last-seen accent; `reload` re-runs
+/// the panel's full theme patch when the accent disappears (the OS fell back
+/// to multicolor, or the probe failed) — a palette reload is the only way to
+/// drop the old override. The loop stops with the view entity, i.e. when the
+/// window closes. The probe runs inside `update` on purpose: on macOS
+/// `system_accent_hex` reads AppKit (`controlAccentColor`), which belongs to
+/// the main thread — the same thread `update` runs on.
+pub fn spawn_accent_watch<V, S, R>(cx: &mut Context<V>, mut state: S, mut reload: R)
+where
+    V: 'static,
+    S: FnMut(&mut V) -> &mut Option<u32> + 'static,
+    R: FnMut(&mut App) + 'static,
+{
+    cx.spawn(async move |this, cx| loop {
+        cx.background_executor()
+            .timer(std::time::Duration::from_millis(500))
+            .await;
+        let alive = this
+            .update(cx, |view: &mut V, cx| {
+                let current = system_accent_hex();
+                let slot = state(view);
+                if current == *slot {
+                    return true;
+                }
+                *slot = current;
+                if current.is_some() {
+                    apply_accent(cx);
+                } else {
+                    reload(cx);
+                }
+                cx.notify();
+                true
+            })
+            .unwrap_or(false);
+        if !alive {
+            break;
+        }
+    })
+    .detach();
 }
 
-/// Install the crash logger shared by both GPUI panels. A panic hook is the
-/// only way to turn a silent GUI-process death into a diagnosable log entry;
-/// the backtrace is included because GPUI panics rarely reproduce outside the
-/// user's session.
-pub fn install_panic_hook() {
-    std::panic::set_hook(Box::new(|info| {
-        let message = if let Some(text) = info.payload().downcast_ref::<&str>() {
-            (*text).to_string()
-        } else if let Some(text) = info.payload().downcast_ref::<String>() {
-            text.clone()
-        } else {
-            "unknown panic".to_string()
-        };
-        let location = info
-            .location()
-            .map(|loc| format!("{}:{}:{}", loc.file(), loc.line(), loc.column()))
-            .unwrap_or_else(|| "unknown location".to_string());
-        let thread = std::thread::current()
-            .name()
-            .unwrap_or("unnamed")
-            .to_string();
-        let backtrace = std::backtrace::Backtrace::force_capture();
-        log_event(
-            "FATAL",
-            &format!("panic in thread {thread} at {location}: {message} | backtrace: {backtrace}"),
-        );
-    }));
+/// Re-apply the panel palette when the OS light/dark appearance flips live.
+/// `on_change` must re-run the panel's full theme patch (a palette reload
+/// wipes every runtime override). Returns the subscription the caller keeps
+/// for the window's lifetime.
+pub fn observe_system_appearance<V, F>(
+    cx: &mut Context<V>,
+    window: &mut Window,
+    mut on_change: F,
+) -> Subscription
+where
+    V: 'static,
+    F: FnMut(&mut App) + 'static,
+{
+    cx.observe_window_appearance(window, move |_view: &mut V, _window, cx| {
+        on_change(cx);
+        cx.notify();
+    })
+}
+
+/// Quit when the launching indicator dies without running its quit path
+/// (crash, Force Quit). The platform job object covers Windows ordinary
+/// exits; this macOS watch also catches a child launched before the job was
+/// configured. `label` names the panel in the log lines.
+#[cfg(target_os = "macos")]
+pub fn watch_parent(cx: &mut App, label: &'static str) {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let Some(pid) = sysvitals_core::cli::parse_parent_pid(&args) else {
+        return;
+    };
+    log_event("INFO", &format!("{label}: watching parent pid {pid}"));
+    cx.spawn(async move |cx| loop {
+        cx.background_executor()
+            .timer(std::time::Duration::from_secs(1))
+            .await;
+        if unsafe { libc::kill(pid as i32, 0) } != 0
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+        {
+            log_event("INFO", &format!("{label}: parent process gone; exiting"));
+            cx.update(|app| app.quit());
+            break;
+        }
+    })
+    .detach();
+}
+
+/// Native window handle of a GPUI window, if it has one.
+#[cfg(windows)]
+pub fn window_hwnd(window: &Window) -> Option<windows::Win32::Foundation::HWND> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows::Win32::Foundation::HWND;
+    let handle = HasWindowHandle::window_handle(window).ok()?;
+    let RawWindowHandle::Win32(raw) = handle.as_raw() else {
+        return None;
+    };
+    Some(HWND(raw.hwnd.get() as *mut _))
+}
+
+/// Move a still-hidden panel window onto the display it will open on.
+///
+/// Windows creates the window on the OS default monitor and GPUI moves it
+/// to the anchor's display when the window is shown. A cross-DPI move makes
+/// Windows re-scale the window from the previous DPI, which used to run
+/// while the panel was already visible (the "growing" flash on a 4K
+/// secondary display). Moving the hidden window first lets the DPI change
+/// happen off-screen; activation then only applies the final placement.
+///
+/// Must run outside an App update: `SetWindowPos` synchronously delivers
+/// `WM_MOVE`/`WM_SIZE`, and those messages re-enter GPUI's window callbacks
+/// (`AsyncApp::update`) while the app is already borrowed, panicking with
+/// "RefCell already borrowed".
+#[cfg(windows)]
+pub fn preplace_hidden_window(hwnd: windows::Win32::Foundation::HWND, monitor: DisplayId) -> bool {
+    use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, HMONITOR, MONITORINFO};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SetWindowPos, SWP_NOACTIVATE, SWP_NOREDRAW, SWP_NOSIZE, SWP_NOZORDER,
+    };
+    let mut info = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    if !unsafe { GetMonitorInfoW(HMONITOR(u64::from(monitor) as _), &mut info) }.as_bool() {
+        return false;
+    }
+    unsafe {
+        SetWindowPos(
+            hwnd,
+            None,
+            info.rcWork.left,
+            info.rcWork.top,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW,
+        )
+    }
+    .is_ok()
+}
+
+/// GPUI does not declare DPI awareness itself. Without this the process is
+/// treated as DPI-unaware and Windows bitmap-stretches the whole window on a
+/// scaled display, which is what makes the text look soft.
+#[cfg(windows)]
+pub fn set_per_monitor_dpi_aware() {
+    use windows::Win32::UI::HiDpi::{
+        SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+    };
+    unsafe {
+        let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    }
+}
+
+/// Re-assert the logical size a panel window was laid out for after Windows
+/// moved it onto the indicator's display.
+///
+/// Windows places a freshly created window on the OS default monitor and
+/// `SetWindowPlacement` then moves it to the anchor display. When that move
+/// crosses a DPI boundary, the `WM_DPICHANGED` suggested rectangle is
+/// derived from the *old* DPI, so a window already sized for the target DPI
+/// is scaled a second time (a 680x390 popup opened from a 125% primary on a
+/// 100% secondary came out 542x311, leaving a visible gap above the
+/// taskbar). GPUI applies that suggestion, so the intended size is
+/// re-applied once, after the move. A same-DPI move stays within a pixel of
+/// the target and is untouched. `size_fixed` is the caller's one-shot latch.
+pub fn restore_window_size_after_move(
+    window: &mut Window,
+    size_fixed: &mut bool,
+    target: gpui_kit::Size<Pixels>,
+) {
+    if *size_fixed {
+        return;
+    }
+    *size_fixed = true;
+    let current = window.bounds().size;
+    let width = f32::from(current.width);
+    let height = f32::from(current.height);
+    let target_width = f32::from(target.width);
+    let target_height = f32::from(target.height);
+    if (width - target_width).abs() <= 1.0 && (height - target_height).abs() <= 1.0 {
+        return;
+    }
+    log_event(
+        "INFO",
+        &format!(
+            "panel: restoring window size after moving displays \
+             ({width}x{height} -> {target_width}x{target_height})"
+        ),
+    );
+    window.resize(target);
+}
+
+/// The usable bounds (taskbar/dock excluded) of the display hosting the
+/// indicator anchor, or `None` when no display matches.
+///
+/// The native display handle is authoritative when the launcher passed one:
+/// GPUI scales each monitor's logical space by its own factor, so on
+/// mixed-DPI setups the anchor rectangle alone can fall inside two displays'
+/// bounds and the probe would pick the wrong one. The rectangle midpoint
+/// probe remains the fallback for launches without a handle (older companion
+/// process, macOS).
+pub fn anchor_visible_bounds(
+    cx: &App,
+    anchor: &sysvitals_core::cli::AnchorRect,
+    monitor: Option<DisplayId>,
+) -> Option<Bounds<Pixels>> {
+    let display = monitor.and_then(|monitor| cx.displays().into_iter().find(|d| d.id() == monitor));
+    let display = match display {
+        Some(display) => Some(display),
+        None => {
+            let probe = point(
+                px((anchor.left + anchor.right) * 0.5),
+                px((anchor.top + anchor.bottom) * 0.5),
+            );
+            cx.displays()
+                .into_iter()
+                .find(|d| d.bounds().contains(&probe))
+                .or_else(|| {
+                    cx.displays()
+                        .into_iter()
+                        .find(|d| d.visible_bounds().contains(&probe))
+                })
+        }
+    };
+    display.map(|d| d.visible_bounds())
 }

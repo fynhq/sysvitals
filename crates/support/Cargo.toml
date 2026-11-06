@@ -1,0 +1,21 @@
+[package]
+name = "sysvitals-support"
+description = "GPUI-free shared process plumbing for SysVitals: file logging, the panic hook and Windows registry/version probes."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# Cross-platform plumbing shared by the platform indicators (app-win /
+# app-mac) and, through `sysvitals-panel`, by the GPUI panels. Deliberately
+# GPUI-free so the overlay processes never pull a UI framework. Built as
+# part of the default workspace build so the headless quality gate covers it.
+
+[dependencies]
+sysvitals-core = { workspace = true }
+chrono = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true }

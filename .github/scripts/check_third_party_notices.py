@@ -25,6 +25,7 @@ OWN = {
     "app-mac",
     "sysvitals-core",
     "sysvitals-panel",
+    "sysvitals-support",
 }
 FINGERPRINT_RE = re.compile(r"Dependency-set fingerprint:\s*([0-9a-f]{64})")
 

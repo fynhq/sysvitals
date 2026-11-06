@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/core",
+    "crates/support",
     "crates/panel-support",
     "crates/app-win",
     "crates/app-mac",
@@ -13,7 +14,7 @@ members = [
 # Platform crates (app-win / app-mac / app-settings / app-history) are built
 # explicitly with `-p`, so a Linux host never fails on `windows`/`objc2`/GPUI
 # dependencies.
-default-members = ["crates/core"]
+default-members = ["crates/core", "crates/support"]
 
 [workspace.package]
 version = "0.4.3"
@@ -60,6 +61,7 @@ windows = { version = "=0.62.2", default-features = false, features = [
 
 # Local crates
 sysvitals-core = { path = "crates/core" }
+sysvitals-support = { path = "crates/support" }
 
 # GPUI Kit: modern cross-platform UI framework for the settings window.
 # Pinned to the exact version; GPUI is pre-1.0 and moves fast.

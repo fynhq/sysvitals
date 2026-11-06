@@ -207,12 +207,12 @@ name = "app-mac"
 version = "0.4.3"
 dependencies = [
  "block2 0.6.2",
- "chrono",
  "libc",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
  "sysvitals-core",
+ "sysvitals-support",
 ]
 
 [[package]]
@@ -237,6 +237,7 @@ version = "0.4.3"
 dependencies = [
  "embed-resource",
  "sysvitals-core",
+ "sysvitals-support",
  "windows 0.62.2",
 ]
 
@@ -6366,10 +6367,21 @@ dependencies = [
 name = "sysvitals-panel"
 version = "0.4.3"
 dependencies = [
- "chrono",
  "gpui-kit",
+ "libc",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
+ "raw-window-handle",
+ "sysvitals-core",
+ "sysvitals-support",
+ "windows 0.62.2",
+]
+
+[[package]]
+name = "sysvitals-support"
+version = "0.4.3"
+dependencies = [
+ "chrono",
  "sysvitals-core",
  "windows 0.62.2",
 ]
