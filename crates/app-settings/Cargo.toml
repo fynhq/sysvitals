@@ -19,10 +19,13 @@ gpui-kit = { workspace = true }
 
 # Windows-only: the settings window reads the same registry flag as the
 # overlay (HKCU Explorer\Advanced\TaskbarAl) to decide whether to offer the
-# taskbar anchor choices, and probes the OS build number (RtlGetVersion) to
-# decide which backdrop material the platform layer supports.
+# taskbar anchor choices, probes the OS build number (RtlGetVersion) to
+# decide which backdrop material the platform layer supports, and reads its
+# own HWND so the still-hidden window can be placed on the indicator's
+# display before it is shown.
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true }
+raw-window-handle = "=0.6.2"
 
 # macOS-only: reads AppKit's dynamic `controlAccentColor` so the panel's
 # primary buttons follow the current system accent in every mode, including

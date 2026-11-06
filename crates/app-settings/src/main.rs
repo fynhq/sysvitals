@@ -19,8 +19,18 @@
 use std::time::Instant;
 
 #[cfg(windows)]
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+#[cfg(windows)]
+use windows::Win32::Foundation::HWND;
+#[cfg(windows)]
+use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, HMONITOR, MONITORINFO};
+#[cfg(windows)]
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
+};
+#[cfg(windows)]
+use windows::Win32::UI::WindowsAndMessaging::{
+    SWP_NOACTIVATE, SWP_NOREDRAW, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos,
 };
 
 use gpui_kit::component::button::*;
@@ -53,6 +63,52 @@ use sysvitals_panel::{hkcu_dword, panel_font_family};
 /// file instead (see core::logger for rotation/retention).
 fn log_event(level: &str, message: &str) {
     sysvitals_panel::log_event(level, message);
+}
+
+/// Native window handle of a GPUI window, if it has one.
+#[cfg(windows)]
+fn window_hwnd(window: &Window) -> Option<HWND> {
+    let handle = HasWindowHandle::window_handle(window).ok()?;
+    let RawWindowHandle::Win32(raw) = handle.as_raw() else {
+        return None;
+    };
+    Some(HWND(raw.hwnd.get() as *mut _))
+}
+
+/// Move the still-hidden settings window onto the display it will open on.
+///
+/// Windows creates the window on the OS default monitor and GPUI moves it
+/// to the anchor's display when the window is shown. A cross-DPI move makes
+/// Windows re-scale the window from the previous DPI, which used to run
+/// while the panel was already visible (the "growing" flash on a 4K
+/// secondary display). Moving the hidden window first lets the DPI change
+/// happen off-screen; activation then only applies the final placement.
+///
+/// Must run outside an App update: `SetWindowPos` synchronously delivers
+/// `WM_MOVE`/`WM_SIZE`, and those messages re-enter GPUI's window callbacks
+/// (`AsyncApp::update`) while the app is already borrowed, panicking with
+/// "RefCell already borrowed".
+#[cfg(windows)]
+fn preplace_hidden_window(hwnd: HWND, monitor: DisplayId) -> bool {
+    let mut info = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    if !unsafe { GetMonitorInfoW(HMONITOR(u64::from(monitor) as _), &mut info) }.as_bool() {
+        return false;
+    }
+    unsafe {
+        SetWindowPos(
+            hwnd,
+            None,
+            info.rcWork.left,
+            info.rcWork.top,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW,
+        )
+    }
+    .is_ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -498,9 +554,10 @@ struct SettingsView {
     last_taskbar_probe: Option<Instant>,
     /// The logical size the window was opened at. Windows derives a
     /// `WM_DPICHANGED` suggested rectangle from the *previous* display's DPI
-    /// when the window is placed on a monitor with a different scale factor,
-    /// so the first activation restores this size (same correction as the
-    /// history popup).
+    /// when the window is placed on a monitor with a different scale factor;
+    /// the window is resized to this size once before it is shown, with an
+    /// activation-edge check as the fallback (same correction as the history
+    /// popup).
     #[cfg(windows)]
     initial_size: gpui_kit::Size<Pixels>,
     /// One-shot guard for [`Self::restore_window_size`], so a user resize
@@ -1031,10 +1088,6 @@ fn switch_row(title: String, control: impl IntoElement) -> impl IntoElement {
 
 impl Render for SettingsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Windows re-scales the window when the cross-DPI placement lands;
-        // correct it on the first frame (the guard makes this one-shot).
-        #[cfg(windows)]
-        self.restore_window_size(window);
         // Re-probe the taskbar shape at most once a second: the user can move
         // or auto-hide the bar while this window stays open, but a registry
         // read plus `SHAppBarMessage` on every keystroke-triggered repaint is
@@ -2174,6 +2227,14 @@ fn main() {
             // when the user disabled transparency effects). The palette tint
             // applied above is what lets this show through.
             window_background: backdrop_for(detect_material()),
+            // Windows opens hidden so the cross-DPI placement and size
+            // correction happen off-screen (see the spawn after open_window);
+            // macOS keeps the previous visible-with-focus behavior.
+            #[cfg(windows)]
+            show: false,
+            #[cfg(windows)]
+            focus: false,
+            #[cfg(not(windows))]
             focus: true,
             ..Default::default()
         };
@@ -2183,6 +2244,42 @@ fn main() {
                 cx.new(|cx| SettingsView::new(cfg, window, cx, initial_size))
             })
             .expect("Failed to open settings window");
+
+        // Windows: the window was created hidden on the OS default monitor.
+        // Move it to the anchor's display while hidden, apply the intended
+        // size, then activate it — activation applies the saved placement and
+        // shows the window, so the cross-DPI rescale never reaches the
+        // screen. All three steps run as foreground tasks: native window
+        // calls must not run inside an App borrow (see
+        // `preplace_hidden_window`).
+        #[cfg(windows)]
+        {
+            let hwnd = window_handle
+                .update(cx, |_, window, _| window_hwnd(&*window))
+                .ok()
+                .flatten();
+            cx.spawn(async move |cx| {
+                if let (Some(hwnd), Some(monitor)) = (hwnd, monitor) {
+                    if !preplace_hidden_window(hwnd, monitor) {
+                        log_event(
+                            "WARN",
+                            &format!(
+                                "settings: could not pre-place the window on display 0x{:x}",
+                                u64::from(monitor)
+                            ),
+                        );
+                    }
+                }
+                let _ = cx.update(|app| {
+                    window_handle.update(app, |_, window, _| window.resize(initial_size))
+                });
+                let _ = cx.update(|app| {
+                    window_handle.update(app, |_, window, _| window.activate_window())
+                });
+                log_event("INFO", "settings: window shown after hidden placement");
+            })
+            .detach();
+        }
 
         // macOS: a child process spawned by the menu-bar indicator starts in
         // the background. Creating the window with `focus: true` only asks
@@ -2206,7 +2303,7 @@ fn main() {
             })
             .detach();
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(windows, target_os = "macos")))]
         let _ = window_handle;
     });
     log_event("INFO", "settings: exited");
