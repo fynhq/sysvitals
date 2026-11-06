@@ -56,7 +56,12 @@ mod win {
         format_frame, format_frame_vertical, t, Config, HistoryWriter, Language, NetSelection,
         Sampler, Theme,
     };
-    use windows::Wdk::System::SystemServices::RtlGetVersion;
+    // Shared process plumbing (daily-file logging, panic hook, HKCU probes)
+    // lives in `sysvitals-support` so the overlay and the GPUI panels cannot
+    // drift apart.
+    use sysvitals_support::{
+        hkcu_dword, log_event, os_build_number, prune_old_logs, taskbar_al, utf16,
+    };
     use windows::Win32::Foundation::{
         CloseHandle, ERROR_FILE_NOT_FOUND, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
         WAIT_TIMEOUT,
@@ -94,7 +99,6 @@ mod win {
         RegCloseKey, RegDeleteKeyValueW, RegOpenKeyExW, RegQueryValueExW, RegSetKeyValueW, HKEY,
         HKEY_CURRENT_USER, KEY_READ, REG_DWORD, REG_SZ, REG_VALUE_TYPE,
     };
-    use windows::Win32::System::SystemInformation::{GetLocalTime, OSVERSIONINFOW};
     use windows::Win32::System::Threading::{
         CreateMutexW, CreateProcessW, GetCurrentProcessId, GetExitCodeProcess, TerminateProcess,
         WaitForSingleObject, PROCESS_INFORMATION, STARTUPINFOW,
@@ -191,8 +195,6 @@ mod win {
     /// default-off `[startup] auto_start` setting is applied here.
     const RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
     const RUN_VALUE: &str = "SysVitals";
-    const TASKBAR_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced";
-    const TASKBAR_VALUE: &str = "TaskbarAl";
 
     const IDM_SETTINGS: usize = 901;
     const IDM_QUIT: usize = 902;
@@ -430,81 +432,10 @@ mod win {
 
     // ----------------------------------------------------------------- logging
 
-    /// Current local date/time strings from the OS clock.
-    fn local_now() -> (String, String) {
-        let st = unsafe { GetLocalTime() };
-        (
-            format!("{:04}-{:02}-{:02}", st.wYear, st.wMonth, st.wDay),
-            format!(
-                "{:02}:{:02}:{:02}.{:03}",
-                st.wHour, st.wMinute, st.wSecond, st.wMilliseconds
-            ),
-        )
-    }
-
-    /// Append one line to today's log file under the data dir. Logging must
-    /// never break the indicator, so failures are silently ignored.
-    fn log_event(level: &str, message: &str) {
-        let Ok(dir) = sysvitals_core::config::data_dir() else {
-            return;
-        };
-        let (date, time) = local_now();
-        sysvitals_core::logger::log_line(&dir, &date, &time, level, message);
-    }
-
-    /// Remove log files older than the retention window. Run once at startup.
-    fn prune_old_logs() {
-        let Ok(dir) = sysvitals_core::config::data_dir() else {
-            return;
-        };
-        let (date, _) = local_now();
-        sysvitals_core::logger::prune_logs(
-            &dir,
-            &date,
-            sysvitals_core::logger::DEFAULT_RETENTION_DAYS,
-        );
-    }
+    // Logging (`log_event`, `prune_old_logs`) comes from `sysvitals-support`
+    // so every SysVitals process shares one implementation.
 
     // ------------------------------------------------------------------ helpers
-
-    fn utf16(s: &str) -> Vec<u16> {
-        s.encode_utf16().chain(std::iter::once(0)).collect()
-    }
-
-    /// Read a DWORD from HKCU; `None` when the key or value is absent.
-    unsafe fn hkcu_dword(key: &str, value: &str) -> Option<u32> {
-        let key = utf16(key);
-        let value = utf16(value);
-        let mut hkey = HKEY::default();
-        if RegOpenKeyExW(
-            HKEY_CURRENT_USER,
-            windows::core::PCWSTR(key.as_ptr()),
-            None,
-            KEY_READ,
-            &mut hkey,
-        )
-        .is_err()
-        {
-            return None;
-        }
-        let mut data = [0u8; 4];
-        let mut size = 4u32;
-        let mut kind = REG_VALUE_TYPE::default();
-        let queried = RegQueryValueExW(
-            hkey,
-            windows::core::PCWSTR(value.as_ptr()),
-            None,
-            Some(&mut kind),
-            Some(data.as_mut_ptr()),
-            Some(&mut size),
-        );
-        let _ = RegCloseKey(hkey);
-        if queried.is_ok() && size >= 4 && kind == REG_DWORD {
-            Some(u32::from_le_bytes(data))
-        } else {
-            None
-        }
-    }
 
     /// Read a REG_SZ value from HKCU; `None` when absent or unreadable. Used
     /// only to avoid rewriting/logging an unchanged Run entry.
@@ -666,16 +597,6 @@ mod win {
         }
     }
 
-    /// The real Windows build number (`GetVersionEx` is version-helpered).
-    unsafe fn os_build_number() -> Option<u32> {
-        let mut info = OSVERSIONINFOW::default();
-        info.dwOSVersionInfoSize = std::mem::size_of::<OSVERSIONINFOW>() as u32;
-        if RtlGetVersion(&mut info).is_err() {
-            return None;
-        }
-        Some(info.dwBuildNumber)
-    }
-
     /// Win11 with centered taskbar icons: the only case where the far-left
     /// anchor is offered. Cached because placement runs every tick; the
     /// setting-change / TaskbarCreated paths invalidate the cache.
@@ -684,7 +605,7 @@ mod win {
         if cached != u32::MAX {
             return cached == 1;
         }
-        let centered = hkcu_dword(TASKBAR_KEY, TASKBAR_VALUE) == Some(1);
+        let centered = taskbar_al() == Some(1);
         WIN11_CENTERED.store(u32::from(centered), Ordering::Relaxed);
         centered
     }
@@ -2189,6 +2110,9 @@ mod win {
                 return;
             }
         };
+        // The sampler fixes `cpu_smoothing` at construction; detect a change
+        // before swapping in the new config so it can rebuild afterwards.
+        let smoothing_changed = config().sample.cpu_smoothing != loaded.sample.cpu_smoothing;
         CONFIG_MTIME.store(current, Ordering::Relaxed);
         CONFIG_ERROR_MTIME.store(0, Ordering::Relaxed);
         CONFIG_FROM_FILE.store(
@@ -2196,6 +2120,19 @@ mod win {
             Ordering::Relaxed,
         );
         store_config(loaded.clone());
+        if smoothing_changed {
+            // Drop the sampler; the next tick rebuilds it with the new factor.
+            // Rebuilding re-primes the CPU EMA and re-seeds the network
+            // baseline, i.e. one "--" frame — the same cost as a restart.
+            SAMPLER.with(|s| *s.borrow_mut() = None);
+            log_event(
+                "INFO",
+                &format!(
+                    "cpu_smoothing changed to {}: sampler rebuilds on the next tick",
+                    loaded.sample.cpu_smoothing
+                ),
+            );
+        }
         // A missing file (for example after saving a corrupt config aside)
         // is not an explicit "auto-start off" choice. Only an existing,
         // parsed file may apply the platform side effect.
@@ -2224,16 +2161,24 @@ mod win {
                 loaded.startup.auto_start,
             ),
         );
-        // Re-seed the sample timer in case the interval changed.
+        // Re-seed the sample timer in case the interval changed. SetTimer
+        // with the same hwnd+id replaces the running timer, so no KillTimer
+        // is needed; if the replacement fails the old timer keeps ticking at
+        // the previous interval instead of sampling stopping entirely.
         unsafe {
             let sentinel = sentinel_hwnd();
-            let _ = KillTimer(Some(sentinel), TIMER_SAMPLE);
-            SetTimer(
+            if SetTimer(
                 Some(sentinel),
                 TIMER_SAMPLE,
                 loaded.sample.interval_ms.clamp(500, 5000) as u32,
                 None,
-            );
+            ) == 0
+            {
+                log_event(
+                    "WARN",
+                    "config reload: SetTimer failed, keeping the previous sample interval",
+                );
+            }
         }
         // Reset the grow-only widths so a narrower layout takes effect, then
         // re-lay out every overlay from the last sample (no re-sample spike).
@@ -2850,7 +2795,7 @@ mod win {
         close_children();
         log_event("INFO", "restart_self: scheduling relaunch and exiting");
         unsafe {
-            let _ = ShellExecuteW(
+            let result = ShellExecuteW(
                 None,
                 windows::core::PCWSTR(verb.as_ptr()),
                 windows::core::PCWSTR(target.as_ptr()),
@@ -2858,6 +2803,19 @@ mod win {
                 windows::core::PCWSTR::null(),
                 SW_HIDE,
             );
+            // ShellExecuteW reports errors as an HINSTANCE whose value is
+            // below 32; a failed relaunch must not quit the running
+            // indicator, or the user is left with no SysVitals at all.
+            if (result.0 as usize) < 32 {
+                log_event(
+                    "WARN",
+                    &format!(
+                        "restart_self: relaunch failed (code {}), keeping the running instance",
+                        result.0 as usize
+                    ),
+                );
+                return;
+            }
             shutdown_and_quit();
         }
     }
@@ -3125,32 +3083,11 @@ mod win {
 
     // ------------------------------------------------------------ crash hooks
 
-    /// Install crash diagnostics: a Rust panic hook and a Win32 unhandled
-    /// exception filter. Both write the crash reason to the log file so a
-    /// silent process death becomes diagnosable.
+    /// Install crash diagnostics: the shared Rust panic hook plus a Win32
+    /// unhandled exception filter. Both write the crash reason to the log
+    /// file so a silent process death becomes diagnosable.
     fn install_crash_hooks() {
-        std::panic::set_hook(Box::new(|info| {
-            let msg = if let Some(s) = info.payload().downcast_ref::<&str>() {
-                s.to_string()
-            } else if let Some(s) = info.payload().downcast_ref::<String>() {
-                s.clone()
-            } else {
-                "unknown panic".to_string()
-            };
-            let loc = info
-                .location()
-                .map(|l| format!("{}:{}", l.file(), l.line()))
-                .unwrap_or_else(|| "unknown location".to_string());
-            let thread = std::thread::current()
-                .name()
-                .unwrap_or("unnamed")
-                .to_string();
-            let backtrace = std::backtrace::Backtrace::force_capture();
-            log_event(
-                "FATAL",
-                &format!("panic in thread {thread} at {loc}: {msg} | backtrace: {backtrace}"),
-            );
-        }));
+        sysvitals_support::install_panic_hook();
         unsafe {
             SetUnhandledExceptionFilter(Some(unhandled_exception_filter));
         }
@@ -3389,8 +3326,10 @@ mod win {
             // Monitor handles are not stable across a display reconfiguration;
             // forget which screen anchors the popup so the next click opens
             // or moves it again instead of being mistaken for a same-screen
-            // toggle.
+            // toggle. The settings-window monitor cache is equally stale and
+            // must not keep claiming the panel is already on "that" screen.
             HISTORY_ANCHOR_MONITOR.store(0, Ordering::Relaxed);
+            SETTINGS_MONITOR.store(0, Ordering::Relaxed);
             invalidate_ui_font();
             OVERLAYS.with(|slot| {
                 for ov in slot.borrow_mut().iter_mut() {
