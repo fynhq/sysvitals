@@ -227,6 +227,16 @@ fn anchor_origin(
     point(px(clamp_x(center_x - size_w * 0.5)), px(y))
 }
 
+/// Native window handle of a GPUI window, if it has one.
+#[cfg(windows)]
+fn popup_hwnd(window: &Window) -> Option<HWND> {
+    let handle = HasWindowHandle::window_handle(window).ok()?;
+    let RawWindowHandle::Win32(raw) = handle.as_raw() else {
+        return None;
+    };
+    Some(HWND(raw.hwnd.get() as *mut _))
+}
+
 /// Move the still-hidden popup onto the display it will open on, before GPUI
 /// activates it.
 ///
@@ -237,15 +247,13 @@ fn anchor_origin(
 /// the hidden window onto the target display first lets the DPI change happen
 /// while nothing can be seen; activation then only repositions it at the same
 /// DPI. Returns whether the window could be moved.
+///
+/// Must run outside an App update: `SetWindowPos` synchronously delivers
+/// `WM_MOVE`/`WM_SIZE`, and those messages re-enter GPUI's window callbacks
+/// (`AsyncApp::update`) while the app is already borrowed, panicking with
+/// "RefCell already borrowed".
 #[cfg(windows)]
-fn preplace_hidden_popup(window: &mut Window, monitor: DisplayId) -> bool {
-    let Ok(handle) = HasWindowHandle::window_handle(&*window) else {
-        return false;
-    };
-    let RawWindowHandle::Win32(raw) = handle.as_raw() else {
-        return false;
-    };
-    let hwnd = HWND(raw.hwnd.get() as *mut _);
+fn preplace_hidden_popup(hwnd: HWND, monitor: DisplayId) -> bool {
     let mut info = MONITORINFO {
         cbSize: std::mem::size_of::<MONITORINFO>() as u32,
         ..Default::default()
@@ -1823,23 +1831,39 @@ fn open_history_window(
     // The resident path opens the window hidden. Crossing a display DPI
     // boundary during activation would make Windows resize it in view, so
     // move it onto the target display now; the resize then happens while the
-    // window is still invisible.
+    // window is still invisible. The move runs as a foreground task because
+    // `SetWindowPos` must not be called while the app is borrowed (see
+    // `preplace_hidden_popup`); the task still executes well before the
+    // resident loop activates the window.
     #[cfg(windows)]
     if hidden_start && anchored {
         if let Some(monitor) = monitor {
-            let placed = window_handle
-                .update(cx, |_view, window, _| {
-                    preplace_hidden_popup(window, monitor)
-                })
-                .unwrap_or(false);
-            if !placed {
-                log_event(
-                    "WARN",
-                    &format!(
-                        "history: could not pre-place the popup on display 0x{:x}",
-                        u64::from(monitor)
-                    ),
-                );
+            let hwnd = window_handle
+                .update(cx, |_view, window, _| popup_hwnd(&*window))
+                .ok()
+                .flatten();
+            match hwnd {
+                Some(hwnd) => {
+                    cx.foreground_executor()
+                        .spawn(async move {
+                            if !preplace_hidden_popup(hwnd, monitor) {
+                                log_event(
+                                    "WARN",
+                                    &format!(
+                                        "history: could not pre-place the popup on display 0x{:x}",
+                                        u64::from(monitor)
+                                    ),
+                                );
+                            }
+                        })
+                        .detach();
+                }
+                None => {
+                    log_event(
+                        "WARN",
+                        "history: could not resolve the popup window for pre-placement",
+                    );
+                }
             }
         }
     }
