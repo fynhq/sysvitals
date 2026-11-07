@@ -83,12 +83,26 @@ pub fn record_history(cfg: &Config, now: i64, snapshot: &sysvitals_core::Snapsho
                 }
             }
         }
-        if let Some(writer) = writer.as_ref() {
-            writer.record(
+        let send_ok = writer.as_ref().is_none_or(|started| {
+            started.record(
                 now,
                 snapshot.cpu_pct,
                 snapshot.mem_pct,
                 cfg.history.retention_days,
+            )
+        });
+        if !send_ok {
+            // The worker stopped (panic). Drop the handle so the cooldown
+            // can start a fresh one instead of silently discarding every
+            // later sample.
+            *writer = None;
+            HISTORY_WRITER_FAILED_AT.with(|last| last.set(Some(Instant::now())));
+            log_event(
+                "WARN",
+                &format!(
+                    "history writer stopped; retrying in {}s",
+                    HISTORY_WRITER_RETRY_COOLDOWN.as_secs()
+                ),
             );
         }
     });
@@ -101,10 +115,19 @@ pub fn tick() {
     reap_children();
 
     let cfg = CONFIG.with(|c| c.borrow().clone());
-    let now = SystemTime::now()
+    let wall = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
+    let now = {
+        let previous = LAST_SAMPLE_TS.get();
+        let ts = sysvitals_core::history_writer::next_sample_ts(
+            (previous != i64::MIN).then_some(previous),
+            wall,
+        );
+        LAST_SAMPLE_TS.set(ts);
+        ts
+    };
 
     let snapshot = SAMPLER.with(|s| {
         let mut guard = s.borrow_mut();

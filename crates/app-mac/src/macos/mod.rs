@@ -24,7 +24,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 // Shared process plumbing (daily-file logging, panic hook) lives in
 // `sysvitals-support` so the indicator and the GPUI panels cannot drift.
-use sysvitals_support::{log_event, prune_old_logs};
+use sysvitals_support::log_event;
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, Bool, ProtocolObject};
@@ -167,6 +167,8 @@ thread_local! {
     /// inside one second must still be visible to the poller.
     static CONFIG_MTIME: RefCell<u64> = const { RefCell::new(0) };
     static CONFIG_ERROR_MTIME: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Last history sample timestamp; monotonic across wall-clock rollbacks.
+    static LAST_SAMPLE_TS: std::cell::Cell<i64> = const { std::cell::Cell::new(i64::MIN) };
     static MTM: RefCell<Option<MainThreadMarker>> = const { RefCell::new(None) };
     // History writes run on a dedicated worker thread. SQLite open /
     // insert / prune on the main RunLoop (up to the 250 ms busy timeout)
@@ -236,12 +238,14 @@ thread_local! {
     static FIRST_FRAME_LOGGED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// Screen rectangle (left, top, right, bottom) in GPUI's global top-left,
-/// y-downward logical coordinate space. Uses the button's own bounds in
-/// screen coordinates (not the whole status-bar window) and converts
-/// Cocoa's bottom-left global space with the *primary* screen height, so a
-/// menu bar extra on a secondary display anchors correctly too.
-fn anchor_rect() -> Option<(i64, i64, i64, i64)> {
+/// Screen rectangle (left, top, right, bottom) in the hosting display's
+/// **local** GPUI logical space, plus that display's native ID. GPUI's macOS
+/// backend reports `Display::bounds()` relative to each screen's own origin
+/// (0,0) and adds the screen frame back when creating a window, so passing a
+/// global Cocoa rectangle would land the panels on the primary display (or
+/// clamp them to its edge). The button's screen supplies both the origin and
+/// the height used for the bottom-left to top-left flip.
+fn anchor_rect() -> Option<(i64, i64, i64, i64, u64)> {
     let mtm = mtm();
     STATUS_ITEM.with(|si| {
         let item = si.borrow().clone()?;
@@ -249,21 +253,29 @@ fn anchor_rect() -> Option<(i64, i64, i64, i64)> {
         let window = button.window()?;
         let rect = window.convertRectToScreen(button.convertRect_toView(button.bounds(), None));
         let screen = window.screen().or_else(|| NSScreen::mainScreen(mtm))?;
-        let primary_height = NSScreen::screens(mtm)
-            .firstObject()
-            .map(|s| s.frame().size.height)
-            .unwrap_or_else(|| screen.frame().size.height);
-        // Cocoa origin is bottom-left with y growing upward; GPUI/CGDisplay
-        // global space starts at the primary screen's top-left.
-        let left = rect.origin.x;
-        let top = primary_height - (rect.origin.y + rect.size.height);
+        let screen_frame = screen.frame();
+        // Cocoa origin is bottom-left with y growing upward. Convert into
+        // the hosting screen's local top-left space.
+        let left = rect.origin.x - screen_frame.origin.x;
+        let top =
+            screen_frame.size.height - (rect.origin.y - screen_frame.origin.y) - rect.size.height;
         let right = left + rect.size.width;
         let bottom = top + rect.size.height;
+        let display_id = unsafe {
+            screen
+                .deviceDescription()
+                .objectForKey_unchecked(objc2_foundation::ns_string!("NSScreenNumber"))
+                .map_or(0u32, |number| {
+                    let raw: u32 = msg_send![number, unsignedIntValue];
+                    raw
+                })
+        };
         Some((
             left.round() as i64,
             top.round() as i64,
             right.round() as i64,
             bottom.round() as i64,
+            u64::from(display_id),
         ))
     })
 }
@@ -448,19 +460,40 @@ pub fn run() {
         // Without the seed the first tick reloads the file and logs a
         // spurious "config reloaded" line on every normal launch.
         let mut initial_config_ok = false;
-        if let Ok(path) = config_path() {
-            if let Ok((cfg, issues, source)) = Config::load_with_source(&path) {
-                log_config_issues(&issues);
-                CONFIG.with(|c| *c.borrow_mut() = cfg);
-                CONFIG_MTIME.with(|m| *m.borrow_mut() = config_mtime());
-                initial_config_ok = source == sysvitals_core::config::ConfigSource::File;
+        match config_path() {
+            Ok(path) => match Config::load_with_source(&path) {
+                Ok((cfg, issues, source)) => {
+                    log_config_issues(&issues);
+                    CONFIG.with(|c| *c.borrow_mut() = cfg);
+                    CONFIG_MTIME.with(|m| *m.borrow_mut() = config_mtime());
+                    initial_config_ok = source == sysvitals_core::config::ConfigSource::File;
+                }
+                Err(e) => {
+                    log_event(
+                        "WARN",
+                        &format!(
+                            "config load failed ({}): {e}; using defaults",
+                            path.display()
+                        ),
+                    );
+                    // Leave CONFIG_MTIME unset so the first tick retries (and
+                    // recovers if the failure was transient); the reload path
+                    // throttles its own log to one line per broken mtime.
+                }
+            },
+            Err(e) => {
+                log_event(
+                    "WARN",
+                    &format!("config path unavailable: {e}; using defaults"),
+                );
             }
         }
 
-        // Daily-file logging: prune stale logs once, then stamp the start and
-        // the effective config (same shape as the Windows overlay's startup
-        // log, so a user can just send this file when something looks wrong).
-        prune_old_logs();
+        // Daily-file logging: the first line below also opens the file and
+        // prunes stale logs (see `core::logger`), so there is no separate
+        // startup prune here. Then stamp the start and the effective config
+        // (same shape as the Windows overlay's startup log, so a user can
+        // just send this file when something looks wrong).
         let cfg = CONFIG.with(|c| c.borrow().clone());
         log_event(
             "INFO",

@@ -105,6 +105,26 @@ pub fn close_children() {
     let _ = close_settings();
 }
 
+/// Pass the indicator's anchor and hosting display to a child panel. The
+/// rectangle is in that display's local GPUI space (see `anchor_rect`), and
+/// the native display id lets the panel select the screen explicitly on
+/// mixed-DPI/multi-display setups instead of probing the rectangle against
+/// every screen's local bounds.
+fn append_anchor_args(cmd: &mut std::process::Command) {
+    let Some((l, t, r, b, display)) = anchor_rect() else {
+        return;
+    };
+    let l = l.to_string();
+    let t = t.to_string();
+    let r = r.to_string();
+    let b = b.to_string();
+    cmd.args(["--anchor", l.as_str(), t.as_str(), r.as_str(), b.as_str()]);
+    if display != 0 {
+        let display = display.to_string();
+        cmd.args(["--anchor-monitor", display.as_str()]);
+    }
+}
+
 /// Launch the external GPUI settings process (`SysVitalsSettings`), one
 /// live instance at a time.
 pub fn launch_settings() {
@@ -131,17 +151,7 @@ pub fn launch_settings() {
     cmd.args(["--parent-pid", parent_pid.as_str()]);
     // Let the settings window open on the display that hosts the clicked
     // status item instead of always centering on the primary screen.
-    // The native display handle is Windows-only today; the rectangle
-    // probe is app-settings' documented fallback on macOS.
-    if let Some((l, t, r, b)) = anchor_rect() {
-        cmd.args([
-            "--anchor",
-            &l.to_string(),
-            &t.to_string(),
-            &r.to_string(),
-            &b.to_string(),
-        ]);
-    }
+    append_anchor_args(&mut cmd);
     match cmd.spawn() {
         Ok(child) => {
             SETTINGS_CHILD.with(|slot| *slot.borrow_mut() = Some(child));
@@ -172,15 +182,7 @@ pub fn launch_history() {
     let parent_pid = std::process::id().to_string();
     let mut cmd = std::process::Command::new(history);
     cmd.args(["--parent-pid", parent_pid.as_str()]);
-    if let Some((l, t, r, b)) = anchor_rect() {
-        cmd.args([
-            "--anchor",
-            &l.to_string(),
-            &t.to_string(),
-            &r.to_string(),
-            &b.to_string(),
-        ]);
-    }
+    append_anchor_args(&mut cmd);
     match cmd.spawn() {
         Ok(child) => {
             HISTORY_CHILD.with(|slot| *slot.borrow_mut() = Some(child));

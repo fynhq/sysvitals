@@ -436,6 +436,11 @@ pub fn render_indicator(row: &FormattedRow, cfg: &Config) {
     update_accessibility(accessible);
 }
 
+/// Force the next `render_indicator` pass to rebuild and remount the image.
+fn invalidate_draw_signature() {
+    DRAW_SIGNATURE.with(|s| s.borrow_mut().clear());
+}
+
 /// Mount the pre-rendered template image and its reserved width. Called
 /// whenever `render_indicator` rebuilds the image, and once at startup.
 pub fn apply_status_image() {
@@ -443,14 +448,19 @@ pub fn apply_status_image() {
     STATUS_IMAGE.with(|slot| {
         let slot = slot.borrow();
         let Some(images) = slot.as_ref() else {
+            // No image yet: force the next render to build one instead of
+            // matching a signature whose mount never happened.
+            invalidate_draw_signature();
             return;
         };
         STATUS_ITEM.with(|si| {
             let si_borrow = si.borrow();
             let Some(item) = si_borrow.as_ref() else {
+                invalidate_draw_signature();
                 return;
             };
             let Some(button) = item.button(mtm) else {
+                invalidate_draw_signature();
                 return;
             };
             // Title cleared so only the image renders; `ImageOnly` +
