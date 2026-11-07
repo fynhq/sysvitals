@@ -93,15 +93,15 @@ pub struct HistoryView {
 /// migration on this thread. A missing/zero-length file is created (schema
 /// creation is cheap); an existing database is opened read-only and an old
 /// schema simply stays in raw-only mode until the background writer heals it.
-fn open_store_for_read(path: &std::path::Path) -> anyhow::Result<Store> {
+fn open_store_for_read(path: &std::path::Path) -> Result<Store, String> {
     let has_db = path
         .metadata()
         .map(|m| m.is_file() && m.len() > 0)
         .unwrap_or(false);
     if has_db {
-        Store::open_read_only(path)
+        Store::open_read_only(path).map_err(|e| e.to_string())
     } else {
-        Store::open(path)
+        Store::open(path).map_err(|e| e.to_string())
     }
 }
 

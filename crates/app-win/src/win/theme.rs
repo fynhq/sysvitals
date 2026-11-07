@@ -78,11 +78,11 @@ pub fn indicator_text_rgb() -> (u32, u32, u32) {
 
 // ------------------------------------------------------------------- fonts
 
-/// System UI face + pixel height, cached on the message thread. Read
-/// from `NONCLIENTMETRICS.lfMessageFont` so the indicator's font follows
-/// the system setting (face and size). `WM_SETTINGCHANGE` and
-/// `WM_DPICHANGED` invalidate this cache: text-size and per-monitor DPI
-/// changes must not require a restart.
+// System UI face + pixel height, cached on the message thread. Read
+// from `NONCLIENTMETRICS.lfMessageFont` so the indicator's font follows
+// the system setting (face and size). `WM_SETTINGCHANGE` and
+// `WM_DPICHANGED` invalidate this cache: text-size and per-monitor DPI
+// changes must not require a restart.
 thread_local! {
     pub static UI_FONT: RefCell<Option<(i32, Vec<u16>)>> = const { RefCell::new(None) };
 }
