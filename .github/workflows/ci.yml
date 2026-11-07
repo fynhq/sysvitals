@@ -29,7 +29,7 @@ jobs:
     name: Quality (fmt / clippy / test)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.ref }}
       - name: Verify tag matches workspace version
@@ -41,10 +41,12 @@ jobs:
             echo "tag $GITHUB_REF_NAME does not match workspace version v$version" >&2
             exit 1
           fi
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e9d7b9f1e587218970671bac74e5511ed9506e6a # v2
       - name: Verify third-party notices are current
         run: python3 .github/scripts/check_third_party_notices.py
       - name: Format check (all workspace members)
@@ -71,19 +73,26 @@ jobs:
       matrix:
         include:
           - os: windows-latest
-            packages: "-p app-win"
+            packages: "-p app-win -p app-settings -p app-history"
           - os: macos-latest
             packages: "-p app-mac -p app-settings -p app-history"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.ref }}
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@e9d7b9f1e587218970671bac74e5511ed9506e6a # v2
         with:
           key: platform-check-${{ matrix.os }}
       - name: Check platform crates
         shell: bash
+        env:
+          # Platform crates only run `cargo check` here (no clippy); denying
+          # rustc warnings keeps unused imports/fields from accumulating in
+          # code paths the Linux quality job never compiles.
+          RUSTFLAGS: -D warnings
         run: cargo check --locked ${{ matrix.packages }}
 
   # ---------------------------------------------------------------------------
@@ -96,7 +105,7 @@ jobs:
     name: Public surface
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.ref }}
           fetch-depth: 0
@@ -149,14 +158,16 @@ jobs:
     env:
       SV_BUILD_ID_OVERRIDE: ${{ github.ref_type == 'tag' && startsWith(github.ref_name, 'v') && github.ref_name || '' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.ref }}
           fetch-tags: true
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
         with:
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e9d7b9f1e587218970671bac74e5511ed9506e6a # v2
         with:
           key: ${{ matrix.target }}
       - name: Build Windows display layer
@@ -403,7 +414,7 @@ jobs:
           Write-Host "[smoke] uninstall verified"
       - name: Upload Windows packages
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: SysVitals-windows-${{ matrix.arch }}
           path: |
@@ -427,14 +438,16 @@ jobs:
       MACOSX_DEPLOYMENT_TARGET: "13.0"
       SV_BUILD_ID_OVERRIDE: ${{ github.ref_type == 'tag' && startsWith(github.ref_name, 'v') && github.ref_name || '' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.ref }}
           fetch-tags: true
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
         with:
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e9d7b9f1e587218970671bac74e5511ed9506e6a # v2
         with:
           key: ${{ matrix.target }}
       - name: Build macOS display layer
@@ -559,7 +572,7 @@ jobs:
           trap - EXIT
           echo "Packaged $dmg_name"
       - name: Upload macOS dmg
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: SysVitals-macos-${{ matrix.arch }}
           path: SysVitals_macOS_${{ matrix.arch }}_*.dmg
@@ -587,7 +600,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.ref }}
           fetch-depth: 0
@@ -606,7 +619,7 @@ jobs:
             *-*) echo "prerelease=true" >> "$GITHUB_OUTPUT" ;;
             *)   echo "prerelease=false" >> "$GITHUB_OUTPUT" ;;
           esac
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: SysVitals-*
           path: release-assets
