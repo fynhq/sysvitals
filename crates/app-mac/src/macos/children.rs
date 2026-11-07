@@ -1,0 +1,235 @@
+//! children: split out of `macos` (see `macos/mod.rs` for the module map).
+
+use super::*;
+
+/// Directory containing the running executable.
+pub fn exe_dir() -> Option<std::path::PathBuf> {
+    std::env::current_exe()
+        .ok()?
+        .parent()
+        .map(|p| p.to_path_buf())
+}
+
+/// Path to relaunch this program as: the enclosing `.app` bundle when
+/// running from one, otherwise the executable itself.
+///
+/// `open` resolves a bundle path through LaunchServices, which applies the
+/// bundle's Info.plist (notably `LSUIElement`) and reuses the registered
+/// application identity. Handing it the raw binary inside
+/// `Contents/MacOS/` instead bypasses that registration, so the relaunched
+/// process may not be treated as the same app.
+pub fn relaunch_target() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let bundle = exe
+        .ancestors()
+        .find(|p| p.extension() == Some(std::ffi::OsStr::new("app")))?;
+    Some(bundle.to_path_buf())
+}
+
+/// Whether a previously spawned child (held in `slot`) is still running.
+/// Reaps it once it has exited.
+pub fn child_alive(slot: &RefCell<Option<Child>>) -> bool {
+    let mut borrow = slot.borrow_mut();
+    match borrow.as_mut() {
+        Some(child) => match child.try_wait() {
+            Ok(Some(_status)) => {
+                *borrow = None;
+                false
+            }
+            Ok(None) => true,
+            // A waitpid error means the child can no longer be managed
+            // (typically already reaped). Treating it as alive used to
+            // permanently block the next launch for that panel.
+            Err(e) => {
+                log_event("WARN", &format!("child wait failed: {e}"));
+                *borrow = None;
+                false
+            }
+        },
+        None => false,
+    }
+}
+
+/// Reap children that exited on their own so a long-running indicator does
+/// not accumulate zombies between launches.
+pub fn reap_children() {
+    SETTINGS_CHILD.with(|slot| {
+        let mut borrow = slot.borrow_mut();
+        if let Some(child) = borrow.as_mut() {
+            if matches!(child.try_wait(), Ok(Some(_))) {
+                *borrow = None;
+            }
+        }
+    });
+    HISTORY_CHILD.with(|slot| {
+        let mut borrow = slot.borrow_mut();
+        if let Some(child) = borrow.as_mut() {
+            if matches!(child.try_wait(), Ok(Some(_))) {
+                *borrow = None;
+            }
+        }
+    });
+}
+
+/// Terminate a child panel and reap it so no zombie remains.
+pub fn terminate_child(slot: &RefCell<Option<Child>>, label: &str) -> bool {
+    let mut borrow = slot.borrow_mut();
+    let Some(child) = borrow.as_mut() else {
+        return false;
+    };
+    match child.try_wait() {
+        Ok(Some(_)) => {
+            *borrow = None;
+            false
+        }
+        _ => {
+            let _ = child.kill();
+            // The kill guarantees a prompt exit; the wait only reaps.
+            let _ = child.wait();
+            *borrow = None;
+            log_event("INFO", &format!("{label} process closed by indicator"));
+            true
+        }
+    }
+}
+
+pub fn close_settings() -> bool {
+    SETTINGS_CHILD.with(|slot| terminate_child(slot, "settings window"))
+}
+
+/// Close both child panels on restart/quit. Leaving them alive makes a
+/// restarted instance open a second History popup and leaves Settings
+/// orphaned after Quit.
+pub fn close_children() {
+    let _ = close_history();
+    let _ = close_settings();
+}
+
+/// Launch the external GPUI settings process (`SysVitalsSettings`), one
+/// live instance at a time.
+pub fn launch_settings() {
+    // `thread_local!` statics expose a `LocalKey`; reach the cell through
+    // `with`, and re-entrancy (`child_alive` borrows it) must not nest, so
+    // query liveness first, then spawn, then store.
+    if SETTINGS_CHILD.with(child_alive) {
+        return;
+    }
+    let Some(dir) = exe_dir() else {
+        log_event("WARN", "launch_settings: cannot determine exe directory");
+        return;
+    };
+    let settings = dir.join("SysVitalsSettings");
+    if !settings.exists() {
+        log_event(
+            "WARN",
+            &format!("launch_settings: not found: {}", settings.display()),
+        );
+        return;
+    }
+    let parent_pid = std::process::id().to_string();
+    let mut cmd = std::process::Command::new(settings);
+    cmd.args(["--parent-pid", parent_pid.as_str()]);
+    // Let the settings window open on the display that hosts the clicked
+    // status item instead of always centering on the primary screen.
+    // The native display handle is Windows-only today; the rectangle
+    // probe is app-settings' documented fallback on macOS.
+    if let Some((l, t, r, b)) = anchor_rect() {
+        cmd.args([
+            "--anchor",
+            &l.to_string(),
+            &t.to_string(),
+            &r.to_string(),
+            &b.to_string(),
+        ]);
+    }
+    match cmd.spawn() {
+        Ok(child) => {
+            SETTINGS_CHILD.with(|slot| *slot.borrow_mut() = Some(child));
+        }
+        Err(e) => log_event("WARN", &format!("launch_settings: spawn failed: {e}")),
+    }
+}
+
+/// Launch the external history chart process (`SysVitalsHistory`), passing
+/// the indicator's screen rect so the popup can anchor to it. One live
+/// instance at a time.
+pub fn launch_history() {
+    if HISTORY_CHILD.with(child_alive) {
+        return;
+    }
+    let Some(dir) = exe_dir() else {
+        log_event("WARN", "launch_history: cannot determine exe directory");
+        return;
+    };
+    let history = dir.join("SysVitalsHistory");
+    if !history.exists() {
+        log_event(
+            "WARN",
+            &format!("launch_history: not found: {}", history.display()),
+        );
+        return;
+    }
+    let parent_pid = std::process::id().to_string();
+    let mut cmd = std::process::Command::new(history);
+    cmd.args(["--parent-pid", parent_pid.as_str()]);
+    if let Some((l, t, r, b)) = anchor_rect() {
+        cmd.args([
+            "--anchor",
+            &l.to_string(),
+            &t.to_string(),
+            &r.to_string(),
+            &b.to_string(),
+        ]);
+    }
+    match cmd.spawn() {
+        Ok(child) => {
+            HISTORY_CHILD.with(|slot| *slot.borrow_mut() = Some(child));
+        }
+        Err(e) => log_event("WARN", &format!("launch_history: spawn failed: {e}")),
+    }
+}
+
+/// Close the trend popup if one is running: the click-to-toggle half of
+/// `button_clicked:`. Kills the child and reaps it (`wait`) so no zombie
+/// lingers under the long-running indicator. Returns `true` when a live
+/// popup was closed; `false` when nothing was running (or it had already
+/// exited, which is reaped here so the slot is free for the next open).
+pub fn close_history() -> bool {
+    HISTORY_CHILD.with(|slot| terminate_child(slot, "history popup"))
+}
+
+/// Open Activity Monitor (macOS equivalent of Task Manager). `status()`
+/// waits for the short-lived `open` helper, so it cannot leave a zombie.
+pub fn open_activity_monitor() {
+    // Resolve the system app by bundle id rather than its localized
+    // display name; `open -b` works on non-English systems too.
+    if let Err(e) = std::process::Command::new("open")
+        .args(["-b", "com.apple.ActivityMonitor"])
+        .status()
+    {
+        log_event("WARN", &format!("open Activity Monitor failed: {e}"));
+    }
+}
+
+/// Restart: schedule a delayed relaunch, then exit.
+pub fn restart_self() {
+    // Prefer the enclosing .app bundle; fall back to the bare executable
+    // when running unpackaged (e.g. straight from target/release).
+    let Some(target) = relaunch_target().or_else(|| std::env::current_exe().ok()) else {
+        return;
+    };
+    let target_str = target.to_string_lossy().to_string();
+    // Pass the path as a positional parameter instead of interpolating it
+    // into the shell program: a quote in the install path must not break
+    // the relaunch command.
+    let _ = std::process::Command::new("/bin/sh")
+        .args(["-c", "sleep 2; open \"$1\"", "sh", target_str.as_str()])
+        .spawn();
+    // Close child panels before exiting: a restarted instance starts with
+    // empty slots and would otherwise open a second History popup.
+    close_children();
+    // Exit current instance.
+    let mtm = mtm();
+    let app = NSApplication::sharedApplication(mtm);
+    app.terminate(None);
+}
