@@ -67,9 +67,6 @@ jobs:
     name: Platform check (${{ matrix.os }})
     if: github.ref_type != 'tag'
     runs-on: ${{ matrix.os }}
-    permissions:
-      contents: read
-      checks: write
     strategy:
       fail-fast: false
       matrix:
@@ -95,41 +92,7 @@ jobs:
           # rustc warnings keeps unused imports/fields from accumulating in
           # code paths the Linux quality job never compiles.
           RUSTFLAGS: "-D warnings"
-        run: |
-          set -o pipefail
-          cargo check --locked ${{ matrix.packages }} 2>&1 | tee "$RUNNER_TEMP/platform-check.log"
-      - name: Publish compiler diagnostics
-        if: failure()
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          LOG: ${{ runner.temp }}/platform-check.log
-        run: |
-          python3 - <<'PY'
-          import json, os, urllib.request
-          log = open(os.environ["LOG"], encoding="utf-8", errors="replace").read()
-          payload = {
-              "name": "Platform diagnostics (${{ matrix.os }})",
-              "head_sha": os.environ["GITHUB_SHA"],
-              "status": "completed",
-              "conclusion": "neutral",
-              "output": {
-                  "title": "Check platform crates log",
-                  "summary": "Compiler diagnostics captured on failure.",
-                  "text": log[-60000:],
-              },
-          }
-          req = urllib.request.Request(
-              f"https://api.github.com/repos/{os.environ['GITHUB_REPOSITORY']}/check-runs",
-              data=json.dumps(payload).encode(),
-              headers={
-                  "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
-                  "Accept": "application/vnd.github+json",
-                  "Content-Type": "application/json",
-              },
-          )
-          urllib.request.urlopen(req).read()
-          PY
+        run: cargo check --locked ${{ matrix.packages }}
 
   # ---------------------------------------------------------------------------
   # Public-surface guard: reject private-document references, local environment
