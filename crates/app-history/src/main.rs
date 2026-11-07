@@ -6,6 +6,12 @@
 //! indicator rectangle via `--anchor`, the window opens as a topmost
 //! borderless popup beside the indicator; otherwise it opens centered.
 //! Closes on Esc or window blur.
+//!
+//! Module map: `view/mod` (state, lifecycle observers and config reload),
+//! `view/data` (queries, CSV and chart point preparation), `view/render`
+//! (Render pass and axis labels), `chart` (ranges/axis/colors), `placement`,
+//! `resident` (Windows shared-memory loop), `theme` and `window`.
+//! All items in this binary are crate-internal (`pub(crate)`).
 
 // A GUI child process must not allocate a console window on Windows: without
 // this attribute the binary is built as a console subsystem executable and a
@@ -79,12 +85,12 @@ mod theme;
 mod view;
 mod window;
 
-pub use chart::*;
-pub use placement::*;
-pub use resident::*;
-pub use theme::*;
-pub use view::*;
-pub use window::*;
+pub(crate) use chart::*;
+pub(crate) use placement::*;
+pub(crate) use resident::*;
+pub(crate) use theme::*;
+pub(crate) use view::*;
+pub(crate) use window::*;
 
 fn main() {
     sysvitals_panel::install_panic_hook();

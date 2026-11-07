@@ -10,6 +10,11 @@
 //! (the `display.theme` setting only governs the resident indicator). On
 //! Windows and macOS the primary color follows the system accent, so the
 //! segmented controls match what the rest of the shell uses.
+//!
+//! Module map: `platform` (CLI/window placement/DPI/parent watch), `view/mod`
+//! (state, subscriptions and save path), `view/render` (Render pass),
+//! `widgets` (row/card builders), `theme`, `config` and `macos_select`.
+//! All items in this binary are crate-internal (`pub(crate)`).
 
 // A GUI child process must not allocate a console window on Windows: without
 // this attribute the binary is built as a console subsystem executable and a
@@ -53,13 +58,13 @@ mod theme;
 mod view;
 mod widgets;
 
-pub use config::*;
+pub(crate) use config::*;
 #[cfg(target_os = "macos")]
-pub use macos_select::*;
-pub use platform::*;
-pub use theme::*;
-pub use view::*;
-pub use widgets::*;
+pub(crate) use macos_select::*;
+pub(crate) use platform::*;
+pub(crate) use theme::*;
+pub(crate) use view::*;
+pub(crate) use widgets::*;
 
 fn main() {
     sysvitals_panel::install_panic_hook();
