@@ -2,6 +2,7 @@
 
 use super::*;
 
+#[cfg(windows)]
 use sysvitals_panel::restore_window_size_after_move;
 
 pub struct HistoryView {
@@ -23,6 +24,9 @@ pub struct HistoryView {
     pub size_fixed: bool,
     pub range: TimeRange,
     pub buckets: Vec<Bucket>,
+    /// True while a wide background query is in flight; `buckets` is empty
+    /// until it lands, so Copy must not export a header-only CSV.
+    pub data_loading: bool,
     /// Window the current `buckets` were queried for; `points()` pads it to
     /// one slot per bucket so the category x axis stays time-linear.
     pub query: Option<VisibleQuery>,
@@ -85,6 +89,22 @@ pub struct HistoryView {
     pub shared: Option<Arc<HistoryShared>>,
 }
 
+/// Open the history database for a query without running the writer's
+/// migration on this thread. A missing/zero-length file is created (schema
+/// creation is cheap); an existing database is opened read-only and an old
+/// schema simply stays in raw-only mode until the background writer heals it.
+fn open_store_for_read(path: &std::path::Path) -> anyhow::Result<Store> {
+    let has_db = path
+        .metadata()
+        .map(|m| m.is_file() && m.len() > 0)
+        .unwrap_or(false);
+    if has_db {
+        Store::open_read_only(path)
+    } else {
+        Store::open(path)
+    }
+}
+
 impl HistoryView {
     pub fn new(
         lang: Language,
@@ -106,6 +126,7 @@ impl HistoryView {
             size_fixed: false,
             range: TimeRange::Hour1,
             buckets: Vec::new(),
+            data_loading: false,
             query: None,
             load_seq: 0,
             store: None,
@@ -393,7 +414,14 @@ impl HistoryView {
                 return false;
             }
         };
-        match Store::open(&path) {
+        // Never migrate an existing database on the UI thread. `Store::open`
+        // runs the one-time rollup backfill, which can take seconds on a
+        // large raw table; the background history writer performs (and heals)
+        // that migration. A missing or zero-length database is created here
+        // because schema creation on an empty file is cheap and lets a manual
+        // launch show an empty chart instead of an error.
+        let opened = open_store_for_read(&path);
+        match opened {
             Ok(store) => {
                 self.store = Some(store);
                 true
@@ -429,23 +457,23 @@ impl HistoryView {
         if query.bucket < ASYNC_MIN_BUCKET_SECS {
             self.load_data_sync(query);
             return;
-        }
-        // Wide ranges query in the background: the 1 d / 1 mo views scan the
-        // whole retention window, and in the raw-only fallback (a failed
-        // rollup backfill) that is the full raw table, which froze the popup
-        // on slow disks. A fresh read-only connection is opened inside the
-        // task because the view's `Store` is not `Send`; the generation
-        // ticket drops a stale result when the range switched mid-flight.
-        // Clear immediately so the previous range's points never render
-        // under the new axis.
+        } // Wide ranges query in the background: the 1 d / 1 mo views scan the
+          // whole retention window, and in the raw-only fallback (a failed
+          // rollup backfill) that is the full raw table, which froze the popup
+          // on slow disks. A fresh read-only connection is opened inside the
+          // task because the view's `Store` is not `Send`; the generation
+          // ticket drops a stale result when the range switched mid-flight.
+          // Clear immediately so the previous range's points never render
+          // under the new axis.
         self.buckets = Vec::new();
+        self.data_loading = true;
         let seq = self.load_seq;
         let executor = cx.background_executor().clone();
         cx.spawn(async move |this, cx| {
             let loaded = executor
                 .spawn(async move {
                     let path = history_path().map_err(|e| e.to_string())?;
-                    let store = Store::open(&path).map_err(|e| e.to_string())?;
+                    let store = open_store_for_read(&path).map_err(|e| e.to_string())?;
                     query_buckets(&store, query)
                 })
                 .await;
@@ -453,6 +481,7 @@ impl HistoryView {
                 if view.load_seq != seq {
                     return;
                 }
+                view.data_loading = false;
                 match loaded {
                     Ok(buckets) => {
                         view.buckets = buckets;
@@ -470,6 +499,7 @@ impl HistoryView {
     /// connection (see `ensure_store`). Clears on failure so a range switch
     /// never shows the previous range's points under the new axis.
     pub fn load_data_sync(&mut self, query: VisibleQuery) {
+        self.data_loading = false;
         // The curve draws at the fine CSV bucket width; axis labels are
         // generated independently from the time window (see `axis_labels`).
         // One query serves both — no coarse pass.
@@ -592,6 +622,19 @@ impl HistoryView {
         let lang = self.lang;
 
         if self.csv_scope == CsvScope::Visible {
+            if self.data_loading {
+                // A wide range is still being queried and `buckets` is
+                // intentionally empty; copying now would produce a
+                // header-only file that looks like real data.
+                log_event(
+                    "INFO",
+                    "history: copy requested while the range is still loading",
+                );
+                self.copy_failed = true;
+                self.schedule_copied_reset(cx);
+                cx.notify();
+                return;
+            }
             // Exactly the points currently drawn, including the grid-aligned
             // window start and the local-time bucket phase.
             self.finish_copy(self.buckets.clone(), lang, cx);
@@ -623,7 +666,7 @@ impl HistoryView {
             let loaded = executor
                 .spawn(async move {
                     let path = history_path().map_err(|e| e.to_string())?;
-                    let store = Store::open(&path).map_err(|e| e.to_string())?;
+                    let store = open_store_for_read(&path).map_err(|e| e.to_string())?;
                     query_buckets(&store, query)
                 })
                 .await;

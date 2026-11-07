@@ -2,6 +2,7 @@
 
 use super::*;
 
+#[cfg(windows)]
 use sysvitals_panel::restore_window_size_after_move;
 
 // ---------------------------------------------------------------------------
@@ -419,7 +420,18 @@ impl SettingsView {
         // does not own (history.*, sample.cpu_smoothing, and any future
         // non-UI field) survives. Only the UI-owned fields are overlaid.
         let mut cfg = match Config::load(&path) {
-            Ok((disk, _)) => disk,
+            Ok((disk, issues)) => {
+                for issue in &issues {
+                    log_event(
+                        "WARN",
+                        &format!(
+                            "settings: config merge repair {}: {}",
+                            issue.field, issue.message
+                        ),
+                    );
+                }
+                disk
+            }
             Err(e) => {
                 log_event(
                     "WARN",

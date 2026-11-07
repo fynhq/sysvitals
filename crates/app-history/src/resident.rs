@@ -197,16 +197,27 @@ pub fn run_resident(cx: &mut App) {
                     continue;
                 }
                 if snapshot.desired_open == 0 {
-                    // `visible == 0` means the view already dismissed itself
-                    // (blur/Esc) and its removal is in flight; calling
-                    // `remove_window` again could double-remove it. A still
-                    // visible window was asked to close by the indicator.
+                    // `visible == 0` after activation means the view already
+                    // dismissed itself (blur/Esc) and its removal is in
+                    // flight; calling remove_window again could double-remove
+                    // it. A visible window, or one still waiting for its first
+                    // activation, was asked to close by the indicator.
                     dismissed_generation = Some(snapshot.generation);
-                    if snapshot.visible != 0 {
+                    if snapshot.visible != 0 || !activated {
                         log_event("INFO", "history: window closed by indicator");
-                        let _ = cx.update(|app| {
-                            let _ = handle.update(app, |_, window, _| window.remove_window());
-                        });
+                        let removed = cx
+                            .update(|app| {
+                                handle
+                                    .update(app, |_, window, _| window.remove_window())
+                                    .is_ok()
+                            })
+                            .unwrap_or(false);
+                        if !removed {
+                            log_event(
+                                "WARN",
+                                "history: remove_window failed; the hidden window may linger",
+                            );
+                        }
                     }
                     unsafe { shared.mark_hidden() };
                     window = None;
@@ -224,15 +235,33 @@ pub fn run_resident(cx: &mut App) {
                 // A new open request arrived while the window is open: the
                 // indicator was clicked on a different taskbar/monitor. GPUI
                 // windows cannot be repositioned after creation, so reopen the
-                // popup anchored at the new indicator.
+                // popup anchored at the new indicator. While the window is
+                // still hidden and waiting for its first activation, a second
+                // click only re-arms the request; reopening would restart the
+                // first-load wait for no benefit.
                 if snapshot.generation != open_generation && snapshot.anchor_is_valid() {
+                    if !activated {
+                        open_generation = snapshot.generation;
+                        dismissed_generation = None;
+                        continue;
+                    }
                     log_event(
                         "INFO",
                         "history: indicator moved; reopening at the new anchor",
                     );
-                    let _ = cx.update(|app| {
-                        let _ = handle.update(app, |_, window, _| window.remove_window());
-                    });
+                    let removed = cx
+                        .update(|app| {
+                            handle
+                                .update(app, |_, window, _| window.remove_window())
+                                .is_ok()
+                        })
+                        .unwrap_or(false);
+                    if !removed {
+                        log_event(
+                            "WARN",
+                            "history: remove_window failed before the move; continuing",
+                        );
+                    }
                     let anchor = AnchorRect {
                         left: snapshot.anchor[0],
                         top: snapshot.anchor[1],
@@ -258,7 +287,10 @@ pub fn run_resident(cx: &mut App) {
                             dismissed_generation = None;
                             idle_since = None;
                             trimmed = false;
-                            unsafe { shared.set_visible(true) };
+                            // `visible` is published only once the window is
+                            // actually activated (or the 3 s fallback fires);
+                            // until then it is a pending request, not an open
+                            // popup.
                         }
                         None => {
                             dismissed_generation = Some(snapshot.generation);
@@ -370,7 +402,9 @@ pub fn run_resident(cx: &mut App) {
                         dismissed_generation = None;
                         idle_since = None;
                         trimmed = false;
-                        unsafe { shared.set_visible(true) };
+                        // Visibility is published on the activation edge (or
+                        // the 3 s fallback), not at creation: the window is
+                        // still hidden here.
                     }
                     None => {
                         // Do not retry this request every poll: the next click

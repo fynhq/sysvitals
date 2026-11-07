@@ -131,9 +131,10 @@ fn main() {
             .with_assets(gpui_kit::assets::Assets)
             .with_quit_mode(QuitMode::Explicit)
     } else {
-        // One-shot instance (manual launch): quit with the last window
-        // instead of lingering invisibly after the popup closes. The default
-        // application() keeps the process alive past its last window.
+        // One-shot instance (manual launch): quit with the last window.
+        // `QuitMode::Default` already means LastWindowClosed off macOS, but
+        // spelling it out keeps the resident/one-shot split obvious at the
+        // call site.
         gpui_kit::application()
             .with_assets(gpui_kit::assets::Assets)
             .with_quit_mode(QuitMode::LastWindowClosed)
@@ -176,20 +177,49 @@ fn main() {
                 // One-shot launch: the popup can land without activation when
                 // the foreground lock refuses the launching process, so claim
                 // activation as a foreground task — never inside render (see
-                // `observe_activation`) — and seed the blur-close guard from
-                // the post-activation state, which the observer cannot see
-                // when activation completed before it registered.
+                // `observe_activation`). Retry at the same cadence as the
+                // resident loop, then restore the pre-move size even if no
+                // activation edge ever arrives, so click-away and cross-DPI
+                // sizing do not silently degrade.
                 #[cfg(windows)]
                 cx.spawn(async move |cx| {
+                    for _ in 0..3 {
+                        let _ = cx.update(|app| {
+                            _window_handle.update(app, |_view: &mut HistoryView, window, _| {
+                                window.activate_window();
+                            })
+                        });
+                        cx.background_executor()
+                            .timer(Duration::from_millis(500))
+                            .await;
+                        let active = cx
+                            .update(|app| {
+                                _window_handle
+                                    .update(app, |view: &mut HistoryView, window, _| {
+                                        if window.is_window_active() {
+                                            view.ever_active = true;
+                                            view.restore_popup_size(window);
+                                            true
+                                        } else {
+                                            false
+                                        }
+                                    })
+                                    .unwrap_or(false)
+                            })
+                            .unwrap_or(false);
+                        if active {
+                            return;
+                        }
+                    }
                     let _ = cx.update(|app| {
                         _window_handle.update(app, |view: &mut HistoryView, window, _| {
-                            window.activate_window();
-                            if window.is_window_active() {
-                                view.ever_active = true;
-                                view.restore_popup_size(window);
-                            }
+                            view.restore_popup_size(window);
                         })
                     });
+                    log_event(
+                        "WARN",
+                        "history: one-shot popup shown without activation; click-away is not armed",
+                    );
                 })
                 .detach();
             }

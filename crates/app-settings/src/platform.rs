@@ -166,18 +166,12 @@ pub fn parse_anchor() -> Option<AnchorRect> {
 }
 
 /// Parse `--anchor-monitor <handle>` from the process arguments: the native
-/// display handle (HMONITOR on Windows) that hosted the indicator. `None`
-/// when absent, zero, or malformed.
+/// display handle (HMONITOR on Windows, NSScreenNumber on macOS) that hosted
+/// the indicator. `None` when absent, zero, or malformed. The pure parsing
+/// lives in `core::cli` (unit-tested there).
 pub fn parse_anchor_monitor() -> Option<DisplayId> {
-    let mut args = std::env::args().skip(1);
-    while let Some(arg) = args.next() {
-        if arg != "--anchor-monitor" {
-            continue;
-        }
-        let raw: u64 = args.next()?.trim().parse().ok()?;
-        return (raw != 0).then(|| DisplayId::new(raw));
-    }
-    None
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    sysvitals_core::cli::parse_anchor_monitor(&args).map(DisplayId::new)
 }
 
 /// Fit the requested window size into a display's usable work area. GPUI's
