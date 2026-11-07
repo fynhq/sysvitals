@@ -205,13 +205,11 @@ pub fn run_resident(cx: &mut App) {
                     dismissed_generation = Some(snapshot.generation);
                     if snapshot.visible != 0 || !activated {
                         log_event("INFO", "history: window closed by indicator");
-                        let removed = cx
-                            .update(|app| {
-                                handle
-                                    .update(app, |_, window, _| window.remove_window())
-                                    .is_ok()
-                            })
-                            .unwrap_or(false);
+                        let removed = cx.update(|app| {
+                            handle
+                                .update(app, |_, window, _| window.remove_window())
+                                .is_ok()
+                        });
                         if !removed {
                             log_event(
                                 "WARN",
@@ -249,13 +247,11 @@ pub fn run_resident(cx: &mut App) {
                         "INFO",
                         "history: indicator moved; reopening at the new anchor",
                     );
-                    let removed = cx
-                        .update(|app| {
-                            handle
-                                .update(app, |_, window, _| window.remove_window())
-                                .is_ok()
-                        })
-                        .unwrap_or(false);
+                    let removed = cx.update(|app| {
+                        handle
+                            .update(app, |_, window, _| window.remove_window())
+                            .is_ok()
+                    });
                     if !removed {
                         log_event(
                             "WARN",

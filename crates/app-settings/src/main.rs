@@ -256,20 +256,16 @@ fn main() {
                         );
                     }
                 }
-                let resized = cx
-                    .update(|app| {
-                        window_handle
-                            .update(app, |_, window, _| window.resize(initial_size))
-                            .is_ok()
-                    })
-                    .is_ok();
-                let activated = cx
-                    .update(|app| {
-                        window_handle
-                            .update(app, |_, window, _| window.activate_window())
-                            .is_ok()
-                    })
-                    .is_ok();
+                let resized = cx.update(|app| {
+                    window_handle
+                        .update(app, |_, window, _| window.resize(initial_size))
+                        .is_ok()
+                });
+                let activated = cx.update(|app| {
+                    window_handle
+                        .update(app, |_, window, _| window.activate_window())
+                        .is_ok()
+                });
                 if resized && activated {
                     log_event("INFO", "settings: window shown after hidden placement");
                 } else {

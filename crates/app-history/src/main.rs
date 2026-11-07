@@ -183,36 +183,37 @@ fn main() {
                 // sizing do not silently degrade.
                 #[cfg(windows)]
                 cx.spawn(async move |cx| {
+                    let Some(window_handle) = _window_handle.downcast::<HistoryView>() else {
+                        return;
+                    };
                     for _ in 0..3 {
                         let _ = cx.update(|app| {
-                            _window_handle.update(app, |_view: &mut HistoryView, window, _| {
+                            window_handle.update(app, |_view, window, _| {
                                 window.activate_window();
                             })
                         });
                         cx.background_executor()
                             .timer(Duration::from_millis(500))
                             .await;
-                        let active = cx
-                            .update(|app| {
-                                _window_handle
-                                    .update(app, |view: &mut HistoryView, window, _| {
-                                        if window.is_window_active() {
-                                            view.ever_active = true;
-                                            view.restore_popup_size(window);
-                                            true
-                                        } else {
-                                            false
-                                        }
-                                    })
-                                    .unwrap_or(false)
-                            })
-                            .unwrap_or(false);
+                        let active = cx.update(|app| {
+                            window_handle
+                                .update(app, |view, window, _| {
+                                    if window.is_window_active() {
+                                        view.ever_active = true;
+                                        view.restore_popup_size(window);
+                                        true
+                                    } else {
+                                        false
+                                    }
+                                })
+                                .unwrap_or(false)
+                        });
                         if active {
                             return;
                         }
                     }
                     let _ = cx.update(|app| {
-                        _window_handle.update(app, |view: &mut HistoryView, window, _| {
+                        window_handle.update(app, |view, window, _| {
                             view.restore_popup_size(window);
                         })
                     });
