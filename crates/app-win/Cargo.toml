@@ -20,9 +20,7 @@ sysvitals-support = { workspace = true }
 windows = { workspace = true }
 
 [build-dependencies]
-# Host-agnostic: returns `NotWindows` and does nothing when the target is not
-# Windows, so it stays a plain build-dependency on every host.
-embed-resource = "=3.0.12"
+sysvitals-build = { path = "../build-support" }
 
 [[bin]]
 # Mixed-case on purpose: the shipped executable is `SysVitals.exe`.

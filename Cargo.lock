@@ -193,10 +193,10 @@ version = "0.4.3"
 dependencies = [
  "arboard",
  "chrono",
- "embed-resource",
  "gpui-kit",
  "libc",
  "raw-window-handle",
+ "sysvitals-build",
  "sysvitals-core",
  "sysvitals-panel",
  "windows 0.62.2",
@@ -211,6 +211,7 @@ dependencies = [
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
+ "sysvitals-build",
  "sysvitals-core",
  "sysvitals-support",
 ]
@@ -219,13 +220,13 @@ dependencies = [
 name = "app-settings"
 version = "0.4.3"
 dependencies = [
- "embed-resource",
  "gpui-kit",
  "libc",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
  "raw-window-handle",
+ "sysvitals-build",
  "sysvitals-core",
  "sysvitals-panel",
  "windows 0.62.2",
@@ -235,7 +236,7 @@ dependencies = [
 name = "app-win"
 version = "0.4.3"
 dependencies = [
- "embed-resource",
+ "sysvitals-build",
  "sysvitals-core",
  "sysvitals-support",
  "windows 0.62.2",
@@ -6348,6 +6349,13 @@ checksum = "8e1d1b10ced5ca923a1fcb8d03e96b8d3268065d724548c0211415ff6ac6bac4"
 dependencies = [
  "core-foundation-sys",
  "libc",
+]
+
+[[package]]
+name = "sysvitals-build"
+version = "0.4.3"
+dependencies = [
+ "embed-resource",
 ]
 
 [[package]]

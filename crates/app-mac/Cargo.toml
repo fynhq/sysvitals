@@ -57,6 +57,9 @@ objc2-foundation = { version = "=0.3.2", features = [
 ] }
 block2 = "=0.6.2"
 
+[build-dependencies]
+sysvitals-build = { path = "../build-support" }
+
 [[bin]]
 name = "sysvitals"
 path = "src/main.rs"

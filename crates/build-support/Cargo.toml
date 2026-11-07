@@ -1,0 +1,10 @@
+[package]
+name = "sysvitals-build"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+embed-resource = "=3.0.12"
