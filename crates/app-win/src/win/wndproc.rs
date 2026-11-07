@@ -39,13 +39,42 @@ pub fn handle_history_click(hwnd: HWND) {
     }
 }
 
+/// Whether a `WM_SETTINGCHANGE` broadcast affects the taskbar's appearance,
+/// metrics or clock format. `lParam == 0` is the documented "all settings"
+/// broadcast and is always honored; other categories (environment, policy,
+/// input language, ...) must not trigger registry reads and a full relayout
+/// on every taskbar.
+fn relevant_setting_change(lparam: LPARAM) -> bool {
+    if lparam.0 == 0 {
+        return true;
+    }
+    let ptr = lparam.0 as *const u16;
+    let mut len = 0usize;
+    // The payload is a NUL-terminated string owned by the sender. Bound the
+    // scan so a malformed pointer cannot run away.
+    while len < 256 && unsafe { *ptr.add(len) } != 0 {
+        len += 1;
+    }
+    let name = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(ptr, len) });
+    matches!(
+        name.as_str(),
+        "ImmersiveColorSet" | "WindowMetrics" | "intl" | "HighContrast"
+    )
+}
+
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
         WM_SETTINGCHANGE => {
+            if !relevant_setting_change(lparam) {
+                return LRESULT(0);
+            }
             // Theme, text-size and font changes arrive here. Re-read the
             // theme, drop the cached font metrics and re-measure: the
             // previous code repainted with the old width, clipping the
-            // new weight/size until the next sample tick.
+            // new weight/size until the next sample tick. The UIA clock
+            // anchor moves when the text size or time format changes, so
+            // its cache must be dropped as well (it is keyed by the bar
+            // rect, which does not change).
             let old_light = LIGHT_THEME.load(Ordering::Relaxed);
             let old_hc = HIGH_CONTRAST.load(Ordering::Relaxed);
             refresh_theme();
@@ -60,6 +89,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     &format!("high contrast changed: enabled={}", new_hc == 1),
                 );
             }
+            invalidate_clock_anchor();
             invalidate_ui_font();
             reset_width(hwnd);
             relayout_overlay(hwnd);
@@ -74,6 +104,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     GetDpiForSystem()
                 ),
             );
+            invalidate_clock_anchor();
             invalidate_ui_font();
             reset_width(hwnd);
             relayout_overlay(hwnd);
@@ -145,8 +176,8 @@ pub fn run() {
         // Seed the config mtime so the first poll does not false-trigger.
         CONFIG_MTIME.store(config_mtime(), Ordering::Relaxed);
 
-        // Daily-file logging: prune stale logs once at startup.
-        prune_old_logs();
+        // Daily-file logging: the first line also opens the file and prunes
+        // stale logs (see `core::logger`), so no separate startup prune.
         log_event(
             "INFO",
             &format!(
@@ -251,11 +282,27 @@ pub fn run() {
             Ok(sentinel) => {
                 SENTINEL_HWND.store(sentinel.0 as isize, Ordering::Relaxed);
                 let interval_ms = cfg.sample.interval_ms.clamp(500, 5000) as u32;
-                let _ = SetTimer(Some(sentinel), TIMER_SAMPLE, interval_ms, None);
-                let _ = SetTimer(Some(sentinel), TIMER_MOVE, MOVE_MS, None);
-                let _ = SetTimer(Some(sentinel), TIMER_CONFIG, CONFIG_POLL_MS, None);
-                let _ = SetTimer(Some(sentinel), TIMER_HISTORY, HISTORY_SYNC_MS, None);
-                let _ = SetTimer(Some(sentinel), TIMER_WATCH, WATCHDOG_MS, None);
+                let sample_ok = SetTimer(Some(sentinel), TIMER_SAMPLE, interval_ms, None) != 0;
+                SAMPLE_TIMER_OK.store(sample_ok, Ordering::Relaxed);
+                if !sample_ok {
+                    log_event(
+                        "WARN",
+                        "SetTimer(TIMER_SAMPLE) failed; the watchdog will retry",
+                    );
+                }
+                for (id, elapse, label) in [
+                    (TIMER_MOVE, MOVE_MS, "move"),
+                    (TIMER_CONFIG, CONFIG_POLL_MS, "config"),
+                    (TIMER_HISTORY, HISTORY_SYNC_MS, "history"),
+                    (TIMER_WATCH, WATCHDOG_MS, "watchdog"),
+                ] {
+                    if SetTimer(Some(sentinel), id, elapse, None) == 0 {
+                        log_event(
+                            "WARN",
+                            &format!("SetTimer({label}) failed; that subsystem is inactive"),
+                        );
+                    }
+                }
             }
             Err(e) => {
                 log_event(
@@ -343,6 +390,7 @@ unsafe extern "system" fn sentinel_wndproc(
         // must not keep claiming the panel is already on "that" screen.
         HISTORY_ANCHOR_MONITOR.store(0, Ordering::Relaxed);
         SETTINGS_MONITOR.store(0, Ordering::Relaxed);
+        invalidate_clock_anchor();
         invalidate_ui_font();
         OVERLAYS.with(|slot| {
             for ov in slot.borrow_mut().iter_mut() {
@@ -382,6 +430,13 @@ unsafe extern "system" fn sentinel_wndproc(
             }
             TIMER_WATCH => {
                 if !QUITTING.load(Ordering::Relaxed) {
+                    if !SAMPLE_TIMER_OK.load(Ordering::Relaxed) {
+                        let interval_ms = config().sample.interval_ms.clamp(500, 5000) as u32;
+                        if SetTimer(Some(hwnd), TIMER_SAMPLE, interval_ms, None) != 0 {
+                            SAMPLE_TIMER_OK.store(true, Ordering::Relaxed);
+                            log_event("INFO", "SetTimer(TIMER_SAMPLE) recovered");
+                        }
+                    }
                     // Re-probe shell/taskbar preferences at a low cadence;
                     // the per-tick geometry code then reads the cache
                     // instead of making a synchronous shell/registry

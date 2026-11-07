@@ -1,8 +1,21 @@
 //! Windows display layer: one topmost layered overlay per taskbar.
 //!
-//! Split into focused submodules; items are `pub` so siblings can reach
-//! them through `use super::*`, but `win` itself is private to this
-//! crate, so nothing here widens the crate's real API.
+//! Module map:
+//! - `overlay`  — per-taskbar overlay state, geometry, visibility/topmost,
+//!   reconciliation and the UIA clock anchor cache.
+//! - `render`   — measurement, GDI rasterization, 2x supersampling and the
+//!   periodic sample tick.
+//! - `children` — Settings/History process lifetime, job object and the
+//!   shared-memory history state.
+//! - `wndproc`  — the sentinel window procedure and the message loop.
+//! - `menu`     — the native context menu.
+//! - `config`   — config load/save, mtime polling and auto-start.
+//! - `theme`    — fonts, DPI and OS theme/high-contrast probes.
+//! - `crash`    — panic hook and the SEH filter.
+//!
+//! Items are `pub` so siblings can reach them through `use super::*`, but
+//! `win` itself is private to this crate, so nothing here widens the crate's
+//! real API.
 
 mod children;
 mod config;
@@ -23,7 +36,9 @@ pub use theme::*;
 pub use wndproc::*;
 
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{
+    AtomicBool, AtomicI32, AtomicI64, AtomicIsize, AtomicU32, AtomicU64, Ordering,
+};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -35,9 +50,7 @@ use sysvitals_core::{
 // Shared process plumbing (daily-file logging, panic hook, HKCU probes)
 // lives in `sysvitals-support` so the overlay and the GPUI panels cannot
 // drift apart.
-use sysvitals_support::{
-    hkcu_dword, log_event, os_build_number, prune_old_logs, taskbar_al, utf16,
-};
+use sysvitals_support::{hkcu_dword, log_event, os_build_number, taskbar_al, utf16};
 use windows::Win32::Foundation::{
     CloseHandle, ERROR_FILE_NOT_FOUND, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
@@ -70,7 +83,7 @@ use windows::Win32::System::Memory::{
 };
 use windows::Win32::System::Registry::{
     RegCloseKey, RegDeleteKeyValueW, RegOpenKeyExW, RegQueryValueExW, RegSetKeyValueW, HKEY,
-    HKEY_CURRENT_USER, KEY_READ, REG_DWORD, REG_SZ, REG_VALUE_TYPE,
+    HKEY_CURRENT_USER, KEY_READ, REG_SZ,
 };
 use windows::Win32::System::Threading::{
     CreateMutexW, CreateProcessW, GetCurrentProcessId, GetExitCodeProcess, TerminateProcess,
@@ -257,6 +270,12 @@ static CONFIG_MTIME: AtomicU64 = AtomicU64::new(0);
 /// mtime of the last config parse failure, so a broken file logs once
 /// instead of every CONFIG_POLL_MS tick.
 static CONFIG_ERROR_MTIME: AtomicU64 = AtomicU64::new(0);
+/// Whether `TIMER_SAMPLE` is currently armed. A failed initial `SetTimer`
+/// leaves the overlay frozen on its startup frame; the watchdog retries it.
+static SAMPLE_TIMER_OK: AtomicBool = AtomicBool::new(false);
+/// Last history sample timestamp. Kept monotonic across NTP/DST rollbacks so
+/// the raw table's primary key never rejects a run of new samples.
+static LAST_SAMPLE_TS: AtomicI64 = AtomicI64::new(i64::MIN);
 
 fn sentinel_hwnd() -> HWND {
     HWND(SENTINEL_HWND.load(Ordering::Relaxed) as *mut std::ffi::c_void)
@@ -273,7 +292,11 @@ thread_local! {
     /// Background SQLite writer. Created on the first enabled sample so a
     /// missing data dir or a failed spawn never blocks the indicator.
     static HISTORY_WRITER: RefCell<Option<HistoryWriter>> = const { RefCell::new(None) };
-    static HISTORY_WRITER_FAILED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// When the last writer spawn failed. A failed spawn (thread creation or
+    /// history-path resolution) retries after a cooldown instead of disabling
+    /// history for the rest of the process lifetime.
+    static HISTORY_WRITER_FAILED_AT: std::cell::Cell<Option<Instant>> =
+        const { std::cell::Cell::new(None) };
     /// Last occlusion probe; the diagnostic is throttled to 5 s because
     /// `WindowFromPoint` is not free and an occluder is not actionable.
     static LAST_OCCLUSION_PROBE: std::cell::Cell<Option<Instant>> =

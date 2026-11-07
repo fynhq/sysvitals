@@ -29,10 +29,26 @@ pub struct Overlay {
     /// fullscreen taskbar, restored window). The next visible tick must
     /// repaint instead of showing the pre-hide frame.
     pub needs_render: bool,
+    // Per-overlay diagnostic latches. Keeping these on the overlay (instead
+    // of process globals) means one monitor's z-order/cloak churn cannot
+    // suppress or misattribute another monitor's log line.
+    pub topmost_lost_count: u32,
+    pub last_occluder: isize,
+    pub visibility_anomaly: bool,
+    pub shown_once: bool,
+    pub cloak_logged: bool,
+    pub cloak_move_fail_logged: bool,
+    pub layered_fail_logged: bool,
 }
 
 pub fn overlay_by_hwnd(hwnd: HWND) -> Option<Overlay> {
     OVERLAYS.with(|slot| slot.borrow().iter().find(|o| o.hwnd == hwnd).copied())
+}
+
+/// Run `f` on the overlay owning `hwnd`. Returns `None` when the overlay is
+/// gone (taskbar disappeared between ticks).
+pub fn with_overlay_mut<R>(hwnd: HWND, f: impl FnOnce(&mut Overlay) -> R) -> Option<R> {
+    OVERLAYS.with(|slot| slot.borrow_mut().iter_mut().find(|o| o.hwnd == hwnd).map(f))
 }
 
 pub fn set_overlay_needs_render(hwnd: HWND, needs_render: bool) {
@@ -257,6 +273,34 @@ pub struct ClockAnchorCache {
 
 pub static CLOCK_ANCHOR: Mutex<Vec<ClockAnchorCache>> = Mutex::new(Vec::new());
 
+/// Drop every cached UIA clock anchor. Called when a system setting that can
+/// move the clock arrives: the cache key is only the taskbar handle and rect,
+/// so a text-size or time-format change would otherwise stay stale until the
+/// two-minute TTL expires.
+pub fn invalidate_clock_anchor() {
+    if let Ok(mut guard) = CLOCK_ANCHOR.lock() {
+        guard.clear();
+    }
+}
+
+/// One-shot latch for the off-screen placement warning; a bad margin/font
+/// combination would otherwise log on every move tick.
+static PLACEMENT_SKIPPED_LOGGED: AtomicBool = AtomicBool::new(false);
+
+/// Report (once) that the measured indicator would leave its monitor, so a
+/// user with an extreme margin/font combination gets a diagnosable line
+/// instead of a silently frozen overlay.
+fn warn_placement_skipped(x: i32, y: i32, w: i32, h: i32) {
+    if !PLACEMENT_SKIPPED_LOGGED.swap(true, Ordering::Relaxed) {
+        log_event(
+            "WARN",
+            &format!(
+                "overlay placement skipped: rect {w}x{h} at ({x},{y}) leaves the taskbar monitor; keeping the last position"
+            ),
+        );
+    }
+}
+
 pub fn rect_eq(a: RECT, b: RECT) -> bool {
     a.left == b.left && a.top == b.top && a.right == b.right && a.bottom == b.bottom
 }
@@ -399,29 +443,15 @@ pub unsafe fn taskbar_windows() -> Vec<HWND> {
     out
 }
 
-/// How many times the topmost band was found lost between two ticks.
-/// Logged on the first loss and every 60th so a hostile z-order partner
-/// cannot spam the log.
-pub static TOPMOST_LOST_COUNT: AtomicU32 = AtomicU32::new(0);
 /// Set while a context menu is being tracked. `TrackPopupMenu` runs a
 /// modal loop that still dispatches our `WM_TIMER`, and the menu lives
 /// in the topmost band — re-asserting the indicator's band during tracking
 /// would lift the tiny overlay back above the open menu. Skip those ticks.
 pub static MENU_TRACKING: AtomicBool = AtomicBool::new(false);
-/// Last top-level window seen covering the indicator's center. Used to
-/// log an occlusion once per covering window instead of every tick.
-pub static LAST_OCCLUDER: AtomicIsize = AtomicIsize::new(0);
-/// Whether the last visibility probe found the overlay hidden/minimized.
-pub static VISIBILITY_ANOMALY: AtomicBool = AtomicBool::new(false);
-/// The first show of a fresh process is not an anomaly; it suppresses the
-/// startup "not visible; restoring" diagnostic.
-pub static OVERLAY_SHOWN_ONCE: AtomicBool = AtomicBool::new(false);
-/// De-duplicates the "cloaked on another virtual desktop" log line.
-pub static CLOAK_LOGGED: AtomicBool = AtomicBool::new(false);
-pub static CLOAK_MOVE_FAIL_LOGGED: AtomicBool = AtomicBool::new(false);
-pub static LAYERED_FAIL_LOGGED: AtomicBool = AtomicBool::new(false);
 /// De-duplicates the "overlay creation failed" warning: reconcile retries
 /// every second, so a persistent failure must not log on every attempt.
+/// Creation failures happen before an overlay exists, so this one stays
+/// process-global.
 pub static OVERLAY_CREATE_FAIL_LOGGED: AtomicBool = AtomicBool::new(false);
 
 /// The Windows virtual-desktop manager, created on demand. The overlay is
@@ -464,18 +494,26 @@ pub unsafe fn move_to_current_desktop(hwnd: HWND) {
         return;
     }
     let Ok(desktop) = manager.GetWindowDesktopId(target) else {
-        if !CLOAK_MOVE_FAIL_LOGGED.swap(true, Ordering::Relaxed) {
+        if with_overlay_mut(hwnd, |ov| {
+            !std::mem::replace(&mut ov.cloak_move_fail_logged, true)
+        })
+        .unwrap_or(false)
+        {
             log_event("WARN", "cloaked overlay: cannot read the target desktop id");
         }
         return;
     };
     match manager.MoveWindowToDesktop(hwnd, &desktop) {
         Ok(()) => {
-            CLOAK_MOVE_FAIL_LOGGED.store(false, Ordering::Relaxed);
+            with_overlay_mut(hwnd, |ov| ov.cloak_move_fail_logged = false);
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         }
         Err(e) => {
-            if !CLOAK_MOVE_FAIL_LOGGED.swap(true, Ordering::Relaxed) {
+            if with_overlay_mut(hwnd, |ov| {
+                !std::mem::replace(&mut ov.cloak_move_fail_logged, true)
+            })
+            .unwrap_or(false)
+            {
                 log_event("WARN", &format!("overlay virtual-desktop move failed: {e}"));
             }
         }
@@ -491,9 +529,18 @@ pub unsafe fn maintain_visibility(hwnd: HWND) {
     let hidden = !IsWindowVisible(hwnd).as_bool();
     let minimized = IsIconic(hwnd).as_bool();
     let anomaly = hidden || minimized;
-    let was_anomalous = VISIBILITY_ANOMALY.swap(anomaly, Ordering::Relaxed);
+    let (was_anomalous, first_show) = with_overlay_mut(hwnd, |ov| {
+        let was = std::mem::replace(&mut ov.visibility_anomaly, anomaly);
+        let first = if anomaly {
+            !std::mem::replace(&mut ov.shown_once, true)
+        } else {
+            ov.shown_once = true;
+            false
+        };
+        (was, first)
+    })
+    .unwrap_or((false, false));
     if anomaly {
-        let first_show = !OVERLAY_SHOWN_ONCE.swap(true, Ordering::Relaxed);
         if !was_anomalous && !first_show {
             log_event(
                 "INFO",
@@ -503,8 +550,6 @@ pub unsafe fn maintain_visibility(hwnd: HWND) {
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         // A restored window may have skipped renders while it was hidden.
         set_overlay_needs_render(hwnd, true);
-    } else {
-        OVERLAY_SHOWN_ONCE.store(true, Ordering::Relaxed);
     }
 
     let mut cloaked = 0u32;
@@ -517,7 +562,10 @@ pub unsafe fn maintain_visibility(hwnd: HWND) {
     .is_ok()
         && cloaked != 0;
     if is_cloaked {
-        if !CLOAK_LOGGED.swap(true, Ordering::Relaxed) {
+        let first_cloak =
+            with_overlay_mut(hwnd, |ov| !std::mem::replace(&mut ov.cloak_logged, true))
+                .unwrap_or(false);
+        if first_cloak {
             log_event(
                 "INFO",
                 "overlay cloaked on another virtual desktop; moving it here",
@@ -525,8 +573,10 @@ pub unsafe fn maintain_visibility(hwnd: HWND) {
         }
         move_to_current_desktop(hwnd);
     } else {
-        CLOAK_LOGGED.store(false, Ordering::Relaxed);
-        CLOAK_MOVE_FAIL_LOGGED.store(false, Ordering::Relaxed);
+        with_overlay_mut(hwnd, |ov| {
+            ov.cloak_logged = false;
+            ov.cloak_move_fail_logged = false;
+        });
     }
 }
 
@@ -548,11 +598,15 @@ pub unsafe fn log_occlusion(hwnd: HWND) {
     };
     let hit = WindowFromPoint(point);
     if hit.is_invalid() || hit == hwnd {
-        LAST_OCCLUDER.store(0, Ordering::Relaxed);
+        with_overlay_mut(hwnd, |ov| ov.last_occluder = 0);
         return;
     }
     let hit_raw = hit.0 as isize;
-    if LAST_OCCLUDER.swap(hit_raw, Ordering::Relaxed) == hit_raw {
+    let repeated = with_overlay_mut(hwnd, |ov| {
+        std::mem::replace(&mut ov.last_occluder, hit_raw) == hit_raw
+    })
+    .unwrap_or(true);
+    if repeated {
         return;
     }
     let mut class_buf = [0u16; 128];
@@ -593,8 +647,12 @@ pub unsafe fn maintain_topmost(hwnd: HWND) {
     if (ex & WS_EX_TOPMOST.0 as isize) != 0 {
         return;
     }
-    let n = TOPMOST_LOST_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-    if n == 1 || n % 60 == 0 {
+    let n = with_overlay_mut(hwnd, |ov| {
+        ov.topmost_lost_count = ov.topmost_lost_count.wrapping_add(1);
+        ov.topmost_lost_count
+    })
+    .unwrap_or(0);
+    if n != 0 && (n == 1 || n.is_multiple_of(60)) {
         log_event(
             "INFO",
             &format!("topmost band lost; re-asserting (count={n})"),
@@ -629,7 +687,7 @@ pub unsafe fn reposition_overlay(hwnd: HWND) {
         }
         // The hide is intentional; the next visible tick should restore
         // without reporting it as an unexpected disappearance.
-        VISIBILITY_ANOMALY.store(true, Ordering::Relaxed);
+        with_overlay_mut(hwnd, |ov| ov.visibility_anomaly = true);
         set_overlay_needs_render(hwnd, true);
         let _ = ShowWindow(hwnd, SW_HIDE);
         return;
@@ -696,7 +754,7 @@ pub unsafe fn apply_position(hwnd: HWND) {
         }
         // The hide is intentional; the next visible tick should restore
         // without reporting it as an unexpected disappearance.
-        VISIBILITY_ANOMALY.store(true, Ordering::Relaxed);
+        with_overlay_mut(hwnd, |ov| ov.visibility_anomaly = true);
         set_overlay_needs_render(hwnd, true);
         let _ = ShowWindow(hwnd, SW_HIDE);
         return;
@@ -756,6 +814,7 @@ pub unsafe fn apply_position_with_info(hwnd: HWND, info: TaskbarInfo) {
 
     if info.vertical {
         if y < bar.top || y + h > bar.bottom {
+            warn_placement_skipped(x, y, w, h);
             return;
         }
     } else {
@@ -764,6 +823,7 @@ pub unsafe fn apply_position_with_info(hwnd: HWND, info: TaskbarInfo) {
         // treating every negative number as off-screen.
         let monitor = taskbar_monitor_rect_for(ov.taskbar);
         if x < monitor.left || y < monitor.top || x + w > monitor.right || y + h > monitor.bottom {
+            warn_placement_skipped(x, y, w, h);
             return; // would leave the monitor; keep last position
         }
     }
@@ -922,6 +982,13 @@ pub unsafe fn reconcile_overlays() {
                 win_h: 0,
                 last_rect: None,
                 needs_render: false,
+                topmost_lost_count: 0,
+                last_occluder: 0,
+                visibility_anomaly: false,
+                shown_once: false,
+                cloak_logged: false,
+                cloak_move_fail_logged: false,
+                layered_fail_logged: false,
             })
         });
         log_event(

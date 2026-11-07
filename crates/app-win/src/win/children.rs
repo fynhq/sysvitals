@@ -366,6 +366,55 @@ pub fn history_child_alive() -> bool {
     }
 }
 
+/// One-shot latch for shared-memory failures: the history sync timer calls
+/// this path four times a second, so a persistent mapping failure must not
+/// flood the daily log.
+static HISTORY_STATE_WARNED: AtomicBool = AtomicBool::new(false);
+
+fn warn_history_state(message: &str) {
+    if !HISTORY_STATE_WARNED.swap(true, Ordering::Relaxed) {
+        log_event("WARN", message);
+    }
+}
+
+/// Create a security descriptor for the shared history block that grants the
+/// creating user full access. `CreateFileMappingW` would otherwise apply the
+/// process token's default DACL; making the owner-rights grant explicit keeps
+/// the block usable after a token/integrity change and documents the
+/// single-user boundary. Returns `None` (default DACL) if SDDL conversion
+/// fails, which is no worse than the previous behaviour.
+fn history_state_security() -> Option<(
+    windows::Win32::Security::SECURITY_ATTRIBUTES,
+    windows::Win32::Security::PSECURITY_DESCRIPTOR,
+)> {
+    use windows::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    };
+    use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
+    let sddl = utf16("D:(A;;GA;;;OW)");
+    let mut descriptor = PSECURITY_DESCRIPTOR(std::ptr::null_mut());
+    let converted = unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            windows::core::PCWSTR(sddl.as_ptr()),
+            SDDL_REVISION_1,
+            &mut descriptor,
+            None,
+        )
+    };
+    if converted.is_err() {
+        warn_history_state("history state security descriptor failed; using the default DACL");
+        return None;
+    }
+    Some((
+        SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: descriptor.0,
+            bInheritHandle: windows::core::BOOL(0),
+        },
+        descriptor,
+    ))
+}
+
 /// Create (or reopen) the shared history state block. Kept alive for the
 /// process lifetime; the resident child maps it by name.
 pub fn history_state_ptr() -> Option<*mut sysvitals_core::HistoryState> {
@@ -373,30 +422,54 @@ pub fn history_state_ptr() -> Option<*mut sysvitals_core::HistoryState> {
         if slot.borrow().is_none() {
             let name = utf16(sysvitals_core::HISTORY_STATE_MAP);
             let size = std::mem::size_of::<sysvitals_core::HistoryState>();
-            let mapping = match unsafe {
+            let security = history_state_security();
+            let mapping_result = unsafe {
                 CreateFileMappingW(
                     INVALID_HANDLE_VALUE,
-                    None,
+                    security.as_ref().map(|(sa, _)| sa as *const _),
                     PAGE_READWRITE,
                     0,
                     size as u32,
                     windows::core::PCWSTR(name.as_ptr()),
                 )
-            } {
+            };
+            // Capture before any other Win32 call can overwrite it.
+            let already_exists = unsafe { windows::Win32::Foundation::GetLastError() }
+                == windows::Win32::Foundation::ERROR_ALREADY_EXISTS;
+            if let Some((_, descriptor)) = security {
+                unsafe {
+                    let _ = windows::Win32::Foundation::LocalFree(Some(
+                        windows::Win32::Foundation::HLOCAL(descriptor.0),
+                    ));
+                }
+            }
+            let mapping = match mapping_result {
                 Ok(mapping) => mapping,
                 Err(e) => {
-                    log_event("WARN", &format!("history state mapping failed: {e}"));
+                    warn_history_state(&format!("history state mapping failed: {e}"));
                     return None;
                 }
             };
             let view = unsafe { MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, size) };
             if view.Value.is_null() {
                 let _ = unsafe { CloseHandle(mapping) };
-                log_event("WARN", "history state map view failed");
+                warn_history_state("history state map view failed");
                 return None;
             }
             let ptr = view.Value as *mut sysvitals_core::HistoryState;
-            unsafe { std::ptr::write_volatile(ptr, sysvitals_core::HistoryState::new()) };
+            // An existing mapping belongs to a still-live resident child or
+            // to a dead process's leftovers. Only clear it when the header is
+            // not ours; a live block keeps its request/visibility flags.
+            let usable = already_exists
+                && unsafe {
+                    let header = std::ptr::read_volatile(ptr);
+                    header.magic == sysvitals_core::HISTORY_STATE_MAGIC
+                        && header.version == sysvitals_core::HISTORY_STATE_VERSION
+                };
+            if !usable {
+                unsafe { std::ptr::write_volatile(ptr, sysvitals_core::HistoryState::new()) };
+            }
+            HISTORY_STATE_WARNED.store(false, Ordering::Relaxed);
             *slot.borrow_mut() = Some((ptr, mapping));
         }
         slot.borrow().as_ref().map(|(ptr, _)| *ptr)
@@ -516,47 +589,53 @@ pub fn ensure_history_resident() {
     log_event("INFO", &format!("launching SysVitalsHistory.exe {args}"));
     HISTORY_LAUNCHING.store(true, Ordering::SeqCst);
     let sentinel_raw = sentinel_hwnd().0 as isize;
-    std::thread::spawn(move || {
-        let started = Instant::now();
-        match spawn_process(&exe_path, &dir, Some(&args)) {
-            Ok(handle) => {
-                unsafe { assign_to_child_job(handle) };
-                if QUITTING.load(Ordering::Relaxed) {
-                    // The indicator began quitting while CreateProcessW
-                    // was in flight. The job object would reap it on
-                    // process exit, but terminating here also avoids
-                    // briefly showing a panel that no click asked for.
-                    let _ = unsafe { TerminateProcess(handle, 0) };
-                    let _ = unsafe { CloseHandle(handle) };
-                    log_event("INFO", "history launch cancelled by quit");
-                } else {
-                    *HISTORY_PROCESS.lock().unwrap_or_else(|e| e.into_inner()) =
-                        Some(handle.0 as isize);
-                    log_event(
-                        "INFO",
-                        &format!(
-                            "launched SysVitalsHistory.exe in {}ms",
-                            started.elapsed().as_millis()
-                        ),
-                    );
+    let spawn = std::thread::Builder::new()
+        .name("sysvitals-history-launch".to_string())
+        .spawn(move || {
+            let started = Instant::now();
+            match spawn_process(&exe_path, &dir, Some(&args)) {
+                Ok(handle) => {
+                    unsafe { assign_to_child_job(handle) };
+                    if QUITTING.load(Ordering::Relaxed) {
+                        // The indicator began quitting while CreateProcessW
+                        // was in flight. The job object would reap it on
+                        // process exit, but terminating here also avoids
+                        // briefly showing a panel that no click asked for.
+                        let _ = unsafe { TerminateProcess(handle, 0) };
+                        let _ = unsafe { CloseHandle(handle) };
+                        log_event("INFO", "history launch cancelled by quit");
+                    } else {
+                        *HISTORY_PROCESS.lock().unwrap_or_else(|e| e.into_inner()) =
+                            Some(handle.0 as isize);
+                        log_event(
+                            "INFO",
+                            &format!(
+                                "launched SysVitalsHistory.exe in {}ms",
+                                started.elapsed().as_millis()
+                            ),
+                        );
+                    }
+                }
+                Err(e) => {
+                    log_event("WARN", &format!("history launch failed: {e}"));
                 }
             }
-            Err(e) => {
-                log_event("WARN", &format!("history launch failed: {e}"));
-            }
-        }
+            HISTORY_LAUNCHING.store(false, Ordering::SeqCst);
+            // Wake the UI so the launch handle converges without waiting for
+            // the 250 ms sync timer. A destroyed sentinel makes this a no-op.
+            let _ = unsafe {
+                PostMessageW(
+                    Some(HWND(sentinel_raw as *mut std::ffi::c_void)),
+                    WM_APP_HISTORY_READY,
+                    WPARAM(0),
+                    LPARAM(0),
+                )
+            };
+        });
+    if let Err(e) = spawn {
         HISTORY_LAUNCHING.store(false, Ordering::SeqCst);
-        // Wake the UI so the launch handle converges without waiting for
-        // the 250 ms sync timer. A destroyed sentinel makes this a no-op.
-        let _ = unsafe {
-            PostMessageW(
-                Some(HWND(sentinel_raw as *mut std::ffi::c_void)),
-                WM_APP_HISTORY_READY,
-                WPARAM(0),
-                LPARAM(0),
-            )
-        };
-    });
+        log_event("WARN", &format!("history launch thread failed: {e}"));
+    }
 }
 
 /// Reap a dead resident process and clear a request it left behind, so the
@@ -575,36 +654,48 @@ pub fn sync_history_state() {
     }
 }
 
+/// Full path of the running executable. The buffer grows until
+/// `GetModuleFileNameW` reports it fit, so a deep install path is not
+/// silently truncated at a fixed 1024 UTF-16 units.
+fn current_exe_path() -> Option<String> {
+    let mut buf = vec![0u16; 512];
+    loop {
+        let n = unsafe { GetModuleFileNameW(None, &mut buf) } as usize;
+        if n == 0 {
+            return None;
+        }
+        if n < buf.len() {
+            return Some(String::from_utf16_lossy(&buf[..n]));
+        }
+        if buf.len() >= 32768 {
+            return None;
+        }
+        buf.resize(buf.len() * 2, 0);
+    }
+}
+
 /// Best-effort: return the directory containing the current executable.
 pub fn current_exe_dir() -> Option<String> {
-    let mut buf = [0u16; 1024];
-    let n = unsafe { GetModuleFileNameW(None, &mut buf) };
-    if n == 0 {
-        return None;
-    }
-    let path = String::from_utf16_lossy(&buf[..n as usize]);
+    let path = current_exe_path()?;
     path.rfind(['\\', '/']).map(|i| path[..i].to_string())
 }
 
 /// Restart the overlay: schedule a delayed relaunch of the current exe
 /// (after the single-instance mutex is released on exit), then exit.
 pub fn restart_self() {
-    let mut buf = [0u16; 1024];
-    let n = unsafe { GetModuleFileNameW(None, &mut buf) };
-    if n == 0 {
+    let Some(exe) = current_exe_path() else {
         log_event("WARN", "restart_self: cannot determine exe path");
         return;
-    }
-    let exe = String::from_utf16_lossy(&buf[..n as usize]);
+    };
     // Delay 2 seconds so this process exits and releases the mutex first.
     let cmd = format!("/c timeout /t 2 /nobreak >nul & start \"\" \"{}\"", exe);
     let cmd_w = utf16(&cmd);
     let verb = utf16("open");
     let target = utf16("cmd.exe");
     let params = windows::core::PCWSTR(cmd_w.as_ptr());
-    // Close child panels first: the new instance starts with empty slots
-    // and would otherwise open a second History window next to the old one.
-    close_children();
+    // Schedule first; only tear the child panels down once Windows accepted
+    // the relaunch. Closing them before the check left the running indicator
+    // without its windows when `ShellExecuteW` failed.
     log_event("INFO", "restart_self: scheduling relaunch and exiting");
     unsafe {
         let result = ShellExecuteW(
@@ -628,6 +719,9 @@ pub fn restart_self() {
             );
             return;
         }
+        // The new instance starts with empty child slots; close ours so it
+        // cannot open a second History window next to the old one.
+        close_children();
         shutdown_and_quit();
     }
 }

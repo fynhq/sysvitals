@@ -163,10 +163,16 @@ pub unsafe fn resize_overlay(hwnd: HWND, row: &FormattedRow, vertical: bool) {
 /// interval regardless of how many taskbars are showing.
 pub unsafe fn sample_tick() {
     let cfg = config();
-    let now = SystemTime::now()
+    let wall = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
+    let previous = LAST_SAMPLE_TS.load(Ordering::Relaxed);
+    let now = sysvitals_core::history_writer::next_sample_ts(
+        (previous != i64::MIN).then_some(previous),
+        wall,
+    );
+    LAST_SAMPLE_TS.store(now, Ordering::Relaxed);
     let snapshot = SAMPLER.with(|s| {
         let mut guard = s.borrow_mut();
         let sampler =
@@ -233,34 +239,57 @@ pub unsafe fn relayout_overlay(hwnd: HWND) {
 /// taskbar message loop. The writer owns the open/insert/prune policy and
 /// its own failure logging.
 pub fn record_history(cfg: &Config, now: i64, snapshot: &sysvitals_core::Snapshot) {
+    const WRITER_RETRY_COOLDOWN: Duration = Duration::from_secs(300);
     if !cfg.history.enabled {
         return;
     }
     HISTORY_WRITER.with(|slot| {
         let mut writer = slot.borrow_mut();
-        if writer.is_none() && !HISTORY_WRITER_FAILED.with(|failed| failed.get()) {
+        let retry_due = HISTORY_WRITER_FAILED_AT.with(|failed_at| {
+            failed_at
+                .get()
+                .is_none_or(|at| at.elapsed() >= WRITER_RETRY_COOLDOWN)
+        });
+        if writer.is_none() && retry_due {
             let log: sysvitals_core::history_writer::LogFn =
                 Arc::new(|level: &str, message: &str| log_event(level, message));
             match HistoryWriter::spawn(log) {
                 Ok(started) => {
+                    HISTORY_WRITER_FAILED_AT.with(|failed_at| failed_at.set(None));
                     log_event("INFO", "history writer started");
                     *writer = Some(started);
                 }
                 Err(e) => {
-                    HISTORY_WRITER_FAILED.with(|failed| failed.set(true));
+                    HISTORY_WRITER_FAILED_AT.with(|failed_at| failed_at.set(Some(Instant::now())));
                     log_event(
                         "WARN",
-                        &format!("history writer unavailable: {e}; history disabled"),
+                        &format!(
+                            "history writer unavailable: {e}; retrying in {}s",
+                            WRITER_RETRY_COOLDOWN.as_secs()
+                        ),
                     );
                 }
             }
         }
-        if let Some(writer) = writer.as_ref() {
-            writer.record(
+        let send_ok = writer.as_ref().is_none_or(|started| {
+            started.record(
                 now,
                 snapshot.cpu_pct,
                 snapshot.mem_pct,
                 cfg.history.retention_days,
+            )
+        });
+        if !send_ok {
+            // The worker thread stopped (panic). Drop the handle and let
+            // the cooldown start a fresh one.
+            *writer = None;
+            HISTORY_WRITER_FAILED_AT.with(|failed_at| failed_at.set(Some(Instant::now())));
+            log_event(
+                "WARN",
+                &format!(
+                    "history writer stopped; retrying in {}s",
+                    WRITER_RETRY_COOLDOWN.as_secs()
+                ),
             );
         }
     });
@@ -500,9 +529,15 @@ pub unsafe fn render_layered(hwnd: HWND, row: &FormattedRow, vertical: bool) {
         Some(&blend),
         ULW_ALPHA,
     ) {
-        Ok(()) => LAYERED_FAIL_LOGGED.store(false, Ordering::Relaxed),
+        Ok(()) => {
+            with_overlay_mut(hwnd, |ov| ov.layered_fail_logged = false);
+        }
         Err(e) => {
-            if !LAYERED_FAIL_LOGGED.swap(true, Ordering::Relaxed) {
+            if with_overlay_mut(hwnd, |ov| {
+                !std::mem::replace(&mut ov.layered_fail_logged, true)
+            })
+            .unwrap_or(false)
+            {
                 log_event("WARN", &format!("UpdateLayeredWindow failed: {e}"));
             }
         }
