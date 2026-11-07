@@ -3,7 +3,7 @@
 use super::*;
 
 /// Directory containing the running executable.
-pub fn exe_dir() -> Option<std::path::PathBuf> {
+pub(crate) fn exe_dir() -> Option<std::path::PathBuf> {
     std::env::current_exe()
         .ok()?
         .parent()
@@ -18,7 +18,7 @@ pub fn exe_dir() -> Option<std::path::PathBuf> {
 /// application identity. Handing it the raw binary inside
 /// `Contents/MacOS/` instead bypasses that registration, so the relaunched
 /// process may not be treated as the same app.
-pub fn relaunch_target() -> Option<std::path::PathBuf> {
+pub(crate) fn relaunch_target() -> Option<std::path::PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let bundle = exe
         .ancestors()
@@ -28,7 +28,7 @@ pub fn relaunch_target() -> Option<std::path::PathBuf> {
 
 /// Whether a previously spawned child (held in `slot`) is still running.
 /// Reaps it once it has exited.
-pub fn child_alive(slot: &RefCell<Option<Child>>) -> bool {
+pub(crate) fn child_alive(slot: &RefCell<Option<Child>>) -> bool {
     let mut borrow = slot.borrow_mut();
     match borrow.as_mut() {
         Some(child) => match child.try_wait() {
@@ -52,7 +52,7 @@ pub fn child_alive(slot: &RefCell<Option<Child>>) -> bool {
 
 /// Reap children that exited on their own so a long-running indicator does
 /// not accumulate zombies between launches.
-pub fn reap_children() {
+pub(crate) fn reap_children() {
     SETTINGS_CHILD.with(|slot| {
         let mut borrow = slot.borrow_mut();
         if let Some(child) = borrow.as_mut() {
@@ -72,7 +72,7 @@ pub fn reap_children() {
 }
 
 /// Terminate a child panel and reap it so no zombie remains.
-pub fn terminate_child(slot: &RefCell<Option<Child>>, label: &str) -> bool {
+pub(crate) fn terminate_child(slot: &RefCell<Option<Child>>, label: &str) -> bool {
     let mut borrow = slot.borrow_mut();
     let Some(child) = borrow.as_mut() else {
         return false;
@@ -93,14 +93,14 @@ pub fn terminate_child(slot: &RefCell<Option<Child>>, label: &str) -> bool {
     }
 }
 
-pub fn close_settings() -> bool {
+pub(crate) fn close_settings() -> bool {
     SETTINGS_CHILD.with(|slot| terminate_child(slot, "settings window"))
 }
 
 /// Close both child panels on restart/quit. Leaving them alive makes a
 /// restarted instance open a second History popup and leaves Settings
 /// orphaned after Quit.
-pub fn close_children() {
+pub(crate) fn close_children() {
     let _ = close_history();
     let _ = close_settings();
 }
@@ -127,7 +127,7 @@ fn append_anchor_args(cmd: &mut std::process::Command) {
 
 /// Launch the external GPUI settings process (`SysVitalsSettings`), one
 /// live instance at a time.
-pub fn launch_settings() {
+pub(crate) fn launch_settings() {
     // `thread_local!` statics expose a `LocalKey`; reach the cell through
     // `with`, and re-entrancy (`child_alive` borrows it) must not nest, so
     // query liveness first, then spawn, then store.
@@ -163,7 +163,7 @@ pub fn launch_settings() {
 /// Launch the external history chart process (`SysVitalsHistory`), passing
 /// the indicator's screen rect so the popup can anchor to it. One live
 /// instance at a time.
-pub fn launch_history() {
+pub(crate) fn launch_history() {
     if HISTORY_CHILD.with(child_alive) {
         return;
     }
@@ -196,13 +196,13 @@ pub fn launch_history() {
 /// lingers under the long-running indicator. Returns `true` when a live
 /// popup was closed; `false` when nothing was running (or it had already
 /// exited, which is reaped here so the slot is free for the next open).
-pub fn close_history() -> bool {
+pub(crate) fn close_history() -> bool {
     HISTORY_CHILD.with(|slot| terminate_child(slot, "history popup"))
 }
 
 /// Open Activity Monitor (macOS equivalent of Task Manager). `status()`
 /// waits for the short-lived `open` helper, so it cannot leave a zombie.
-pub fn open_activity_monitor() {
+pub(crate) fn open_activity_monitor() {
     // Resolve the system app by bundle id rather than its localized
     // display name; `open -b` works on non-English systems too.
     if let Err(e) = std::process::Command::new("open")
@@ -214,7 +214,7 @@ pub fn open_activity_monitor() {
 }
 
 /// Restart: schedule a delayed relaunch, then exit.
-pub fn restart_self() {
+pub(crate) fn restart_self() {
     // Prefer the enclosing .app bundle; fall back to the bare executable
     // when running unpackaged (e.g. straight from target/release).
     let Some(target) = relaunch_target().or_else(|| std::env::current_exe().ok()) else {

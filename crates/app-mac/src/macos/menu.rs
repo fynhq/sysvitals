@@ -3,7 +3,7 @@
 use super::*;
 
 /// Show the context menu at the status item position.
-pub fn show_context_menu() {
+pub(crate) fn show_context_menu() {
     let mtm = mtm();
     let target = ACTION_HANDLER.with(|h| h.borrow().clone());
     let Some(target) = target.as_ref() else {

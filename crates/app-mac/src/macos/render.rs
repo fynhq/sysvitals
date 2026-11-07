@@ -8,36 +8,39 @@ use super::*;
 /// image's drawing handler, so AppKit can rasterize it without touching
 /// thread-local state from a possibly non-main thread.
 #[derive(Clone)]
-pub struct DrawItem {
-    pub attr: Retained<NSAttributedString>,
-    pub x: f64,
-    pub y: f64,
+pub(crate) struct DrawItem {
+    pub(crate) attr: Retained<NSAttributedString>,
+    pub(crate) x: f64,
+    pub(crate) y: f64,
 }
 
 /// The rendered template image for the current layout plus the width the
 /// status item must reserve. A template keeps AppKit's automatic menu-bar
 /// light/dark inversion; there is deliberately no hover/pressed/open
 /// backdrop variant.
-pub struct StatusImage {
-    pub image: Retained<NSImage>,
-    pub width: f64,
+pub(crate) struct StatusImage {
+    pub(crate) image: Retained<NSImage>,
+    pub(crate) width: f64,
 }
 
 /// One laid-out dual-row line: left run, optional right run, with measured
 /// widths/heights kept for the column math.
-pub struct RowRun {
-    pub la: Retained<NSAttributedString>,
-    pub lw: f64,
-    pub lh: f64,
-    pub ra: Option<Retained<NSAttributedString>>,
-    pub rw: f64,
-    pub rh: f64,
+pub(crate) struct RowRun {
+    pub(crate) la: Retained<NSAttributedString>,
+    pub(crate) lw: f64,
+    pub(crate) lh: f64,
+    pub(crate) ra: Option<Retained<NSAttributedString>>,
+    pub(crate) rw: f64,
+    pub(crate) rh: f64,
 }
 
 /// Build one attributed run (font baked in) and measure it. `size()` reads
 /// the attributed string's own attributes, so measurement and drawing can
 /// never disagree on the font.
-pub fn make_run(text: &str, font: &Retained<NSFont>) -> (Retained<NSAttributedString>, f64, f64) {
+pub(crate) fn make_run(
+    text: &str,
+    font: &Retained<NSFont>,
+) -> (Retained<NSAttributedString>, f64, f64) {
     let s = NSString::from_str(text);
     // NSFont's super chain is NSFont -> NSObject -> AnyObject; the
     // attribute-dict value type is AnyObject, so two `as_super` steps land
@@ -59,7 +62,10 @@ pub fn make_run(text: &str, font: &Retained<NSFont>) -> (Retained<NSAttributedSt
 /// Build the measured runs for the 2x2 dual-row layout. Kept separate so
 /// the caller can shrink the font and retry if the block exceeds the menu
 /// bar height.
-pub fn layout_dual(row: &FormattedRow, font: &Retained<NSFont>) -> (Vec<RowRun>, f64, f64, f64) {
+pub(crate) fn layout_dual(
+    row: &FormattedRow,
+    font: &Retained<NSFont>,
+) -> (Vec<RowRun>, f64, f64, f64) {
     let mut runs: Vec<RowRun> = Vec::with_capacity(row.lines.len());
     for line in &row.lines {
         let (la, lw, lh) = make_run(line.left.trim_end(), font);
@@ -86,7 +92,7 @@ pub fn layout_dual(row: &FormattedRow, font: &Retained<NSFont>) -> (Vec<RowRun>,
 
 /// The metrics the current config shows, in the same order
 /// `format_frame` uses.
-pub fn visible_metrics(cfg: &Config) -> Vec<Metric> {
+pub(crate) fn visible_metrics(cfg: &Config) -> Vec<Metric> {
     Metric::ALL
         .into_iter()
         .filter(|m| cfg.display.metric_visible(*m))
@@ -98,7 +104,7 @@ pub fn visible_metrics(cfg: &Config) -> Vec<Metric> {
 /// inside the slot, but the slot itself never moves. Percentages can only
 /// reach "100%"; network rates reserve the widest four-character numeric
 /// field across all unit tiers (see `RATE_RESERVE`).
-pub fn metric_reserve(metric: Metric, cfg: &Config, font: &Retained<NSFont>) -> f64 {
+pub(crate) fn metric_reserve(metric: Metric, cfg: &Config, font: &Retained<NSFont>) -> f64 {
     let value = match metric {
         Metric::Cpu | Metric::Mem => "100%",
         Metric::Up | Metric::Down => RATE_RESERVE,
@@ -107,7 +113,7 @@ pub fn metric_reserve(metric: Metric, cfg: &Config, font: &Retained<NSFont>) -> 
 }
 
 /// Configured label prefix for one metric.
-pub fn metric_prefix(metric: Metric, cfg: &Config) -> &str {
+pub(crate) fn metric_prefix(metric: Metric, cfg: &Config) -> &str {
     match metric {
         Metric::Cpu => &cfg.display.prefix.cpu,
         Metric::Mem => &cfg.display.prefix.mem,
@@ -122,7 +128,7 @@ pub fn metric_prefix(metric: Metric, cfg: &Config) -> &str {
 /// slot end, so the indicator's outer edges hug its content. A cell that
 /// does not start with the configured prefix (unexpected formatting) is
 /// returned whole as the value.
-pub fn split_cell(text: &str, prefix: &str) -> (String, String) {
+pub(crate) fn split_cell(text: &str, prefix: &str) -> (String, String) {
     let text = text.trim_end();
     if !prefix.is_empty() {
         if let Some(rest) = text.strip_prefix(prefix) {
@@ -134,7 +140,7 @@ pub fn split_cell(text: &str, prefix: &str) -> (String, String) {
 
 /// Widest reserved cell in a dual-row column, measured with the final
 /// (possibly height-fitted) font.
-pub fn column_reserve(metrics: &[Metric], cfg: &Config, font: &Retained<NSFont>) -> f64 {
+pub(crate) fn column_reserve(metrics: &[Metric], cfg: &Config, font: &Retained<NSFont>) -> f64 {
     metrics
         .iter()
         .map(|m| metric_reserve(*m, cfg, font))
@@ -145,7 +151,7 @@ pub fn column_reserve(metrics: &[Metric], cfg: &Config, font: &Retained<NSFont>)
 /// down to fit the fixed bar height would lose too much stroke weight, so
 /// dual-row uses a semibold system face at the same reduced size. The
 /// single-row layout keeps `menuBarFontOfSize(0.0)` untouched.
-pub fn dual_row_font(size: f64) -> Retained<NSFont> {
+pub(crate) fn dual_row_font(size: f64) -> Retained<NSFont> {
     // SAFETY: `NSFontWeightSemibold` is an AppKit extern static; reading
     // any extern static is unsafe, matching the `NSFontAttributeName` use
     // below. The value itself is a plain `CGFloat` constant.
@@ -171,7 +177,7 @@ pub fn dual_row_font(size: f64) -> Retained<NSFont> {
 /// idle-second tick costs nothing (no rebuild, no bitmap churn). On change
 /// a fresh block-image is built and mounted; the previous image is
 /// reference-counted away.
-pub fn render_indicator(row: &FormattedRow, cfg: &Config) {
+pub(crate) fn render_indicator(row: &FormattedRow, cfg: &Config) {
     let dual = cfg.display.dual_row && row.lines.len() > 1;
     // `sanitize` constrains `item_spacing` to {4, 8, 16, 32}, so no
     // extra lower bound is needed here.
@@ -443,7 +449,7 @@ fn invalidate_draw_signature() {
 
 /// Mount the pre-rendered template image and its reserved width. Called
 /// whenever `render_indicator` rebuilds the image, and once at startup.
-pub fn apply_status_image() {
+pub(crate) fn apply_status_image() {
     let mtm = mtm();
     STATUS_IMAGE.with(|slot| {
         let slot = slot.borrow();
@@ -486,7 +492,7 @@ pub fn apply_status_image() {
 /// are dispatched from inside the run loop. The value is stored
 /// unconditionally so a deferred update still lands on the first timer
 /// tick even when the image itself is reused unchanged.
-pub fn update_accessibility(text: String) {
+pub(crate) fn update_accessibility(text: String) {
     if text.is_empty() {
         return;
     }
@@ -497,7 +503,7 @@ pub fn update_accessibility(text: String) {
 }
 
 /// Push the stored accessibility value to AppKit when it changed.
-pub fn apply_pending_accessibility() {
+pub(crate) fn apply_pending_accessibility() {
     let text = ACCESSIBILITY_TEXT.with(|slot| slot.borrow().clone());
     if text.is_empty() {
         return;
@@ -512,7 +518,7 @@ pub fn apply_pending_accessibility() {
 /// Expose the live values to VoiceOver and as the status item's native
 /// tooltip. The template image itself has no accessible text, so without
 /// this the menu-bar item reads as an unlabeled button.
-pub fn apply_accessibility(value: &str) {
+pub(crate) fn apply_accessibility(value: &str) {
     if value.is_empty() {
         return;
     }
@@ -539,7 +545,7 @@ pub fn apply_accessibility(value: &str) {
 /// pressed/selected backdrop through the button cell; clearing both cell
 /// style masks (`NSNoCellMask`) stops it from entering that drawing mode,
 /// so a click paints no background of its own.
-pub fn disable_button_highlight(button: &NSStatusBarButton) {
+pub(crate) fn disable_button_highlight(button: &NSStatusBarButton) {
     let Some(cell) = button.cell() else {
         return;
     };

@@ -8,7 +8,7 @@ use super::*;
 
 /// Re-apply the shared theme/accent/material stack, then the settings-only
 /// typography and token overrides.
-pub fn apply_theme_and_accent(cx: &mut App) {
+pub(crate) fn apply_theme_and_accent(cx: &mut App) {
     sysvitals_panel::apply_theme_and_accent(cx, PanelSurface::Settings);
     // Typography: keep the library's 16px rem base so its 0.875rem controls
     // (buttons, inputs, selects, dropdown rows) land on 14px, matching the

@@ -18,7 +18,7 @@ mod macos;
 
 #[cfg(not(target_os = "macos"))]
 mod macos {
-    pub fn run() {
+    pub(crate) fn run() {
         eprintln!("app-mac: this binary only runs on macOS.");
     }
 }

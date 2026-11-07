@@ -15,7 +15,7 @@ use super::*;
 /// window, so the resident loop can restore it when the OS refused to
 /// activate (and therefore never delivered the activation edge the view
 /// uses for the same correction).
-pub fn open_history_window(
+pub(crate) fn open_history_window(
     cx: &mut App,
     anchor: Option<AnchorRect>,
     monitor: Option<DisplayId>,

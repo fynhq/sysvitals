@@ -9,7 +9,7 @@ use super::*;
 /// closes it (toggle); a click on a different monitor's indicator moves it
 /// there. `visible` (owned by the child) is the actual open state;
 /// `desired_open` alone is not (it stays 1 after a blur/Esc dismissal).
-pub fn handle_history_click(hwnd: HWND) {
+pub(crate) fn handle_history_click(hwnd: HWND) {
     if !history_child_alive() {
         history_mark_stopped();
         HISTORY_ANCHOR_MONITOR.store(0, Ordering::Relaxed);
@@ -143,7 +143,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
 
 // --------------------------------------------------------------------- run
 
-pub fn run() {
+pub(crate) fn run() {
     unsafe {
         // Crash diagnostics first.
         install_crash_hooks();

@@ -2,7 +2,7 @@
 
 use super::*;
 
-pub unsafe fn refresh_theme() {
+pub(crate) unsafe fn refresh_theme() {
     // The taskbar alignment lives beside the theme values and can change
     // while the indicator is running; drop the cached probe so the next
     // placement reads it again.
@@ -43,7 +43,7 @@ pub unsafe fn refresh_theme() {
 /// Win11 with centered taskbar icons: the only case where the far-left
 /// anchor is offered. Cached because placement runs every tick; the
 /// setting-change / TaskbarCreated paths invalidate the cache.
-pub unsafe fn win11_centered_taskbar() -> bool {
+pub(crate) unsafe fn win11_centered_taskbar() -> bool {
     let cached = WIN11_CENTERED.load(Ordering::Relaxed);
     if cached != u32::MAX {
         return cached == 1;
@@ -55,7 +55,7 @@ pub unsafe fn win11_centered_taskbar() -> bool {
 
 /// Whether the effective theme is light (config override wins over the
 /// system flag).
-pub fn theme_is_light() -> bool {
+pub(crate) fn theme_is_light() -> bool {
     match config().display.theme {
         Theme::Auto => LIGHT_THEME.load(Ordering::Relaxed) == 1,
         Theme::Light => true,
@@ -65,7 +65,7 @@ pub fn theme_is_light() -> bool {
 
 /// Indicator glyph color. High contrast wins over both the system
 /// light/dark flag and the user's `display.theme` override.
-pub fn indicator_text_rgb() -> (u32, u32, u32) {
+pub(crate) fn indicator_text_rgb() -> (u32, u32, u32) {
     if HIGH_CONTRAST.load(Ordering::Relaxed) == 1 {
         let bgr = HC_TEXT.load(Ordering::Relaxed);
         (bgr & 0xFF, (bgr >> 8) & 0xFF, (bgr >> 16) & 0xFF)
@@ -84,10 +84,10 @@ pub fn indicator_text_rgb() -> (u32, u32, u32) {
 // `WM_DPICHANGED` invalidate this cache: text-size and per-monitor DPI
 // changes must not require a restart.
 thread_local! {
-    pub static UI_FONT: RefCell<Option<(i32, Vec<u16>)>> = const { RefCell::new(None) };
+    pub(crate) static UI_FONT: RefCell<Option<(i32, Vec<u16>)>> = const { RefCell::new(None) };
 }
 
-pub fn ui_font() -> (i32, Vec<u16>) {
+pub(crate) fn ui_font() -> (i32, Vec<u16>) {
     UI_FONT.with(|slot| {
         if let Some(font) = slot.borrow().as_ref() {
             return font.clone();
@@ -133,13 +133,13 @@ pub fn ui_font() -> (i32, Vec<u16>) {
     })
 }
 
-pub fn invalidate_ui_font() {
+pub(crate) fn invalidate_ui_font() {
     UI_FONT.with(|slot| *slot.borrow_mut() = None);
 }
 
 /// DPI of the monitor hosting `hwnd`. `GetDpiForSystem` is only a fallback
 /// when the window handle is unavailable.
-pub fn dpi_for(hwnd: HWND) -> u32 {
+pub(crate) fn dpi_for(hwnd: HWND) -> u32 {
     let dpi = unsafe { GetDpiForWindow(hwnd) };
     (if dpi == 0 {
         unsafe { GetDpiForSystem() }
@@ -153,7 +153,7 @@ pub fn dpi_for(hwnd: HWND) -> u32 {
 /// orientation. The cached system font height is expressed at the system
 /// DPI; scale it to the overlay's own monitor and then apply the vertical
 /// reduction, so mixed-DPI setups and live text-size changes both work.
-pub fn effective_font_height_for(hwnd: HWND, vertical: bool) -> i32 {
+pub(crate) fn effective_font_height_for(hwnd: HWND, vertical: bool) -> i32 {
     let (height, _) = ui_font();
     let system_dpi = (unsafe { GetDpiForSystem() }).max(96) as i32;
     let window_dpi = dpi_for(hwnd) as i32;
@@ -169,7 +169,7 @@ pub fn effective_font_height_for(hwnd: HWND, vertical: bool) -> i32 {
 }
 
 /// Horizontal padding for the given orientation.
-pub fn pad_px(vertical: bool) -> i32 {
+pub(crate) fn pad_px(vertical: bool) -> i32 {
     if vertical {
         VERTICAL_PAD_PX
     } else {
@@ -178,7 +178,7 @@ pub fn pad_px(vertical: bool) -> i32 {
 }
 
 /// Width slack for the given orientation.
-pub fn width_slack_px(vertical: bool) -> i32 {
+pub(crate) fn width_slack_px(vertical: bool) -> i32 {
     if vertical {
         VERTICAL_WIDTH_SLACK_PX
     } else {
@@ -189,7 +189,7 @@ pub fn width_slack_px(vertical: bool) -> i32 {
 /// Overlay font: the system UI face at the system UI size, grayscale AA.
 /// Antialiased (not ClearType) because the glyphs are composited
 /// per-pixel-alpha over the taskbar.
-pub unsafe fn make_font_for(hwnd: HWND, vertical: bool) -> HFONT {
+pub(crate) unsafe fn make_font_for(hwnd: HWND, vertical: bool) -> HFONT {
     let (_, face) = ui_font();
     CreateFontW(
         effective_font_height_for(hwnd, vertical),
@@ -211,7 +211,7 @@ pub unsafe fn make_font_for(hwnd: HWND, vertical: bool) -> HFONT {
 
 /// Overlay font at an integer supersample multiplier. Used to render at a
 /// supersampled scale (2x) before downsampling.
-pub unsafe fn make_font_at_for(hwnd: HWND, scale: i32, vertical: bool) -> HFONT {
+pub(crate) unsafe fn make_font_at_for(hwnd: HWND, scale: i32, vertical: bool) -> HFONT {
     let (_, face) = ui_font();
     CreateFontW(
         effective_font_height_for(hwnd, vertical) * scale.max(1),

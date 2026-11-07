@@ -6,7 +6,7 @@ use super::*;
 
 /// Whether the Settings child is still running. Reaps the handle when the
 /// process has exited. Never blocks the message thread.
-pub fn settings_child_alive() -> bool {
+pub(crate) fn settings_child_alive() -> bool {
     let mut slot = SETTINGS_PROCESS.lock().unwrap_or_else(|e| e.into_inner());
     let Some(raw) = *slot else {
         return false;
@@ -39,7 +39,7 @@ pub fn settings_child_alive() -> bool {
 /// from the background launch worker (a replacement must wait for the old
 /// instance's single-instance mutex to be released); the UI paths pass
 /// `false` so closing never blocks the message loop.
-pub fn terminate_settings(wait_for_exit: bool) -> bool {
+pub(crate) fn terminate_settings(wait_for_exit: bool) -> bool {
     // Take the handle out of the shared slot before any blocking wait:
     // the UI thread must be able to call `settings_child_alive()` while a
     // replacement worker waits up to 2s for the old process object.
@@ -87,7 +87,7 @@ pub fn terminate_settings(wait_for_exit: bool) -> bool {
 /// Terminate the resident history process. Called only on restart/quit:
 /// a normal popup close is a shared-state request that only removes the
 /// window, leaving the framework warm.
-pub fn history_terminate() -> bool {
+pub(crate) fn history_terminate() -> bool {
     let mut slot = HISTORY_PROCESS.lock().unwrap_or_else(|e| e.into_inner());
     let Some(raw) = slot.take() else {
         return false;
@@ -117,7 +117,7 @@ pub fn history_terminate() -> bool {
 /// Close both child panels on restart/quit. Leaving them alive makes a
 /// restarted instance open a second History window (its slot starts
 /// empty) and leaves Settings orphaned after Quit.
-pub fn close_children() {
+pub(crate) fn close_children() {
     let _ = history_terminate();
     // Quit/restart: the relaunch is delayed by the caller, so there is no
     // single-instance race to wait out here; never block the UI thread.
@@ -128,7 +128,7 @@ pub fn close_children() {
 /// job handle for the process lifetime means an indicator crash, a quit
 /// during a slow `CreateProcessW`, or an explorer restart can never leave
 /// an orphan Settings/History process behind.
-pub unsafe fn init_child_job() {
+pub(crate) unsafe fn init_child_job() {
     if CHILD_JOB.load(Ordering::Relaxed) != 0 {
         return;
     }
@@ -159,7 +159,7 @@ pub unsafe fn init_child_job() {
 /// non-fatal: the explicit slot termination still covers the normal
 /// quit/restart paths, and the child's `--parent-pid` covers mac-style
 /// crash cleanup where it applies.
-pub unsafe fn assign_to_child_job(process: HANDLE) {
+pub(crate) unsafe fn assign_to_child_job(process: HANDLE) {
     let raw = CHILD_JOB.load(Ordering::Relaxed);
     if raw == 0 {
         return;
@@ -173,7 +173,11 @@ pub unsafe fn assign_to_child_job(process: HANDLE) {
 /// Spawn `exe_path` with the given argv tail. Returns the process handle
 /// (the thread handle is closed here). Used by the background Settings
 /// and resident-history launchers; never call this from the UI thread.
-pub fn spawn_process(exe_path: &str, dir: &str, args: Option<&str>) -> Result<HANDLE, String> {
+pub(crate) fn spawn_process(
+    exe_path: &str,
+    dir: &str,
+    args: Option<&str>,
+) -> Result<HANDLE, String> {
     let exe_w = utf16(exe_path);
     let dir_w = utf16(dir);
     let mut cmdline = utf16(&match args {
@@ -217,7 +221,7 @@ pub fn spawn_process(exe_path: &str, dir: &str, args: Option<&str>) -> Result<HA
 /// milliseconds to several seconds on loaded hosts, and replacing a
 /// window on another monitor additionally waits for the old instance's
 /// single-instance mutex. Neither may block the indicator message loop.
-pub fn launch_settings(hwnd: HWND) {
+pub(crate) fn launch_settings(hwnd: HWND) {
     let mut args = format!("--parent-pid {}", unsafe { GetCurrentProcessId() });
     if let Some(anchor) = window_anchor_logical(hwnd) {
         args.push_str(&format!(
@@ -327,12 +331,12 @@ pub fn launch_settings(hwnd: HWND) {
 }
 
 /// Whether the resident history framework is running or being launched.
-pub fn history_busy() -> bool {
+pub(crate) fn history_busy() -> bool {
     history_child_alive() || HISTORY_LAUNCHING.load(Ordering::SeqCst)
 }
 
 /// Reap the resident history process if it exited (crash, manual kill).
-pub fn history_child_alive() -> bool {
+pub(crate) fn history_child_alive() -> bool {
     let mut slot = HISTORY_PROCESS.lock().unwrap_or_else(|e| e.into_inner());
     let Some(raw) = *slot else {
         return false;
@@ -417,7 +421,7 @@ fn history_state_security() -> Option<(
 
 /// Create (or reopen) the shared history state block. Kept alive for the
 /// process lifetime; the resident child maps it by name.
-pub fn history_state_ptr() -> Option<*mut sysvitals_core::HistoryState> {
+pub(crate) fn history_state_ptr() -> Option<*mut sysvitals_core::HistoryState> {
     HISTORY_STATE.with(|slot| {
         if slot.borrow().is_none() {
             let name = utf16(sysvitals_core::HISTORY_STATE_MAP);
@@ -476,7 +480,7 @@ pub fn history_state_ptr() -> Option<*mut sysvitals_core::HistoryState> {
     })
 }
 
-pub fn history_snapshot() -> Option<sysvitals_core::HistoryState> {
+pub(crate) fn history_snapshot() -> Option<sysvitals_core::HistoryState> {
     let ptr = history_state_ptr()?;
     Some(unsafe { sysvitals_core::HistoryState::read_consistent(ptr) })
 }
@@ -485,7 +489,7 @@ pub fn history_snapshot() -> Option<sysvitals_core::HistoryState> {
 /// request, so the resident loop can tell this close apart from the
 /// generation that opened the window and will not reopen it while a
 /// newer click is pending.
-pub fn history_close_request() {
+pub(crate) fn history_close_request() {
     let Some(ptr) = history_state_ptr() else {
         return;
     };
@@ -497,7 +501,7 @@ pub fn history_close_request() {
 /// Clear both flags after a resident-child death (or before starting a
 /// fresh frame) so a stale request/visibility cannot make the next click
 /// a no-op toggle-close or auto-open a window nobody asked for.
-pub fn history_mark_stopped() {
+pub(crate) fn history_mark_stopped() {
     let Some(ptr) = history_state_ptr() else {
         return;
     };
@@ -510,7 +514,7 @@ pub fn history_mark_stopped() {
 /// through the shared history state and the settings command line.
 /// The overlay registry is refreshed every move tick, so it is the
 /// preferred source; a live query covers windows not in the registry.
-pub fn window_monitor_id(hwnd: HWND) -> i64 {
+pub(crate) fn window_monitor_id(hwnd: HWND) -> i64 {
     if let Some(ov) = overlay_by_hwnd(hwnd) {
         return ov.monitor as i64;
     }
@@ -520,7 +524,7 @@ pub fn window_monitor_id(hwnd: HWND) -> i64 {
 /// A window's rect converted to GPUI global logical pixels (physical
 /// pixels divided by the window's own monitor DPI). Used as the history
 /// popup anchor and as the settings window's monitor hint.
-pub fn window_anchor_logical(hwnd: HWND) -> Option<[f32; 4]> {
+pub(crate) fn window_anchor_logical(hwnd: HWND) -> Option<[f32; 4]> {
     let mut rect = RECT::default();
     if unsafe { GetWindowRect(hwnd, &mut rect) }.is_err() {
         return None;
@@ -539,7 +543,7 @@ pub fn window_anchor_logical(hwnd: HWND) -> Option<[f32; 4]> {
 /// under one generation write. `GetWindowRect` reports physical pixels;
 /// the child lays its window out in GPUI's global logical pixel space
 /// (top-left origin, y down), so scale by the window's own monitor DPI.
-pub fn history_open_request(hwnd: HWND) -> bool {
+pub(crate) fn history_open_request(hwnd: HWND) -> bool {
     let Some(ptr) = history_state_ptr() else {
         return false;
     };
@@ -561,7 +565,7 @@ pub fn history_open_request(hwnd: HWND) -> bool {
 /// has been measured at 190 ms – 5.4 s on loaded hosts; doing it here keeps
 /// the indicator's message loop responsive. The child has no window until
 /// the user opens the chart, so this only pays the GPUI/DirectX warm-up.
-pub fn ensure_history_resident() {
+pub(crate) fn ensure_history_resident() {
     if history_busy() {
         return;
     }
@@ -640,7 +644,7 @@ pub fn ensure_history_resident() {
 
 /// Reap a dead resident process and clear a request it left behind, so the
 /// next click is not mistaken for a toggle-close of a popup that is gone.
-pub fn sync_history_state() {
+pub(crate) fn sync_history_state() {
     let alive = history_child_alive();
     if alive || HISTORY_LAUNCHING.load(Ordering::SeqCst) {
         return;
@@ -675,14 +679,14 @@ fn current_exe_path() -> Option<String> {
 }
 
 /// Best-effort: return the directory containing the current executable.
-pub fn current_exe_dir() -> Option<String> {
+pub(crate) fn current_exe_dir() -> Option<String> {
     let path = current_exe_path()?;
     path.rfind(['\\', '/']).map(|i| path[..i].to_string())
 }
 
 /// Restart the overlay: schedule a delayed relaunch of the current exe
 /// (after the single-instance mutex is released on exit), then exit.
-pub fn restart_self() {
+pub(crate) fn restart_self() {
     let Some(exe) = current_exe_path() else {
         log_event("WARN", "restart_self: cannot determine exe path");
         return;

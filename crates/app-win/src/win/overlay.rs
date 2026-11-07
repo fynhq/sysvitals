@@ -8,50 +8,50 @@ use super::*;
 /// setups measure and render each indicator independently. All access is on
 /// the message thread.
 #[derive(Clone, Copy)]
-pub struct Overlay {
-    pub hwnd: HWND,
+pub(crate) struct Overlay {
+    pub(crate) hwnd: HWND,
     /// The taskbar window that owns this overlay (its z-band follows it).
-    pub taskbar: HWND,
+    pub(crate) taskbar: HWND,
     /// Monitor hosting the taskbar (HMONITOR as isize). Identifies the
     /// indicator for the history popup's move-to-screen decision.
-    pub monitor: isize,
-    pub vertical: bool,
-    pub left_edge: bool,
+    pub(crate) monitor: isize,
+    pub(crate) vertical: bool,
+    pub(crate) left_edge: bool,
     /// Measured content size in physical pixels at this overlay's DPI.
     /// Width only grows; a config/orientation/DPI change resets it.
-    pub win_w: i32,
-    pub win_h: i32,
+    pub(crate) win_w: i32,
+    pub(crate) win_h: i32,
     /// Last rectangle handed to `MoveWindow`. Placement runs every second
     /// and after every sample; an unchanged rect needs no window-manager
     /// work. `None` until the first successful placement.
-    pub last_rect: Option<(i32, i32, i32, i32)>,
+    pub(crate) last_rect: Option<(i32, i32, i32, i32)>,
     /// A render was skipped because the overlay was hidden (auto-hide,
     /// fullscreen taskbar, restored window). The next visible tick must
     /// repaint instead of showing the pre-hide frame.
-    pub needs_render: bool,
+    pub(crate) needs_render: bool,
     // Per-overlay diagnostic latches. Keeping these on the overlay (instead
     // of process globals) means one monitor's z-order/cloak churn cannot
     // suppress or misattribute another monitor's log line.
-    pub topmost_lost_count: u32,
-    pub last_occluder: isize,
-    pub visibility_anomaly: bool,
-    pub shown_once: bool,
-    pub cloak_logged: bool,
-    pub cloak_move_fail_logged: bool,
-    pub layered_fail_logged: bool,
+    pub(crate) topmost_lost_count: u32,
+    pub(crate) last_occluder: isize,
+    pub(crate) visibility_anomaly: bool,
+    pub(crate) shown_once: bool,
+    pub(crate) cloak_logged: bool,
+    pub(crate) cloak_move_fail_logged: bool,
+    pub(crate) layered_fail_logged: bool,
 }
 
-pub fn overlay_by_hwnd(hwnd: HWND) -> Option<Overlay> {
+pub(crate) fn overlay_by_hwnd(hwnd: HWND) -> Option<Overlay> {
     OVERLAYS.with(|slot| slot.borrow().iter().find(|o| o.hwnd == hwnd).copied())
 }
 
 /// Run `f` on the overlay owning `hwnd`. Returns `None` when the overlay is
 /// gone (taskbar disappeared between ticks).
-pub fn with_overlay_mut<R>(hwnd: HWND, f: impl FnOnce(&mut Overlay) -> R) -> Option<R> {
+pub(crate) fn with_overlay_mut<R>(hwnd: HWND, f: impl FnOnce(&mut Overlay) -> R) -> Option<R> {
     OVERLAYS.with(|slot| slot.borrow_mut().iter_mut().find(|o| o.hwnd == hwnd).map(f))
 }
 
-pub fn set_overlay_needs_render(hwnd: HWND, needs_render: bool) {
+pub(crate) fn set_overlay_needs_render(hwnd: HWND, needs_render: bool) {
     OVERLAYS.with(|slot| {
         if let Some(ov) = slot.borrow_mut().iter_mut().find(|o| o.hwnd == hwnd) {
             ov.needs_render = needs_render;
@@ -59,13 +59,13 @@ pub fn set_overlay_needs_render(hwnd: HWND, needs_render: bool) {
     });
 }
 
-pub fn overlay_needs_render(hwnd: HWND) -> bool {
+pub(crate) fn overlay_needs_render(hwnd: HWND) -> bool {
     overlay_by_hwnd(hwnd).is_some_and(|o| o.needs_render)
 }
 
 /// Reset one overlay's grow-only width so a fresh measurement takes effect
 /// (config change, DPI change, orientation flip).
-pub fn reset_width(hwnd: HWND) {
+pub(crate) fn reset_width(hwnd: HWND) {
     OVERLAYS.with(|slot| {
         if let Some(ov) = slot.borrow_mut().iter_mut().find(|o| o.hwnd == hwnd) {
             ov.win_w = 0;
@@ -76,22 +76,22 @@ pub fn reset_width(hwnd: HWND) {
 // ------------------------------------------------------- taskbar geometry
 
 /// Taskbar geometry: rect in screen coordinates plus orientation.
-pub struct TaskbarInfo {
-    pub rect: RECT,
-    pub vertical: bool,
+pub(crate) struct TaskbarInfo {
+    pub(crate) rect: RECT,
+    pub(crate) vertical: bool,
     /// True when a vertical bar is docked to the *left* screen edge. The
     /// placement code uses it to pick which edge the indicator must never
     /// run past when its column is wider than the bar's thickness.
-    pub left_edge: bool,
+    pub(crate) left_edge: bool,
     /// Monitor hosting this taskbar (HMONITOR as isize).
-    pub monitor: isize,
+    pub(crate) monitor: isize,
 }
 
 /// Whether the shell's auto-hide setting is enabled. The state is global
 /// (per shell), not per bar; `ABM_GETSTATE` returns it without reporting
 /// the current visibility, which the geometry check in
 /// [`taskbar_info_for`] supplies.
-pub unsafe fn taskbar_auto_hide_enabled() -> bool {
+pub(crate) unsafe fn taskbar_auto_hide_enabled() -> bool {
     let cached = AUTO_HIDE.load(Ordering::Relaxed);
     if cached != u32::MAX {
         return cached == 1;
@@ -113,7 +113,7 @@ pub unsafe fn taskbar_auto_hide_enabled() -> bool {
 /// must be measured with `GetWindowRect`, so every bar uses the same path.
 /// Orientation is inferred from the rect: a taskbar is always far longer
 /// along its docked edge than it is thick.
-pub unsafe fn taskbar_info_for(bar: HWND) -> Option<TaskbarInfo> {
+pub(crate) unsafe fn taskbar_info_for(bar: HWND) -> Option<TaskbarInfo> {
     let mut r = RECT::default();
     if GetWindowRect(bar, &mut r).is_err() {
         return None;
@@ -183,7 +183,7 @@ pub unsafe fn taskbar_info_for(bar: HWND) -> Option<TaskbarInfo> {
 /// Bounding rectangle of the whole virtual desktop (all monitors), in
 /// physical pixels. Used for on-screen validation and for monitor-local
 /// clamping that must work with negative coordinates.
-pub unsafe fn virtual_screen_rect() -> RECT {
+pub(crate) unsafe fn virtual_screen_rect() -> RECT {
     let left = GetSystemMetrics(SM_XVIRTUALSCREEN);
     let top = GetSystemMetrics(SM_YVIRTUALSCREEN);
     let width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
@@ -202,7 +202,7 @@ pub unsafe fn virtual_screen_rect() -> RECT {
 /// Monitor that hosts a given taskbar, or the virtual desktop when the
 /// monitor cannot be resolved. The indicator must be clamped to this
 /// monitor, not the primary one, for secondary/negative-coordinate bars.
-pub unsafe fn taskbar_monitor_rect_for(bar: HWND) -> RECT {
+pub(crate) unsafe fn taskbar_monitor_rect_for(bar: HWND) -> RECT {
     let fallback = virtual_screen_rect();
     let monitor = MonitorFromWindow(bar, MONITOR_DEFAULTTONEAREST);
     if monitor.is_invalid() {
@@ -220,7 +220,7 @@ pub unsafe fn taskbar_monitor_rect_for(bar: HWND) -> RECT {
 }
 
 /// Left edge of one visible direct child of a taskbar, if present.
-pub unsafe fn visible_child_left(bar: HWND, class: &str) -> Option<i32> {
+pub(crate) unsafe fn visible_child_left(bar: HWND, class: &str) -> Option<i32> {
     let cls = utf16(class);
     let child = FindWindowExW(Some(bar), None, windows::core::PCWSTR(cls.as_ptr()), None).ok()?;
     if child.is_invalid() || !IsWindowVisible(child).as_bool() {
@@ -242,7 +242,7 @@ pub unsafe fn visible_child_left(bar: HWND, class: &str) -> Option<i32> {
 /// displays" is enabled. Anchoring such a bar to its raw right edge would
 /// put the indicator on top of the date/time — the only thing on that end
 /// of the bar — so the clock is resolved through UI Automation first.
-pub unsafe fn taskbar_anchor_left(bar: HWND) -> i32 {
+pub(crate) unsafe fn taskbar_anchor_left(bar: HWND) -> i32 {
     if let Some(left) = visible_child_left(bar, "TrayNotifyWnd") {
         return left;
     }
@@ -264,20 +264,20 @@ pub unsafe fn taskbar_anchor_left(bar: HWND) -> i32 {
 /// every two minutes (or immediately when the bar's rect changes); a
 /// failed lookup is retried after ten seconds.
 #[derive(Clone, Copy)]
-pub struct ClockAnchorCache {
-    pub bar: isize,
-    pub bar_rect: RECT,
-    pub at: Instant,
-    pub left: Option<i32>,
+pub(crate) struct ClockAnchorCache {
+    pub(crate) bar: isize,
+    pub(crate) bar_rect: RECT,
+    pub(crate) at: Instant,
+    pub(crate) left: Option<i32>,
 }
 
-pub static CLOCK_ANCHOR: Mutex<Vec<ClockAnchorCache>> = Mutex::new(Vec::new());
+pub(crate) static CLOCK_ANCHOR: Mutex<Vec<ClockAnchorCache>> = Mutex::new(Vec::new());
 
 /// Drop every cached UIA clock anchor. Called when a system setting that can
 /// move the clock arrives: the cache key is only the taskbar handle and rect,
 /// so a text-size or time-format change would otherwise stay stale until the
 /// two-minute TTL expires.
-pub fn invalidate_clock_anchor() {
+pub(crate) fn invalidate_clock_anchor() {
     if let Ok(mut guard) = CLOCK_ANCHOR.lock() {
         guard.clear();
     }
@@ -301,7 +301,7 @@ fn warn_placement_skipped(x: i32, y: i32, w: i32, h: i32) {
     }
 }
 
-pub fn rect_eq(a: RECT, b: RECT) -> bool {
+pub(crate) fn rect_eq(a: RECT, b: RECT) -> bool {
     a.left == b.left && a.top == b.top && a.right == b.right && a.bottom == b.bottom
 }
 
@@ -310,7 +310,7 @@ pub fn rect_eq(a: RECT, b: RECT) -> bool {
 /// drawn by the XAML taskbar and has no child window, so the automation
 /// tree is the only way to know where it starts. The right-most visible
 /// `SystemTray.*` element (ignoring the show-desktop button) is the clock.
-pub fn uia_clock_left(bar: HWND) -> Option<i32> {
+pub(crate) fn uia_clock_left(bar: HWND) -> Option<i32> {
     use windows::Win32::UI::Accessibility::{CUIAutomation, IUIAutomation, TreeScope_Descendants};
     let automation: IUIAutomation = unsafe {
         CoCreateInstance(
@@ -353,7 +353,7 @@ pub fn uia_clock_left(bar: HWND) -> Option<i32> {
     best
 }
 
-pub fn clock_anchor_left(bar: HWND, bar_rect: RECT) -> Option<i32> {
+pub(crate) fn clock_anchor_left(bar: HWND, bar_rect: RECT) -> Option<i32> {
     let now = Instant::now();
     if let Ok(guard) = CLOCK_ANCHOR.lock() {
         if let Some(cached) = guard
@@ -424,7 +424,7 @@ pub fn clock_anchor_left(bar: HWND, bar_rect: RECT) -> Option<i32> {
 /// Every taskbar window: the main bar plus one per extra monitor. All
 /// secondary bars share the class name `Shell_SecondaryTrayWnd`, so they
 /// are enumerated with `FindWindowExW`.
-pub unsafe fn taskbar_windows() -> Vec<HWND> {
+pub(crate) unsafe fn taskbar_windows() -> Vec<HWND> {
     let mut out = Vec::new();
     if let Some(main) = find_taskbar() {
         out.push(main);
@@ -447,18 +447,18 @@ pub unsafe fn taskbar_windows() -> Vec<HWND> {
 /// modal loop that still dispatches our `WM_TIMER`, and the menu lives
 /// in the topmost band — re-asserting the indicator's band during tracking
 /// would lift the tiny overlay back above the open menu. Skip those ticks.
-pub static MENU_TRACKING: AtomicBool = AtomicBool::new(false);
+pub(crate) static MENU_TRACKING: AtomicBool = AtomicBool::new(false);
 /// De-duplicates the "overlay creation failed" warning: reconcile retries
 /// every second, so a persistent failure must not log on every attempt.
 /// Creation failures happen before an overlay exists, so this one stays
 /// process-global.
-pub static OVERLAY_CREATE_FAIL_LOGGED: AtomicBool = AtomicBool::new(false);
+pub(crate) static OVERLAY_CREATE_FAIL_LOGGED: AtomicBool = AtomicBool::new(false);
 
 /// The Windows virtual-desktop manager, created on demand. The overlay is
 /// a top-level window, so Windows cloaks it when the user switches to
 /// another virtual desktop; the taskbar itself appears on every desktop,
 /// so the indicator should follow the user too.
-pub unsafe fn vd_manager() -> Option<IVirtualDesktopManager> {
+pub(crate) unsafe fn vd_manager() -> Option<IVirtualDesktopManager> {
     VD_MANAGER.with(|slot| {
         if slot.borrow().is_none() {
             let created: windows::core::Result<IVirtualDesktopManager> = CoCreateInstance(
@@ -481,7 +481,7 @@ pub unsafe fn vd_manager() -> Option<IVirtualDesktopManager> {
 /// Move the overlay to the desktop currently hosting the foreground
 /// window (or the shell window on an empty desktop). Used only when DWM
 /// reports the overlay as cloaked.
-pub unsafe fn move_to_current_desktop(hwnd: HWND) {
+pub(crate) unsafe fn move_to_current_desktop(hwnd: HWND) {
     let Some(manager) = vd_manager() else {
         return;
     };
@@ -525,7 +525,7 @@ pub unsafe fn move_to_current_desktop(hwnd: HWND) {
 /// minimized window still has `WS_VISIBLE`, and a cloaked window still
 /// reports itself visible, so both used to leave the indicator invisible
 /// with no log line until the process was restarted.
-pub unsafe fn maintain_visibility(hwnd: HWND) {
+pub(crate) unsafe fn maintain_visibility(hwnd: HWND) {
     let hidden = !IsWindowVisible(hwnd).as_bool();
     let minimized = IsIconic(hwnd).as_bool();
     let anomaly = hidden || minimized;
@@ -584,7 +584,7 @@ pub unsafe fn maintain_visibility(hwnd: HWND) {
 /// the indicator's center after the band assertion. This is the
 /// diagnostic that distinguishes "our window vanished" from "a shell
 /// flyout or third-party topmost window is parked over us".
-pub unsafe fn log_occlusion(hwnd: HWND) {
+pub(crate) unsafe fn log_occlusion(hwnd: HWND) {
     if MENU_TRACKING.load(Ordering::Relaxed) {
         return;
     }
@@ -639,7 +639,7 @@ pub unsafe fn log_occlusion(hwnd: HWND) {
 /// Skip while the context menu is tracking: the menu lives in the
 /// topmost band — re-raising now would lift the indicator above the menu
 /// the user is reading. This branch runs only on the rare lost-bit path.
-pub unsafe fn maintain_topmost(hwnd: HWND) {
+pub(crate) unsafe fn maintain_topmost(hwnd: HWND) {
     if MENU_TRACKING.load(Ordering::Relaxed) {
         return;
     }
@@ -674,7 +674,7 @@ pub unsafe fn maintain_topmost(hwnd: HWND) {
 /// visible. It hides only when the taskbar itself is gone (auto-hide or a
 /// true fullscreen app pushing it off screen). No foreground-window
 /// heuristics involved.
-pub unsafe fn reposition_overlay(hwnd: HWND) {
+pub(crate) unsafe fn reposition_overlay(hwnd: HWND) {
     let Some(ov) = overlay_by_hwnd(hwnd) else {
         return;
     };
@@ -741,7 +741,7 @@ pub unsafe fn reposition_overlay(hwnd: HWND) {
 /// the once-per-second geometry tick and immediately after a measured
 /// resize: growing the width while keeping the old left edge would push a
 /// right-anchored overlay into the tray until the next tick.
-pub unsafe fn apply_position(hwnd: HWND) {
+pub(crate) unsafe fn apply_position(hwnd: HWND) {
     let Some(ov) = overlay_by_hwnd(hwnd) else {
         return;
     };
@@ -763,7 +763,7 @@ pub unsafe fn apply_position(hwnd: HWND) {
     apply_position_with_info(hwnd, info);
 }
 
-pub unsafe fn apply_position_with_info(hwnd: HWND, info: TaskbarInfo) {
+pub(crate) unsafe fn apply_position_with_info(hwnd: HWND, info: TaskbarInfo) {
     // Taskbar is on screen: keep the indicator in the topmost band (it can
     // be re-banded below shell flyouts between ticks; see maintain_topmost).
     maintain_topmost(hwnd);
@@ -871,7 +871,7 @@ pub unsafe fn apply_position_with_info(hwnd: HWND, info: TaskbarInfo) {
 
 /// Primary taskbar window. Re-queried after every explorer restart; the
 /// overlay uses it as its owner so the two share a z-band.
-pub unsafe fn find_taskbar() -> Option<HWND> {
+pub(crate) unsafe fn find_taskbar() -> Option<HWND> {
     let cls = utf16("Shell_TrayWnd");
     FindWindowW(windows::core::PCWSTR(cls.as_ptr()), None).ok()
 }
@@ -883,7 +883,7 @@ pub unsafe fn find_taskbar() -> Option<HWND> {
 /// owned window follows its owner's band automatically. `HWND_TOPMOST`
 /// alone cannot cross bands, which is why the previous per-tick assertion
 /// only produced a one-second flicker.
-pub unsafe fn create_overlay(owner: Option<HWND>) -> Option<HWND> {
+pub(crate) unsafe fn create_overlay(owner: Option<HWND>) -> Option<HWND> {
     let hmodule = GetModuleHandleW(None).ok()?;
     let class_name = utf16("SysVitalsOverlay");
     let title = utf16("SysVitals");
@@ -922,7 +922,7 @@ pub unsafe fn create_overlay(owner: Option<HWND>) -> Option<HWND> {
 /// not have one yet. Called at startup, on `TaskbarCreated`, on display
 /// changes, and by the move tick (which also catches secondary bars that
 /// appear a moment after the main one, and hot-plugged monitors).
-pub unsafe fn reconcile_overlays() {
+pub(crate) unsafe fn reconcile_overlays() {
     if QUITTING.load(Ordering::Relaxed) {
         return;
     }
@@ -1005,7 +1005,7 @@ pub unsafe fn reconcile_overlays() {
 /// Re-place every overlay against its own taskbar. Per-overlay show/hide
 /// follows each taskbar's visibility (auto-hide, fullscreen on that
 /// monitor), so one hidden bar does not affect the others.
-pub fn reposition_all() {
+pub(crate) fn reposition_all() {
     let hwnds: Vec<HWND> = OVERLAYS.with(|slot| slot.borrow().iter().map(|o| o.hwnd).collect());
     for hwnd in hwnds {
         unsafe { reposition_overlay(hwnd) };

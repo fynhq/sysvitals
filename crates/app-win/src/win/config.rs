@@ -4,7 +4,7 @@ use super::*;
 
 // ------------------------------------------------------------ config access
 
-pub fn config() -> Config {
+pub(crate) fn config() -> Config {
     CONFIG
         .get_or_init(|| {
             // A missing or broken config file must not stop the indicator:
@@ -44,13 +44,13 @@ pub fn config() -> Config {
         .clone()
 }
 
-pub fn store_config(new: Config) {
+pub(crate) fn store_config(new: Config) {
     if let Some(slot) = CONFIG.get() {
         *slot.write().expect("config lock") = new;
     }
 }
 
-pub fn log_config_issues(issues: &[sysvitals_core::config::SanitizeIssue]) {
+pub(crate) fn log_config_issues(issues: &[sysvitals_core::config::SanitizeIssue]) {
     for issue in issues {
         log_event(
             "WARN",
@@ -68,7 +68,7 @@ pub fn log_config_issues(issues: &[sysvitals_core::config::SanitizeIssue]) {
 
 /// Read a REG_SZ value from HKCU; `None` when absent or unreadable. Used
 /// only to avoid rewriting/logging an unchanged Run entry.
-pub unsafe fn hkcu_string(key: &str, value: &str) -> Option<String> {
+pub(crate) unsafe fn hkcu_string(key: &str, value: &str) -> Option<String> {
     let key = utf16(key);
     let value = utf16(value);
     let mut hkey = HKEY::default();
@@ -106,7 +106,7 @@ pub unsafe fn hkcu_string(key: &str, value: &str) -> Option<String> {
 /// actually changed. The value is the quoted path to this executable, so
 /// moving the folder and launching from the new copy repairs the entry on
 /// the next start.
-pub unsafe fn set_auto_start(enabled: bool) -> Result<bool, String> {
+pub(crate) unsafe fn set_auto_start(enabled: bool) -> Result<bool, String> {
     let key = utf16(RUN_KEY);
     let value = utf16(RUN_VALUE);
     if enabled {
@@ -149,7 +149,7 @@ pub unsafe fn set_auto_start(enabled: bool) -> Result<bool, String> {
 
 /// Apply the login-startup preference once per value change. The settings
 /// window writes the config; this process owns the registry side effect.
-pub fn apply_auto_start(cfg: &Config) {
+pub(crate) fn apply_auto_start(cfg: &Config) {
     // A `false` that merely came from the default (or a config re-created
     // after a corrupt file was backed up) is not an explicit user choice,
     // so it must not remove a login item. A legacy `true` is still safe
@@ -192,7 +192,7 @@ pub fn apply_auto_start(cfg: &Config) {
 
 /// Read the config file's last-modified time as nanoseconds since UNIX
 /// epoch. Returns 0 when the file does not exist or cannot be read.
-pub fn config_mtime() -> u64 {
+pub(crate) fn config_mtime() -> u64 {
     let Ok(path) = sysvitals_core::config::config_path() else {
         return 0;
     };
@@ -211,7 +211,7 @@ pub fn config_mtime() -> u64 {
 /// Called on each TIMER_CONFIG tick. Compares the config file's mtime
 /// against the cached value; on change, reloads the config, re-seeds the
 /// sample timer (interval may have changed), and re-lays out every overlay.
-pub fn poll_config_change() {
+pub(crate) fn poll_config_change() {
     let current = config_mtime();
     let previous = CONFIG_MTIME.load(Ordering::Relaxed);
     if current == previous {

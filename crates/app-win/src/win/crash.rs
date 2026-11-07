@@ -7,7 +7,7 @@ use super::*;
 /// Install crash diagnostics: the shared Rust panic hook plus a Win32
 /// unhandled exception filter. Both write the crash reason to the log
 /// file so a silent process death becomes diagnosable.
-pub fn install_crash_hooks() {
+pub(crate) fn install_crash_hooks() {
     sysvitals_support::install_panic_hook();
     unsafe {
         SetUnhandledExceptionFilter(Some(unhandled_exception_filter));
@@ -34,7 +34,7 @@ unsafe extern "system" fn unhandled_exception_filter(info: *const EXCEPTION_POIN
 }
 
 /// Best-effort: return the module file name that contains `addr`.
-pub unsafe fn module_name_for_address(addr: *mut std::ffi::c_void) -> String {
+pub(crate) unsafe fn module_name_for_address(addr: *mut std::ffi::c_void) -> String {
     let mut hmod = windows::Win32::Foundation::HMODULE::default();
     let ok = GetModuleHandleExW(
         GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,

@@ -6,7 +6,7 @@ use super::*;
 /// with the settings panel). Absent, malformed, or degenerate rectangles
 /// yield `None`, which keeps the old centered behavior — a bad argument must
 /// never prevent the window from opening.
-pub fn parse_anchor() -> Option<AnchorRect> {
+pub(crate) fn parse_anchor() -> Option<AnchorRect> {
     let args: Vec<String> = env::args().skip(1).collect();
     sysvitals_core::cli::parse_anchor(&args)
 }
@@ -15,7 +15,7 @@ pub fn parse_anchor() -> Option<AnchorRect> {
 /// display handle (HMONITOR on Windows, NSScreenNumber on macOS) that hosted
 /// the indicator. `None` when absent, zero, or malformed. The pure parsing
 /// lives in `core::cli` (unit-tested there).
-pub fn parse_anchor_monitor() -> Option<DisplayId> {
+pub(crate) fn parse_anchor_monitor() -> Option<DisplayId> {
     let args: Vec<String> = env::args().skip(1).collect();
     sysvitals_core::cli::parse_anchor_monitor(&args).map(DisplayId::new)
 }
@@ -26,7 +26,7 @@ pub fn parse_anchor_monitor() -> Option<DisplayId> {
 /// (`sysvitals_panel::anchor_visible_bounds`: the native monitor handle is
 /// authoritative when passed, the rectangle midpoint probe is the fallback
 /// for launches without it); this wrapper adds the last-resort defaults.
-pub fn anchor_work_area(
+pub(crate) fn anchor_work_area(
     anchor: &AnchorRect,
     monitor: Option<DisplayId>,
     cx: &App,
@@ -39,7 +39,7 @@ pub fn anchor_work_area(
 /// Logical breathing room between the popup and the edges it is placed
 /// against: the taskbar/menu-bar side and, when the anchor sits close to a
 /// monitor edge, the left/right work-area edges too.
-pub const POPUP_GAP: f32 = 8.0;
+pub(crate) const POPUP_GAP: f32 = 8.0;
 
 /// Origin for the popup. The indicator sits inside the taskbar/menu bar,
 /// which is *outside* the work area, so anchoring to `anchor.top - gap`
@@ -47,7 +47,7 @@ pub const POPUP_GAP: f32 = 8.0;
 /// work-area edge instead, with the same breathing room the shell's own
 /// tray flyouts use. The bar side is inferred from the anchor being outside
 /// the work area on that edge.
-pub fn anchor_origin(
+pub(crate) fn anchor_origin(
     anchor: &AnchorRect,
     size_w: f32,
     size_h: f32,

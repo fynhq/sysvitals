@@ -8,17 +8,17 @@ use super::*;
 /// keeps a read/write view of it for its whole lifetime; the one-shot macOS
 /// path never maps it.
 #[cfg(windows)]
-pub struct HistoryShared {
-    pub state: *mut sysvitals_core::HistoryState,
+pub(crate) struct HistoryShared {
+    pub(crate) state: *mut sysvitals_core::HistoryState,
 }
 
 #[cfg(windows)]
 impl HistoryShared {
-    pub fn snapshot(&self) -> sysvitals_core::HistoryState {
+    pub(crate) fn snapshot(&self) -> sysvitals_core::HistoryState {
         unsafe { sysvitals_core::HistoryState::read_consistent(self.state) }
     }
 
-    pub fn set_visible(&self, visible: bool) {
+    pub(crate) fn set_visible(&self, visible: bool) {
         unsafe { sysvitals_core::HistoryState::write_visible(self.state, visible) }
     }
 
@@ -27,17 +27,17 @@ impl HistoryShared {
     /// `visible` flag is cleared: `desired_open` belongs to the indicator,
     /// and writing it here used to race a fresh click and swallow it. The
     /// resident loop records the dismissed generation locally instead.
-    pub fn mark_hidden(&self) {
+    pub(crate) fn mark_hidden(&self) {
         self.set_visible(false);
     }
 }
 
 #[cfg(not(windows))]
-pub struct HistoryShared;
+pub(crate) struct HistoryShared;
 
 #[cfg(not(windows))]
 impl HistoryShared {
-    pub fn mark_hidden(&self) {}
+    pub(crate) fn mark_hidden(&self) {}
 }
 
 /// Open the indicator-owned state block. A missing block — or one that fails
@@ -45,7 +45,7 @@ impl HistoryShared {
 /// means this process was not started by a resident-capable overlay, so it
 /// exits instead of lingering invisibly.
 #[cfg(windows)]
-pub fn open_history_state() -> Option<*mut sysvitals_core::HistoryState> {
+pub(crate) fn open_history_state() -> Option<*mut sysvitals_core::HistoryState> {
     let name = utf16(sysvitals_core::HISTORY_STATE_MAP);
     unsafe {
         let mapping = OpenFileMappingW(
@@ -83,7 +83,7 @@ pub fn open_history_state() -> Option<*mut sysvitals_core::HistoryState> {
 /// `--parent-pid <pid>`: the process exits when the indicator does, even if
 /// the launcher never gets a chance to terminate it. The pure parsing lives
 /// in `core::cli` (shared with the settings panel).
-pub fn parse_parent_pid() -> Option<u32> {
+pub(crate) fn parse_parent_pid() -> Option<u32> {
     let args: Vec<String> = env::args().skip(1).collect();
     sysvitals_core::cli::parse_parent_pid(&args)
 }
@@ -93,12 +93,12 @@ pub fn parse_parent_pid() -> Option<u32> {
 /// process-handle check in `run_resident`. Shared one-second poll in
 /// `sysvitals_panel::watch_parent`.
 #[cfg(target_os = "macos")]
-pub fn watch_parent(cx: &mut App) {
+pub(crate) fn watch_parent(cx: &mut App) {
     sysvitals_panel::watch_parent(cx, "history");
 }
 
 #[cfg(windows)]
-pub fn trim_working_set() {
+pub(crate) fn trim_working_set() {
     unsafe {
         // SIZE_T(-1) asks Windows to trim the process to its minimum working
         // set. Private commit stays allocated; what the user sees in Task
@@ -112,7 +112,7 @@ pub fn trim_working_set() {
 /// trim the working set while idle. The window is created hidden and shown
 /// after its first chart load so the first visible frame already has data.
 #[cfg(windows)]
-pub fn run_resident(cx: &mut App) {
+pub(crate) fn run_resident(cx: &mut App) {
     let Some(state) = open_history_state() else {
         log_event(
             "WARN",

@@ -4,7 +4,10 @@ use super::*;
 
 /// Move a corrupt config aside before the settings window can overwrite it
 /// with defaults. Returns the backup path when the rename succeeded.
-pub fn backup_corrupt_config(path: &std::path::Path, reason: &str) -> Option<std::path::PathBuf> {
+pub(crate) fn backup_corrupt_config(
+    path: &std::path::Path,
+    reason: &str,
+) -> Option<std::path::PathBuf> {
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
@@ -40,7 +43,7 @@ pub fn backup_corrupt_config(path: &std::path::Path, reason: &str) -> Option<std
 /// Load the config, backing up a malformed or non-UTF-8 file before falling
 /// back to defaults. Without the backup the first instant-save would
 /// overwrite the user's (hand-edited) file with defaults.
-pub fn load_config_with_backup() -> Config {
+pub(crate) fn load_config_with_backup() -> Config {
     let Ok(path) = sysvitals_core::config::config_path() else {
         log_event(
             "WARN",

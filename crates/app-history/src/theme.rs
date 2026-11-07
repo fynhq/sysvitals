@@ -8,7 +8,7 @@ use super::*;
 
 /// Re-apply the shared theme/accent/material stack, then the history-only
 /// chart-hairline, button-state and font overrides.
-pub fn apply_theme_and_accent(cx: &mut App) {
+pub(crate) fn apply_theme_and_accent(cx: &mut App) {
     sysvitals_panel::apply_theme_and_accent(cx, PanelSurface::History);
     // The library's `chart_grid` falls back to `border.opacity(0.6)`, and
     // the dark palette's border is a near-black neutral, so the grid read as

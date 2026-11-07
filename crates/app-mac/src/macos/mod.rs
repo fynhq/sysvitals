@@ -2,7 +2,14 @@
 //!
 //! Shared state and the application bootstrap live here; rendering,
 //! the tick loop, child processes, the context menu and config handling
-//! are split into submodules.
+//! are split into submodules:
+//! - `render`   — template image, status-item mounting, accessibility.
+//! - `tick`     — timer scheduling, sampling and history recording.
+//! - `children` — Settings/History processes and anchor arguments.
+//! - `menu`     — the native context menu.
+//! - `config`   — hot reload and login-item application.
+//!
+//! All items in this binary are crate-internal (`pub(crate)`).
 
 mod children;
 mod config;
@@ -10,11 +17,11 @@ mod menu;
 mod render;
 mod tick;
 
-pub use children::*;
-pub use config::*;
-pub use menu::*;
-pub use render::*;
-pub use tick::*;
+pub(crate) use children::*;
+pub(crate) use config::*;
+pub(crate) use menu::*;
+pub(crate) use render::*;
+pub(crate) use tick::*;
 
 use std::cell::RefCell;
 use std::os::fd::AsRawFd;
@@ -382,7 +389,7 @@ impl ActionHandler {
     }
 }
 
-pub fn run() {
+pub(crate) fn run() {
     // Crash diagnostics and the single-instance guard run before anything
     // else, mirroring the Windows overlay's startup sequence. A second
     // launch exits quietly; the lock is held via an fd that is deliberately

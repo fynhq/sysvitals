@@ -8,7 +8,7 @@ use super::*;
 /// live on a double-click of the indicator; putting it in the context
 /// menu is what lets the left click open the trend chart immediately,
 /// without waiting for a possible second press.
-pub unsafe fn launch_taskmgr() {
+pub(crate) unsafe fn launch_taskmgr() {
     let verb = utf16("open");
     let target = utf16("taskmgr.exe");
     let _ = ShellExecuteW(
@@ -24,13 +24,13 @@ pub unsafe fn launch_taskmgr() {
 /// One row of the context menu. Separators use `id == 0` and an empty
 /// label.
 #[derive(Clone)]
-pub struct MenuEntry {
-    pub id: usize,
-    pub label: String,
-    pub separator: bool,
+pub(crate) struct MenuEntry {
+    pub(crate) id: usize,
+    pub(crate) label: String,
+    pub(crate) separator: bool,
 }
 
-pub fn menu_entries(lang: Language) -> Vec<MenuEntry> {
+pub(crate) fn menu_entries(lang: Language) -> Vec<MenuEntry> {
     // Order: system resource viewer first (most actionable when the
     // indicator is in the way), then Settings, then the lifecycle group.
     vec![
@@ -65,7 +65,7 @@ pub fn menu_entries(lang: Language) -> Vec<MenuEntry> {
 /// The context menu is the system popup menu. It is the only menu
 /// surface the shell renders natively, so it keeps system theming,
 /// hit-testing and dismissal semantics without a second message loop.
-pub unsafe fn show_native_menu(owner: HWND, entries: &[MenuEntry]) -> Option<usize> {
+pub(crate) unsafe fn show_native_menu(owner: HWND, entries: &[MenuEntry]) -> Option<usize> {
     let menu = CreatePopupMenu().ok()?;
     for entry in entries {
         if entry.separator {
@@ -101,7 +101,7 @@ pub unsafe fn show_native_menu(owner: HWND, entries: &[MenuEntry]) -> Option<usi
     Some(choice)
 }
 
-pub unsafe fn perform_menu_choice(hwnd: HWND, choice: usize) {
+pub(crate) unsafe fn perform_menu_choice(hwnd: HWND, choice: usize) {
     match choice {
         id if id == IDM_TASKMGR => launch_taskmgr(),
         id if id == IDM_SETTINGS => launch_settings(hwnd),
@@ -118,7 +118,7 @@ pub unsafe fn perform_menu_choice(hwnd: HWND, choice: usize) {
 /// loop. Shared by Quit and Restart (which schedules a relaunch first).
 /// `QUITTING` is set before the windows are torn down so their
 /// `WM_DESTROY` handlers treat it as an intentional exit.
-pub unsafe fn shutdown_and_quit() {
+pub(crate) unsafe fn shutdown_and_quit() {
     QUITTING.store(true, Ordering::Relaxed);
     let hwnds: Vec<HWND> = OVERLAYS.with(|slot| slot.borrow().iter().map(|o| o.hwnd).collect());
     for hwnd in hwnds {
@@ -134,7 +134,7 @@ pub unsafe fn shutdown_and_quit() {
     PostQuitMessage(0);
 }
 
-pub unsafe fn show_context_menu(hwnd: HWND) {
+pub(crate) unsafe fn show_context_menu(hwnd: HWND) {
     let entries = menu_entries(config().display.language);
     // Keep maintain_topmost from lifting the overlay above the menu while
     // it is open (the modal loop still dispatches our WM_TIMER).

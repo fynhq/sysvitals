@@ -31,10 +31,10 @@ thread_local! {
 
 /// Keeps a second popup from nesting inside an already tracking menu
 /// (two fast clicks can defer two popups). Reset on every exit path.
-pub struct MenuGuard;
+pub(crate) struct MenuGuard;
 
 impl MenuGuard {
-    pub fn acquire() -> Option<Self> {
+    pub(crate) fn acquire() -> Option<Self> {
         MENU_OPEN.with(|open| (!open.replace(true)).then_some(Self))
     }
 }
@@ -65,7 +65,7 @@ define_class!(
 );
 
 impl MenuTarget {
-    pub fn new(mtm: MainThreadMarker) -> Retained<Self> {
+    pub(crate) fn new(mtm: MainThreadMarker) -> Retained<Self> {
         let this = Self::alloc(mtm);
         // SAFETY: MenuTarget does not override init; this dispatches to
         // NSObject's init, avoiding the super() wrapper's RetainSemantics
@@ -78,7 +78,7 @@ impl MenuTarget {
 /// index. The current item carries the system checkmark. `None` means the
 /// menu was dismissed without a selection, another menu is already open,
 /// or no window was available.
-pub fn show(items: &[String], selected: usize) -> Option<usize> {
+pub(crate) fn show(items: &[String], selected: usize) -> Option<usize> {
     if items.is_empty() {
         return None;
     }
@@ -138,12 +138,12 @@ pub fn show(items: &[String], selected: usize) -> Option<usize> {
 
 #[cfg(target_os = "macos")]
 #[derive(Copy, Clone)]
-pub struct MacSelectStyle {
-    pub background: Hsla,
-    pub foreground: Hsla,
-    pub border: Hsla,
-    pub caret: Hsla,
-    pub radius: Pixels,
+pub(crate) struct MacSelectStyle {
+    pub(crate) background: Hsla,
+    pub(crate) foreground: Hsla,
+    pub(crate) border: Hsla,
+    pub(crate) caret: Hsla,
+    pub(crate) radius: Pixels,
 }
 
 /// Raise the native menu for a macOS dropdown and commit the chosen index.
@@ -157,7 +157,7 @@ pub struct MacSelectStyle {
 /// has returned and no GPUI state is borrowed while the menu tracks; the
 /// selection is applied afterwards.
 #[cfg(target_os = "macos")]
-pub fn mac_select_popup(
+pub(crate) fn mac_select_popup(
     cx: &mut Context<SettingsView>,
     items: Vec<String>,
     selected: usize,
@@ -188,7 +188,7 @@ pub fn mac_select_popup(
 /// popover. Width is owned by the caller so all three dropdowns keep their
 /// existing layout slots.
 #[cfg(target_os = "macos")]
-pub fn mac_select_trigger(
+pub(crate) fn mac_select_trigger(
     id: &'static str,
     label: String,
     style: MacSelectStyle,

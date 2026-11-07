@@ -6,7 +6,7 @@ use super::*;
 /// ticks are dispatched from inside `NSApplication::run`; the startup tick
 /// runs earlier, so accessibility/tooltip updates are applied from the
 /// timer ticks instead of from that first tick.
-pub fn timer_tick() {
+pub(crate) fn timer_tick() {
     IN_RUN_LOOP.set(true);
     tick();
     IN_RUN_LOOP.set(false);
@@ -18,7 +18,7 @@ pub fn timer_tick() {
 /// — the macOS counterpart of the Windows overlay re-seeding its sample
 /// timer on config change (previously the interval was read once at startup
 /// and never updated live).
-pub fn reschedule_if_interval_changed() {
+pub(crate) fn reschedule_if_interval_changed() {
     let interval_ms = CONFIG.with(|c| c.borrow().sample.interval_ms);
     if APPLIED_INTERVAL_MS.get() == interval_ms {
         return;
@@ -49,7 +49,7 @@ pub fn reschedule_if_interval_changed() {
 /// writer. The main RunLoop never opens or writes SQLite; a slow disk, an
 /// old-database rollup backfill, or a prune/VACUUM cannot freeze the menu
 /// bar.
-pub fn record_history(cfg: &Config, now: i64, snapshot: &sysvitals_core::Snapshot) {
+pub(crate) fn record_history(cfg: &Config, now: i64, snapshot: &sysvitals_core::Snapshot) {
     if !cfg.history.enabled {
         return;
     }
@@ -109,7 +109,7 @@ pub fn record_history(cfg: &Config, now: i64, snapshot: &sysvitals_core::Snapsho
 }
 
 /// Sample metrics, record the history row, and update the indicator.
-pub fn tick() {
+pub(crate) fn tick() {
     reload_config_if_changed();
     reschedule_if_interval_changed();
     reap_children();

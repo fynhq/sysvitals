@@ -6,30 +6,30 @@ use super::*;
 
 /// Geometry of one frame measured with the font currently selected into
 /// `hdc`.
-pub struct FrameMetrics {
-    pub line_h: i32,
-    pub want_w: i32,
-    pub right_x: Option<i32>,
-    pub multi_line: bool,
-    pub item_widths: Option<Vec<i32>>,
+pub(crate) struct FrameMetrics {
+    pub(crate) line_h: i32,
+    pub(crate) want_w: i32,
+    pub(crate) right_x: Option<i32>,
+    pub(crate) multi_line: bool,
+    pub(crate) item_widths: Option<Vec<i32>>,
     /// Vertical layout only: height of each line slot in pixels, in line
     /// order. Blank separator lines take `item_spacing` (the same gap the
     /// horizontal single-row layout puts between metrics) instead of a
     /// full text line, so both layouts use one consistent block gap and
     /// the column stays short. Empty for the other layouts, where every
     /// line slot has the uniform `line_h`.
-    pub line_heights: Vec<i32>,
+    pub(crate) line_heights: Vec<i32>,
 }
 
 /// Whether a blank line is the vertical layout's inter-block separator
 /// rather than content. The vertical frame is the only multi-line,
 /// single-column frame whose lines can be empty (the stacked builder
 /// inserts one blank line between metric blocks).
-pub fn is_vertical_separator(line: &sysvitals_core::Line) -> bool {
+pub(crate) fn is_vertical_separator(line: &sysvitals_core::Line) -> bool {
     line.left.is_empty() && line.right.is_empty()
 }
 
-pub unsafe fn measure_frame(
+pub(crate) unsafe fn measure_frame(
     hdc: windows::Win32::Graphics::Gdi::HDC,
     row: &FormattedRow,
     spacing_px: i32,
@@ -130,7 +130,7 @@ pub unsafe fn measure_frame(
 /// ever grows; height follows the row count, and in the vertical layout
 /// the per-line slot heights from [`measure_frame`] (separator lines
 /// sized to `item_spacing`, not a full text line).
-pub unsafe fn resize_overlay(hwnd: HWND, row: &FormattedRow, vertical: bool) {
+pub(crate) unsafe fn resize_overlay(hwnd: HWND, row: &FormattedRow, vertical: bool) {
     let cfg = config();
     let spacing_px = cfg.display.item_spacing as i32;
     let hdc = GetDC(Some(hwnd));
@@ -161,7 +161,7 @@ pub unsafe fn resize_overlay(hwnd: HWND, row: &FormattedRow, vertical: bool) {
 /// history database and re-layout every overlay from it. All overlays
 /// share this one sample so network rates are computed over the full
 /// interval regardless of how many taskbars are showing.
-pub unsafe fn sample_tick() {
+pub(crate) unsafe fn sample_tick() {
     let cfg = config();
     let wall = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -185,7 +185,7 @@ pub unsafe fn sample_tick() {
 }
 
 /// Re-layout and redraw every overlay from the last sample.
-pub fn relayout_all() {
+pub(crate) fn relayout_all() {
     let hwnds: Vec<HWND> = OVERLAYS.with(|slot| slot.borrow().iter().map(|o| o.hwnd).collect());
     for hwnd in hwnds {
         unsafe { relayout_overlay(hwnd) };
@@ -198,7 +198,7 @@ pub fn relayout_all() {
 /// unrelated setting change used to compute network rates over a few
 /// milliseconds and paint a bogus spike. Only the periodic timer (and
 /// startup) samples.
-pub unsafe fn relayout_overlay(hwnd: HWND) {
+pub(crate) unsafe fn relayout_overlay(hwnd: HWND) {
     let Some(ov) = overlay_by_hwnd(hwnd) else {
         return;
     };
@@ -238,7 +238,7 @@ pub unsafe fn relayout_overlay(hwnd: HWND) {
 /// backfill or a prune/VACUUM can take seconds, which would freeze the
 /// taskbar message loop. The writer owns the open/insert/prune policy and
 /// its own failure logging.
-pub fn record_history(cfg: &Config, now: i64, snapshot: &sysvitals_core::Snapshot) {
+pub(crate) fn record_history(cfg: &Config, now: i64, snapshot: &sysvitals_core::Snapshot) {
     const WRITER_RETRY_COOLDOWN: Duration = Duration::from_secs(300);
     if !cfg.history.enabled {
         return;
@@ -298,7 +298,7 @@ pub fn record_history(cfg: &Config, now: i64, snapshot: &sysvitals_core::Snapsho
 /// Render a frame into a 32bpp premultiplied-alpha DIB and blit it onto
 /// the layered window with `UpdateLayeredWindow`. Glyphs are rendered at
 /// 2x supersampled resolution and box-filtered down.
-pub unsafe fn render_layered(hwnd: HWND, row: &FormattedRow, vertical: bool) {
+pub(crate) unsafe fn render_layered(hwnd: HWND, row: &FormattedRow, vertical: bool) {
     let mut win_rc = RECT::default();
     if GetWindowRect(hwnd, &mut win_rc).is_err() {
         return;

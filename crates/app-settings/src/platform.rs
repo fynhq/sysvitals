@@ -11,12 +11,12 @@ use super::*;
 /// the very same HKCU value as the overlay (`sysvitals_support::taskbar_al`)
 /// so the two can never disagree.
 #[cfg(windows)]
-pub fn layout_available() -> bool {
+pub(crate) fn layout_available() -> bool {
     taskbar_al() == Some(1)
 }
 
 #[cfg(not(windows))]
-pub fn layout_available() -> bool {
+pub(crate) fn layout_available() -> bool {
     false
 }
 
@@ -27,7 +27,7 @@ pub fn layout_available() -> bool {
 /// `false` anywhere the probe fails (macOS, hidden taskbar, pre-registered
 /// shell) keeps the previous UI surface untouched.
 #[cfg(windows)]
-pub fn taskbar_is_vertical() -> bool {
+pub(crate) fn taskbar_is_vertical() -> bool {
     use windows::Win32::UI::Shell::{
         SHAppBarMessage, ABE_LEFT, ABE_RIGHT, ABM_GETTASKBARPOS, APPBARDATA,
     };
@@ -62,7 +62,7 @@ pub fn taskbar_is_vertical() -> bool {
 }
 
 #[cfg(not(windows))]
-pub fn taskbar_is_vertical() -> bool {
+pub(crate) fn taskbar_is_vertical() -> bool {
     false
 }
 
@@ -70,7 +70,7 @@ pub fn taskbar_is_vertical() -> bool {
 /// second window has its own startup snapshot and would overwrite the first
 /// one's edits on its next save, so duplicate launches exit quietly.
 #[cfg(windows)]
-pub fn acquire_single_instance() -> bool {
+pub(crate) fn acquire_single_instance() -> bool {
     use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
     use windows::Win32::System::Threading::CreateMutexW;
     let name = utf16("Local\\SysVitalsSettings_SingleInstance");
@@ -97,7 +97,7 @@ pub fn acquire_single_instance() -> bool {
 }
 
 #[cfg(target_os = "macos")]
-pub fn acquire_single_instance() -> bool {
+pub(crate) fn acquire_single_instance() -> bool {
     use std::os::fd::AsRawFd;
     let Ok(dir) = sysvitals_core::config::data_dir() else {
         log_event(
@@ -139,19 +139,19 @@ pub fn acquire_single_instance() -> bool {
 }
 
 #[cfg(not(any(windows, target_os = "macos")))]
-pub fn acquire_single_instance() -> bool {
+pub(crate) fn acquire_single_instance() -> bool {
     true
 }
 
 #[cfg(windows)]
-pub static SETTINGS_INSTANCE: std::sync::Mutex<Option<isize>> = std::sync::Mutex::new(None);
+pub(crate) static SETTINGS_INSTANCE: std::sync::Mutex<Option<isize>> = std::sync::Mutex::new(None);
 #[cfg(target_os = "macos")]
-pub static SETTINGS_INSTANCE_FILE: std::sync::Mutex<Option<std::fs::File>> =
+pub(crate) static SETTINGS_INSTANCE_FILE: std::sync::Mutex<Option<std::fs::File>> =
     std::sync::Mutex::new(None);
 
 /// Parse `--parent-pid <pid>`; the pure parsing lives in `core::cli`
 /// (unit-tested there).
-pub fn parse_parent_pid() -> Option<u32> {
+pub(crate) fn parse_parent_pid() -> Option<u32> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     sysvitals_core::cli::parse_parent_pid(&args)
 }
@@ -160,7 +160,7 @@ pub fn parse_parent_pid() -> Option<u32> {
 /// malformed, or degenerate rectangles yield `None`, which keeps the default
 /// centered placement — a bad argument must never prevent the window from
 /// opening.
-pub fn parse_anchor() -> Option<AnchorRect> {
+pub(crate) fn parse_anchor() -> Option<AnchorRect> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     sysvitals_core::cli::parse_anchor(&args)
 }
@@ -169,7 +169,7 @@ pub fn parse_anchor() -> Option<AnchorRect> {
 /// display handle (HMONITOR on Windows, NSScreenNumber on macOS) that hosted
 /// the indicator. `None` when absent, zero, or malformed. The pure parsing
 /// lives in `core::cli` (unit-tested there).
-pub fn parse_anchor_monitor() -> Option<DisplayId> {
+pub(crate) fn parse_anchor_monitor() -> Option<DisplayId> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     sysvitals_core::cli::parse_anchor_monitor(&args).map(DisplayId::new)
 }
@@ -178,7 +178,7 @@ pub fn parse_anchor_monitor() -> Option<DisplayId> {
 /// `check_given_bounds()` only verifies the window center, so a fixed
 /// 400x720 settings window can otherwise spill above/below a short work area
 /// on a high-DPI laptop. Keep a small breathing margin on every edge.
-pub fn fit_window_size(
+pub(crate) fn fit_window_size(
     requested: gpui_kit::Size<Pixels>,
     work: Bounds<Pixels>,
 ) -> gpui_kit::Size<Pixels> {
@@ -191,7 +191,10 @@ pub fn fit_window_size(
     )
 }
 
-pub fn centered_on_work(work: Bounds<Pixels>, requested: gpui_kit::Size<Pixels>) -> WindowBounds {
+pub(crate) fn centered_on_work(
+    work: Bounds<Pixels>,
+    requested: gpui_kit::Size<Pixels>,
+) -> WindowBounds {
     let fitted = fit_window_size(requested, work);
     let center = point(
         px(f32::from(work.origin.x) + f32::from(work.size.width) * 0.5),
@@ -205,7 +208,7 @@ pub fn centered_on_work(work: Bounds<Pixels>, requested: gpui_kit::Size<Pixels>)
 /// Display selection is shared with the history popup
 /// (`sysvitals_panel::anchor_visible_bounds`: native monitor handle first,
 /// rectangle probe fallback); this function only centers on the result.
-pub fn settings_window_bounds(
+pub(crate) fn settings_window_bounds(
     anchor: Option<&AnchorRect>,
     monitor: Option<DisplayId>,
     // `Size` is ambiguous between `gpui::Size<Pixels>` (from `gpui_kit::*`)
@@ -233,7 +236,7 @@ pub fn settings_window_bounds(
 /// ordinary exits, but a monitored parent also catches a child launched
 /// before the job was configured and mirrors the mac behavior.
 #[cfg(windows)]
-pub fn watch_parent(cx: &mut App) {
+pub(crate) fn watch_parent(cx: &mut App) {
     use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_TIMEOUT};
     use windows::Win32::System::Threading::{
         OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
@@ -272,10 +275,10 @@ pub fn watch_parent(cx: &mut App) {
 }
 
 #[cfg(target_os = "macos")]
-pub fn watch_parent(cx: &mut App) {
+pub(crate) fn watch_parent(cx: &mut App) {
     // Shared one-second poll on the launcher pid (see `sysvitals_panel`).
     sysvitals_panel::watch_parent(cx, "settings");
 }
 
 #[cfg(not(any(windows, target_os = "macos")))]
-pub fn watch_parent(_cx: &mut App) {}
+pub(crate) fn watch_parent(_cx: &mut App) {}

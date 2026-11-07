@@ -4,7 +4,7 @@ use super::*;
 
 /// Last-modified time of the config path in nanoseconds, or 0 when the
 /// file does not exist or cannot be read.
-pub fn config_mtime() -> u64 {
+pub(crate) fn config_mtime() -> u64 {
     let Ok(path) = config_path() else {
         return 0;
     };
@@ -16,7 +16,7 @@ pub fn config_mtime() -> u64 {
         .unwrap_or(0)
 }
 
-pub fn log_config_issues(issues: &[sysvitals_core::config::SanitizeIssue]) {
+pub(crate) fn log_config_issues(issues: &[sysvitals_core::config::SanitizeIssue]) {
     for issue in issues {
         log_event(
             "WARN",
@@ -28,7 +28,7 @@ pub fn log_config_issues(issues: &[sysvitals_core::config::SanitizeIssue]) {
 /// Load or reload the config file. The mtime cache only advances after a
 /// successful parse, so a corrupt file keeps the last good config and is
 /// retried when it changes again.
-pub fn reload_config_if_changed() {
+pub(crate) fn reload_config_if_changed() {
     let Ok(path) = config_path() else {
         return;
     };
@@ -96,7 +96,7 @@ pub fn reload_config_if_changed() {
 /// status when a call was made, `None` when the desired state already held.
 /// Status values: 0 not registered, 1 enabled, 2 requires approval,
 /// 3 not found (macOS 13+).
-pub fn set_launch_at_login(enabled: bool) -> Result<Option<isize>, String> {
+pub(crate) fn set_launch_at_login(enabled: bool) -> Result<Option<isize>, String> {
     let cls = AnyClass::get(c"SMAppService")
         .ok_or_else(|| "SMAppService unavailable (requires macOS 13)".to_string())?;
     // Swift exposes this class property as `mainApp`, but the Objective-C
@@ -144,7 +144,7 @@ pub fn set_launch_at_login(enabled: bool) -> Result<Option<isize>, String> {
 
 /// Apply the login-startup preference once per value change. The settings
 /// window writes the config; this process owns the ServiceManagement call.
-pub fn apply_auto_start(cfg: &Config) {
+pub(crate) fn apply_auto_start(cfg: &Config) {
     // See the Windows counterpart: an inherited `false` must not remove
     // a login item; an inherited `true` may still repair/register one.
     if !cfg.startup.auto_start_explicit && !cfg.startup.auto_start {

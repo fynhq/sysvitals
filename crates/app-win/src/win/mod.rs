@@ -26,14 +26,14 @@ mod render;
 mod theme;
 mod wndproc;
 
-pub use children::*;
-pub use config::*;
-pub use crash::*;
-pub use menu::*;
-pub use overlay::*;
-pub use render::*;
-pub use theme::*;
-pub use wndproc::*;
+pub(crate) use children::*;
+pub(crate) use config::*;
+pub(crate) use crash::*;
+pub(crate) use menu::*;
+pub(crate) use overlay::*;
+pub(crate) use render::*;
+pub(crate) use theme::*;
+pub(crate) use wndproc::*;
 
 use std::cell::RefCell;
 use std::sync::atomic::{
