@@ -83,29 +83,6 @@ pub fn floor_to_grid(ts: i64, step: i64, offset: i64) -> i64 {
     (ts + offset).div_euclid(step) * step - offset
 }
 
-/// Which of `len` evenly-spaced data points a chart should label, when it
-/// wants exactly `count` labels spread from the first point to the last:
-/// indices `round(k * (len - 1) / (count - 1))` for `k` in `0..count`. Fewer
-/// points than labels returns every index; `count == 1` returns just the
-/// first. Mirrors the shape the trend chart's axis uses so a caller can
-/// decide, per point, whether its own label text will actually be painted.
-pub fn spread_label_indices(len: usize, count: usize) -> Vec<usize> {
-    match count {
-        0 => Vec::new(),
-        1 => {
-            if len == 0 {
-                Vec::new()
-            } else {
-                vec![0]
-            }
-        }
-        count if count >= len => (0..len).collect(),
-        count => (0..count)
-            .map(|k| (k as f32 * (len - 1) as f32 / (count - 1) as f32).round() as usize)
-            .collect(),
-    }
-}
-
 impl Store {
     /// Open (or create) the database at `path` and ensure the schema exists.
     /// Uses WAL with `synchronous=NORMAL` so steady 1–3s inserts stay cheap and
@@ -125,6 +102,29 @@ impl Store {
         Ok(Self {
             conn,
             rollup_ready,
+            vacuum_pending: Cell::new(false),
+        })
+    }
+
+    /// Open an existing database for reading without running the one-time
+    /// rollup backfill. The history panel uses this on the UI thread: opening
+    /// an old database with [`Store::open`] can spend seconds aggregating the
+    /// raw table, which would freeze the popup. A pre-rollup database stays in
+    /// raw-only mode for this reader; the background history writer performs
+    /// (and heals) the migration.
+    pub fn open_read_only(path: &std::path::Path) -> anyhow::Result<Self> {
+        use rusqlite::OpenFlags;
+        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        conn.busy_timeout(Duration::from_millis(250))?;
+        let version: i32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if version > SCHEMA_VERSION {
+            anyhow::bail!(
+                "history database schema {version} is newer than supported {SCHEMA_VERSION}"
+            );
+        }
+        Ok(Self {
+            conn,
+            rollup_ready: version == SCHEMA_VERSION,
             vacuum_pending: Cell::new(false),
         })
     }
@@ -170,9 +170,6 @@ impl Store {
                  n       INTEGER NOT NULL
              );",
         )?;
-        if version == SCHEMA_VERSION {
-            return Ok(true);
-        }
         let has_raw: bool = conn.query_row("SELECT EXISTS (SELECT 1 FROM samples)", [], |row| {
             row.get(0)
         })?;
@@ -182,25 +179,42 @@ impl Store {
             conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
             return Ok(true);
         }
-        // Old database with raw history but no rollup: aggregate it once.
-        // Take an immediate transaction (with a longer wait than the steady
-        // 250 ms) so a concurrently opening process waits for this backfill
-        // instead of double-aggregating the same minutes.
+        // A schema version only says that *some* process migrated. A writer
+        // that failed its backfill earlier keeps writing raw rows without
+        // rollup rows; if another process later bumps the version, those
+        // samples would never reach `samples_1m` and would disappear with the
+        // 24 h raw prune. Detect uncovered raw rows and heal them on open.
+        let needs_backfill = if version < SCHEMA_VERSION {
+            true
+        } else {
+            conn.query_row(
+                "SELECT EXISTS (
+                     SELECT 1 FROM samples s
+                     LEFT JOIN samples_1m b ON (s.ts / 60) * 60 = b.ts
+                     WHERE b.ts IS NULL
+                 )",
+                [],
+                |row| row.get(0),
+            )?
+        };
+        if !needs_backfill {
+            return Ok(true);
+        }
+        // Aggregate raw history into the rollup. Take an immediate
+        // transaction (with a longer wait than the steady 250 ms) so a
+        // concurrently opening process waits instead of interleaving with
+        // this rewrite; `INSERT OR REPLACE` makes a repeated run harmless.
         conn.busy_timeout(Duration::from_secs(10))?;
         let backfill = (|| -> anyhow::Result<()> {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            // Re-check under the write lock: another process may have won.
-            let version: i32 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
-            if version < SCHEMA_VERSION {
-                tx.execute(
-                    "INSERT OR REPLACE INTO samples_1m (ts, cpu_sum, mem_sum, n)
-                     SELECT (ts / 60) * 60, SUM(cpu), SUM(mem), COUNT(*)
-                     FROM samples
-                     GROUP BY 1",
-                    [],
-                )?;
-                tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-            }
+            tx.execute(
+                "INSERT OR REPLACE INTO samples_1m (ts, cpu_sum, mem_sum, n)
+                 SELECT (ts / 60) * 60, SUM(cpu), SUM(mem), COUNT(*)
+                 FROM samples
+                 GROUP BY 1",
+                [],
+            )?;
+            tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
             tx.commit()?;
             Ok(())
         })();
@@ -684,6 +698,43 @@ mod tests {
     }
 
     #[test]
+    fn version_two_with_uncovered_raw_rows_is_healed() {
+        // Simulates a writer that failed its backfill (raw-only) while another
+        // process later bumped user_version: the raw rows exist, the rollup
+        // rows do not, and only the healing pass can recover them.
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE samples (ts INTEGER PRIMARY KEY, cpu REAL NOT NULL, mem REAL NOT NULL);
+             CREATE TABLE samples_1m (
+                 ts INTEGER PRIMARY KEY, cpu_sum REAL NOT NULL,
+                 mem_sum REAL NOT NULL, n INTEGER NOT NULL
+             );
+             INSERT INTO samples (ts, cpu, mem) VALUES (60, 10.0, 20.0), (65, 30.0, 40.0);
+             INSERT INTO samples_1m (ts, cpu_sum, mem_sum, n) VALUES (120, 5.0, 6.0, 1);",
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION)
+            .unwrap();
+        assert!(Store::init_schema(&mut conn).unwrap());
+        let rows: Vec<(i64, f64, f64, i64)> = {
+            let mut stmt = conn
+                .prepare("SELECT ts, cpu_sum, mem_sum, n FROM samples_1m ORDER BY ts")
+                .unwrap();
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        assert_eq!(rows, vec![(60, 40.0, 60.0, 2), (120, 5.0, 6.0, 1)]);
+        // A healthy database is left untouched and reports ready.
+        assert!(Store::init_schema(&mut conn).unwrap());
+        let total: i64 = conn
+            .query_row("SELECT SUM(n) FROM samples_1m", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(total, 3);
+    }
+
+    #[test]
     fn future_schema_is_rejected_instead_of_assumed_compatible() {
         let mut conn = Connection::open_in_memory().unwrap();
         conn.pragma_update(None, "user_version", SCHEMA_VERSION + 1)
@@ -734,27 +785,5 @@ mod tests {
         assert_eq!(floor_to_grid(-5, 10, 0), -10);
         // A zero/garbage step is clamped to 1, never a division by zero.
         assert_eq!(floor_to_grid(42, 0, 0), 42);
-    }
-
-    #[test]
-    fn spread_label_indices_pins_ends_and_stays_unique() {
-        // 6 of 15 points: first and last are always labeled, indices advance.
-        let idx = spread_label_indices(15, 6);
-        assert_eq!(idx.len(), 6);
-        assert_eq!(idx.first(), Some(&0));
-        assert_eq!(idx.last(), Some(&14));
-        let mut sorted = idx.clone();
-        sorted.dedup();
-        assert_eq!(sorted.len(), idx.len(), "no index repeats");
-        // Fewer points than labels: every point gets a label.
-        assert_eq!(spread_label_indices(3, 6), vec![0, 1, 2]);
-        // Degenerate inputs never panic and never invent an index.
-        assert_eq!(spread_label_indices(0, 6), Vec::<usize>::new());
-        assert_eq!(spread_label_indices(10, 0), Vec::<usize>::new());
-        assert_eq!(spread_label_indices(10, 1), vec![0]);
-        // Every returned index is inside the data range.
-        for i in spread_label_indices(100, 6) {
-            assert!(i < 100);
-        }
     }
 }

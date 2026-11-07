@@ -45,8 +45,15 @@ impl NetSelection {
     /// that with the native Windows hardware set when it is readable);
     /// explicit mode requires an exact name match.
     pub fn matches(&self, name: &str) -> bool {
+        self.matches_with_hardware(name, None)
+    }
+
+    /// [`Self::matches`] with the native hardware-interface set injected for
+    /// auto mode. All selection consumers use this one predicate so a change
+    /// to the auto policy cannot drift between the native and sysinfo paths.
+    pub fn matches_with_hardware(&self, name: &str, hardware: Option<&HashSet<String>>) -> bool {
         match self {
-            NetSelection::Auto => auto_matches(name, None),
+            NetSelection::Auto => auto_matches(name, hardware),
             NetSelection::Interfaces(list) => list.iter().any(|n| n == name),
         }
     }
@@ -290,10 +297,7 @@ fn collect_frame(
             // form is exact in practice and keeps selection matched against
             // the configured text.
             let name = name.to_string_lossy();
-            let selected = match selection {
-                NetSelection::Auto => auto_matches(name.as_ref(), hardware),
-                NetSelection::Interfaces(list) => list.iter().any(|n| n == name.as_ref()),
-            };
+            let selected = selection.matches_with_hardware(name.as_ref(), hardware);
             if selected {
                 Some((
                     name.into_owned(),

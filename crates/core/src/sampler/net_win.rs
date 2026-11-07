@@ -50,8 +50,8 @@ pub(crate) fn native_counters(selection: &NetSelection) -> Option<CounterFrame> 
             let Some(name) = alias_string(&row.Alias) else {
                 continue;
             };
-            if let NetSelection::Interfaces(list) = selection {
-                if !list.contains(&name) {
+            if let NetSelection::Interfaces(_) = selection {
+                if !selection.matches(&name) {
                     continue;
                 }
             }

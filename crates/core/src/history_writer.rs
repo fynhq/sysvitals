@@ -14,6 +14,7 @@
 //! - insert/prune failures are logged once per failure streak, and the flag
 //!   is cleared after a later success so a new failure is visible again.
 
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::thread;
@@ -43,26 +44,41 @@ pub struct HistoryWriter {
 }
 
 impl HistoryWriter {
-    /// Spawn the worker. A thread spawn failure is returned so the caller can
-    /// log it and continue without history rather than blocking the UI.
+    /// Spawn the worker for the standard history database. A path resolution
+    /// failure or thread spawn failure is returned so the caller can log it
+    /// and retry later rather than blocking the UI.
     pub fn spawn(log: LogFn) -> std::io::Result<Self> {
+        let path = history_path().map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("history path unavailable: {e}"),
+            )
+        })?;
+        Self::spawn_at(log, path)
+    }
+
+    /// Spawn the worker against an explicit database path. Exposed so the
+    /// open/insert/prune policy can be exercised against a temporary store.
+    pub fn spawn_at(log: LogFn, path: PathBuf) -> std::io::Result<Self> {
         let (tx, rx) = mpsc::channel();
         thread::Builder::new()
             .name("sysvitals-history".to_string())
-            .spawn(move || run(rx, log))?;
+            .spawn(move || run(rx, log, path))?;
         Ok(Self { tx })
     }
 
-    /// Queue one sample. The channel is unbounded and `send` only fails after
-    /// the worker has stopped (for example during process shutdown); the
-    /// caller may ignore that.
-    pub fn record(&self, ts: i64, cpu: f64, mem: f64, retention_days: u32) {
-        let _ = self.tx.send(HistorySample {
-            ts,
-            cpu,
-            mem,
-            retention_days,
-        });
+    /// Queue one sample. Returns `false` when the worker has stopped (for
+    /// example after a panic); the caller can then drop this handle and let
+    /// the lazy spawn policy start a fresh worker.
+    pub fn record(&self, ts: i64, cpu: f64, mem: f64, retention_days: u32) -> bool {
+        self.tx
+            .send(HistorySample {
+                ts,
+                cpu,
+                mem,
+                retention_days,
+            })
+            .is_ok()
     }
 }
 
@@ -70,7 +86,18 @@ fn should_attempt_open(tick: u32) -> bool {
     tick == 1 || tick.is_multiple_of(300)
 }
 
-fn run(rx: Receiver<HistorySample>, log: LogFn) {
+/// Keep the sample timestamp monotonic across wall-clock jumps. `ts` is the
+/// primary key of the raw table and duplicate inserts are ignored, so an NTP
+/// rollback would otherwise silently drop every sample until the clock catches
+/// up again. The display timestamp and the stored sample share the result.
+pub fn next_sample_ts(last: Option<i64>, wall: i64) -> i64 {
+    match last {
+        Some(previous) => wall.max(previous.saturating_add(1)),
+        None => wall,
+    }
+}
+
+fn run(rx: Receiver<HistorySample>, log: LogFn, path: PathBuf) {
     let mut store: Option<Store> = None;
     let mut tick: u32 = 0;
     let mut write_error_logged = false;
@@ -79,16 +106,6 @@ fn run(rx: Receiver<HistorySample>, log: LogFn) {
         tick = tick.wrapping_add(1);
 
         if store.is_none() && should_attempt_open(tick) {
-            let path = match history_path() {
-                Ok(path) => path,
-                Err(e) => {
-                    log(
-                        "WARN",
-                        &format!("history: cannot resolve the store path: {e}"),
-                    );
-                    continue;
-                }
-            };
             match Store::open(&path) {
                 Ok(opened) => {
                     let rollup = if opened.rollup_ready() {
@@ -143,7 +160,7 @@ fn run(rx: Receiver<HistorySample>, log: LogFn) {
 
 #[cfg(test)]
 mod tests {
-    use super::should_attempt_open;
+    use super::{next_sample_ts, should_attempt_open};
 
     #[test]
     fn open_retry_cadence_matches_the_documented_300_tick_window() {
@@ -155,5 +172,20 @@ mod tests {
         assert!(!should_attempt_open(301));
         // Wrapping the counter must not panic or take the retry path.
         assert!(!should_attempt_open(u32::MAX));
+    }
+
+    #[test]
+    fn sample_timestamps_never_go_backwards() {
+        assert_eq!(next_sample_ts(None, 1_700_000_000), 1_700_000_000);
+        assert_eq!(
+            next_sample_ts(Some(1_700_000_000), 1_700_000_002),
+            1_700_000_002
+        );
+        // Wall clock rolled back: keep increasing instead of colliding.
+        assert_eq!(
+            next_sample_ts(Some(1_700_000_000), 1_699_999_000),
+            1_700_000_001
+        );
+        assert_eq!(next_sample_ts(Some(i64::MAX), i64::MAX), i64::MAX);
     }
 }

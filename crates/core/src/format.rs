@@ -60,11 +60,13 @@ pub fn format_rate_compact(bps: f64) -> String {
 }
 
 fn format_rate_with(bps: f64, with_per_sec: bool) -> String {
-    let bps = if !bps.is_finite() || bps < 0.0 {
-        0.0
-    } else {
-        bps
-    };
+    // Match the frame path's "no reading yet" marker. A direct caller
+    // formatting a first/wake sample must not print a plausible `0.00 B/s`
+    // for a value that does not exist.
+    if !bps.is_finite() {
+        return "--".to_string();
+    }
+    let bps = bps.max(0.0);
     let (scaled, letter) = if bps < KB {
         (bps, "B")
     } else if bps < MB {
@@ -437,6 +439,10 @@ mod tests {
         assert_eq!(format_rate(1.5 * GB), "1.50 G/s");
         assert_eq!(format_rate(1024.0 * MB), "1.00 G/s");
         assert_eq!(format_rate(120.0 * GB), "120 G/s");
+        // No reading yet / invalid: the same marker the frame path uses.
+        assert_eq!(format_rate(f64::NAN), "--");
+        assert_eq!(format_rate(f64::INFINITY), "--");
+        assert_eq!(format_rate_compact(f64::NAN), "--");
     }
 
     #[test]
@@ -472,11 +478,11 @@ mod tests {
     }
 
     #[test]
-    fn rate_nan_and_negative_become_zero() {
-        assert_eq!(format_rate(f64::NAN), "0.00 B/s");
-        assert_eq!(format_rate(f64::NEG_INFINITY), "0.00 B/s");
+    fn rate_nan_is_no_reading_and_negative_is_zero() {
+        assert_eq!(format_rate(f64::NAN), "--");
+        assert_eq!(format_rate(f64::NEG_INFINITY), "--");
         assert_eq!(format_rate(-5.0), "0.00 B/s");
-        assert_eq!(format_rate(f64::INFINITY), "0.00 B/s");
+        assert_eq!(format_rate(f64::INFINITY), "--");
     }
 
     #[test]
@@ -490,7 +496,7 @@ mod tests {
         assert_eq!(format_rate_compact(12.0 * KB + 512.0), "12.5 K");
         assert_eq!(format_rate_compact(1.2 * MB), "1.20 M");
         assert_eq!(format_rate_compact(1.5 * GB), "1.50 G");
-        assert_eq!(format_rate_compact(f64::NAN), "0.00 B");
+        assert_eq!(format_rate_compact(f64::NAN), "--");
     }
 
     #[test]

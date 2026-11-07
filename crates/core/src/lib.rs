@@ -114,6 +114,7 @@ impl HistoryState {
     /// shared with the other process.
     pub unsafe fn read_consistent(ptr: *const HistoryState) -> HistoryState {
         use std::ptr::{addr_of, read_volatile};
+        use std::sync::atomic::{fence, Ordering};
         let read = |field: *const u32| unsafe { read_volatile(field) };
         for _ in 0..1024 {
             let g1 = read(addr_of!((*ptr).generation));
@@ -121,6 +122,12 @@ impl HistoryState {
                 std::hint::spin_loop();
                 continue;
             }
+            // Acquire after the sequence check so the data loads below cannot
+            // be hoisted above it; the matching fence before the re-read
+            // keeps them from sinking past the second check. Volatile alone
+            // is not a memory barrier on weakly ordered targets (Windows
+            // arm64), where a torn anchor could otherwise pass the check.
+            fence(Ordering::Acquire);
             let state = HistoryState {
                 magic: read(addr_of!((*ptr).magic)),
                 version: read(addr_of!((*ptr).version)),
@@ -136,6 +143,7 @@ impl HistoryState {
                 ],
                 monitor: read_volatile(addr_of!((*ptr).monitor)),
             };
+            fence(Ordering::Acquire);
             if read(addr_of!((*ptr).generation)) == g1 {
                 return state;
             }
@@ -143,6 +151,7 @@ impl HistoryState {
         }
         // Best effort after a stalled writer. The fields are still finite or
         // rejected by `anchor_is_valid` at the call site.
+        fence(Ordering::Acquire);
         HistoryState {
             magic: read(addr_of!((*ptr).magic)),
             version: read(addr_of!((*ptr).version)),
@@ -220,7 +229,7 @@ pub use history_writer::HistoryWriter;
 pub use i18n::{t, Language};
 pub use model::{Anchor, Metric, Snapshot, Theme};
 pub use sampler::{NetSelection, Sampler};
-pub use store::{floor_to_grid, spread_label_indices, Bucket, Store};
+pub use store::{floor_to_grid, Bucket, Store};
 
 #[cfg(test)]
 mod tests {

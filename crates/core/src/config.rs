@@ -44,6 +44,11 @@ pub const ALLOWED_LEFT_MARGIN_PX: [u32; 6] = [8, 16, 32, 64, 128, 256];
 /// Default left margin: 16 px.
 pub const DEFAULT_LEFT_MARGIN_PX: u32 = 16;
 
+/// Upper bound for `history.retention_days`. A value large enough to make the
+/// prune cutoff negative would disable pruning entirely and let the database
+/// grow without bound; one year is far beyond the supported UI range.
+pub const MAX_RETENTION_DAYS: u32 = 365;
+
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -266,11 +271,15 @@ impl Config {
                 message: format!("clamped to [0,1] (was {old})"),
             });
         }
-        if self.history.retention_days == 0 {
-            self.history.retention_days = 30;
+        if self.history.retention_days == 0 || self.history.retention_days > MAX_RETENTION_DAYS {
+            let old = self.history.retention_days;
+            self.history.retention_days = if old == 0 { 30 } else { MAX_RETENTION_DAYS };
             issues.push(SanitizeIssue {
                 field: "history.retention_days",
-                message: "must be >= 1, reset to 30".to_string(),
+                message: format!(
+                    "must be in 1..={MAX_RETENTION_DAYS}, reset to {} (was {old})",
+                    self.history.retention_days
+                ),
             });
         }
 
@@ -340,9 +349,48 @@ impl Config {
     }
 
     /// Parse TOML text, apply defaults for anything missing, then sanitize.
+    ///
+    /// A single unknown enum value (for example `theme = "Dark"` after a
+    /// hand edit, or a variant from a newer build after a downgrade) must not
+    /// discard the whole file: those fields are reset to their defaults and
+    /// reported as sanitize issues before deserialization.
     pub fn from_toml_str(text: &str) -> anyhow::Result<(Config, Vec<SanitizeIssue>)> {
-        let mut cfg: Config = toml::from_str(text)?;
-        let issues = cfg.sanitize();
+        let mut value: toml::Value = toml::from_str(text)?;
+        let mut issues = Vec::new();
+        repair_enum(
+            &mut value,
+            ("display", "language"),
+            &["en", "zh"],
+            "en",
+            "display.language",
+            &mut issues,
+        );
+        repair_enum(
+            &mut value,
+            ("display", "theme"),
+            &["auto", "light", "dark"],
+            "auto",
+            "display.theme",
+            &mut issues,
+        );
+        repair_enum(
+            &mut value,
+            ("windows", "anchor"),
+            &["right", "left"],
+            "right",
+            "windows.anchor",
+            &mut issues,
+        );
+        repair_enum(
+            &mut value,
+            ("history", "csv_scope"),
+            &["visible", "last24h", "last7d", "last30d"],
+            "visible",
+            "history.csv_scope",
+            &mut issues,
+        );
+        let mut cfg: Config = value.try_into()?;
+        issues.extend(cfg.sanitize());
         Ok((cfg, issues))
     }
 
@@ -428,12 +476,44 @@ fn snap_u32(value: u32, allowed: &[u32]) -> u32 {
         .expect("allowed must be non-empty")
 }
 
+/// Reset one string-valued enum field to `fallback` when its value is not in
+/// `allowed`, recording a sanitize issue. Missing fields and non-string values
+/// are left for serde: a wrong type is a structural error, not a stale enum
+/// name.
+fn repair_enum(
+    root: &mut toml::Value,
+    path: (&str, &str),
+    allowed: &[&str],
+    fallback: &str,
+    field: &'static str,
+    issues: &mut Vec<SanitizeIssue>,
+) {
+    let Some(table) = root.get_mut(path.0).and_then(toml::Value::as_table_mut) else {
+        return;
+    };
+    let Some(value) = table.get_mut(path.1) else {
+        return;
+    };
+    let Some(current) = value.as_str().map(str::to_owned) else {
+        return;
+    };
+    if allowed.contains(&current.as_str()) {
+        return;
+    }
+    *value = toml::Value::String(fallback.to_string());
+    issues.push(SanitizeIssue {
+        field,
+        message: format!("{current:?} is not a valid value, reset to {fallback:?}"),
+    });
+}
+
 /// Best-effort cleanup of orphaned save temp files next to `path`. A crash
 /// between temp write and rename leaves `config.toml.<pid>.tmp` behind, and
 /// no live process ever removes it (the name embeds the dead writer's pid).
-/// Only files older than a minute are touched so a concurrently saving
-/// process keeps its fresh temp file.
+/// Only files older than five minutes are touched: a concurrently saving
+/// process keeps its fresh temp file even across a short system sleep.
 fn remove_orphan_tmp_files(path: &std::path::Path, own_tmp: &std::path::Path) {
+    const ORPHAN_AGE_SECS: u64 = 300;
     let Some(dir) = path.parent() else {
         return;
     };
@@ -443,7 +523,8 @@ fn remove_orphan_tmp_files(path: &std::path::Path, own_tmp: &std::path::Path) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
-    let cutoff = std::time::SystemTime::now().checked_sub(std::time::Duration::from_secs(60));
+    let cutoff =
+        std::time::SystemTime::now().checked_sub(std::time::Duration::from_secs(ORPHAN_AGE_SECS));
     for entry in entries.flatten() {
         if entry.path() == own_tmp {
             continue;
@@ -452,10 +533,13 @@ fn remove_orphan_tmp_files(path: &std::path::Path, own_tmp: &std::path::Path) {
         let Some(name) = file_name.to_str() else {
             continue;
         };
-        let is_tmp = name.starts_with(&format!("{base}."))
-            && name.ends_with(".tmp")
-            && name[base.len()..].starts_with('.');
-        if !is_tmp {
+        let Some(pid) = name
+            .strip_prefix(&format!("{base}."))
+            .and_then(|rest| rest.strip_suffix(".tmp"))
+        else {
+            continue;
+        };
+        if pid.is_empty() || !pid.bytes().all(|b| b.is_ascii_digit()) {
             continue;
         }
         let stale = entry
@@ -776,22 +860,66 @@ mod tests {
     #[test]
     fn save_sweeps_stale_orphan_tmp_files_but_not_fresh_ones() {
         let path = temp_config_path("orphans");
-        // A crashed writer's stale temp file (backdated past the one-minute
+        // A crashed writer's stale temp file (backdated past the five-minute
         // guard) must be swept; a fresh temp file may belong to a concurrent
         // saver and must survive; unrelated files are never touched.
         let stale = path.with_file_name("config.toml.1111.tmp");
         let fresh = path.with_file_name("config.toml.2222.tmp");
+        let non_pid = path.with_file_name("config.toml.backup.tmp");
         let decoy = path.with_file_name("notes.txt");
-        for f in [&stale, &fresh, &decoy] {
+        for f in [&stale, &fresh, &non_pid, &decoy] {
             fs::write(f, b"x").unwrap();
         }
         let file = fs::File::options().write(true).open(&stale).unwrap();
-        file.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(120))
+        file.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(600))
+            .unwrap();
+        let file = fs::File::options().write(true).open(&non_pid).unwrap();
+        file.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(600))
             .unwrap();
         Config::default().save(&path).unwrap();
-        assert!(!stale.exists(), "stale orphan temp file swept");
+        assert!(!stale.exists(), "stale pid-stamped temp file swept");
         assert!(fresh.exists(), "fresh temp file kept for its writer");
+        assert!(non_pid.exists(), "non-pid temp file is not ours to sweep");
         assert!(decoy.exists(), "unrelated file untouched");
+    }
+
+    #[test]
+    fn unknown_enum_values_reset_only_those_fields() {
+        let text = r#"
+[display]
+language = "zh"
+theme = "Dark"
+item_spacing = 16
+[windows]
+anchor = "Middle"
+[history]
+retention_days = 14
+csv_scope = "LastYear"
+"#;
+        let (cfg, issues) = Config::from_toml_str(text).unwrap();
+        assert_eq!(cfg.display.language, Language::Zh);
+        assert_eq!(cfg.display.theme, Theme::Auto);
+        assert_eq!(cfg.windows.anchor, Anchor::Right);
+        assert_eq!(cfg.history.csv_scope, CsvScope::Visible);
+        // Unrelated values in the same file survive.
+        assert_eq!(cfg.display.item_spacing, 16);
+        assert_eq!(cfg.history.retention_days, 14);
+        assert_eq!(issues.len(), 3, "theme, anchor and csv_scope reported");
+        assert!(issues.iter().any(|i| i.field == "display.theme"));
+        assert!(issues.iter().any(|i| i.field == "windows.anchor"));
+        assert!(issues.iter().any(|i| i.field == "history.csv_scope"));
+    }
+
+    #[test]
+    fn retention_days_is_capped() {
+        let mut cfg = Config::default();
+        cfg.history.retention_days = u32::MAX;
+        let issues = cfg.sanitize();
+        assert_eq!(cfg.history.retention_days, MAX_RETENTION_DAYS);
+        assert!(issues.iter().any(|i| i.field == "history.retention_days"));
+        cfg.history.retention_days = 0;
+        cfg.sanitize();
+        assert_eq!(cfg.history.retention_days, 30);
     }
 
     #[test]

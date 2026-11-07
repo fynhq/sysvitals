@@ -72,15 +72,16 @@ impl Sampler {
     /// Build a sampler and seed the first CPU / memory baseline. The network
     /// baseline is seeded by the first [`Sampler::sample`] call; on Windows a
     /// successful native counter read never needs sysinfo's interface list.
-    /// `cpu_smoothing` is the `sample.cpu_smoothing` history weight (0 disables
-    /// smoothing); it is fixed for the process lifetime — the config poller
-    /// treats it as a startup-only debug setting.
+    /// `cpu_smoothing` is the `sample.cpu_smoothing` weight (0 disables
+    /// smoothing). The config pollers rebuild the sampler when that value
+    /// changes, which re-primes the CPU EMA and re-seeds the network baseline
+    /// (one `--` frame, equivalent to a restart).
     pub fn new(interfaces: NetSelection, cpu_smoothing: f64) -> Self {
         // sysinfo 0.40 made both constructors fallible for platforms without
-        // the required backends. They are infallible on every platform this
-        // workspace builds (Windows, macOS, and the Linux test/example host);
-        // a failure would leave the indicator with nothing to show, so
-        // surface it at startup.
+        // the required backends. They only fail on targets this workspace
+        // does not build for (Windows and macOS always succeed), and the
+        // indicator has nothing to show without them, so surface a failure
+        // at startup instead of silently painting `--` forever.
         let system = System::new_with_specifics(
             RefreshKind::nothing()
                 .with_cpu(CpuRefreshKind::everything())

@@ -95,17 +95,35 @@ pub fn log_line(data_dir: &Path, date: &str, time: &str, level: &str, message: &
     let mut file_guard = LOG_FILE.lock().unwrap_or_else(|e| e.into_inner());
     let mut date_guard = LOG_DATE.lock().unwrap_or_else(|e| e.into_inner());
     if *date_guard != date {
-        *file_guard = open_for_date(&log_dir(data_dir), date);
-        *date_guard = date.to_string();
-        // A long-running process only rolls the file, it never restarts, so
-        // the startup-only prune would let the directory grow without bound.
-        // Pruning on the first line of each new local day keeps the retention
-        // window enforced for the life of the process.
-        prune_logs(data_dir, date, DEFAULT_RETENTION_DAYS);
+        // Drop the previous day's handle before the open attempt: writing a
+        // new date's line into yesterday's file would be worse than losing it
+        // until the retry succeeds.
+        *file_guard = None;
+    }
+    // Retry the open when the date changed *or* the previous attempt failed.
+    // Clearing the date on failure (instead of committing it) is what keeps a
+    // transient permission/lock error from silencing the whole day.
+    if *date_guard != date || file_guard.is_none() {
+        if let Some(file) = open_for_date(&log_dir(data_dir), date) {
+            let rolled = *date_guard != date;
+            *file_guard = Some(file);
+            *date_guard = date.to_string();
+            // A long-running process only rolls the file, it never restarts,
+            // so the startup-only prune would let the directory grow without
+            // bound. Pruning on the first line of each new local day keeps
+            // the retention window enforced for the life of the process.
+            if rolled {
+                prune_logs(data_dir, date, DEFAULT_RETENTION_DAYS);
+            }
+        }
     }
     if let Some(file) = file_guard.as_mut() {
         let message = one_line(message);
-        let _ = writeln!(file, "{date} {time} [{level}] {} {message}", process_tag());
+        // One write_all keeps a whole line atomic with respect to other
+        // processes appending to the same daily file, so `process_tag()`
+        // cannot be interleaved into a foreign line.
+        let line = format!("{date} {time} [{level}] {} {message}\n", process_tag());
+        let _ = file.write_all(line.as_bytes());
     }
 }
 

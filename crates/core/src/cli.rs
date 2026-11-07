@@ -2,13 +2,17 @@
 //! GPUI panels they launch.
 //!
 //! Panels receive their placement and supervision arguments as plain CLI
-//! flags (`--anchor L T R B`, `--parent-pid <pid>`). The parsing is pure so
-//! it is unit-tested here once instead of being copy-pasted into each panel.
-//! Callers pass the argument list without the binary name.
+//! flags (`--anchor L T R B`, `--anchor-monitor <handle>`,
+//! `--parent-pid <pid>`). The parsing is pure so it is unit-tested here once
+//! instead of being copy-pasted into each panel. Callers pass the argument
+//! list without the binary name.
 
 /// The indicator rectangle in GPUI logical pixels, passed to a panel with
 /// `--anchor` so it opens on the same display as the indicator that launched
-/// it (multi-monitor).
+/// it (multi-monitor). The rectangle is expressed in the same coordinate
+/// space GPUI reports for the target display's bounds: global desktop pixels
+/// on Windows, display-local pixels on macOS. Panels always pair it with
+/// `--anchor-monitor` when available so the space is unambiguous.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AnchorRect {
     pub left: f32,
@@ -44,13 +48,32 @@ pub fn parse_anchor(args: &[String]) -> Option<AnchorRect> {
     None
 }
 
+/// Parse `--anchor-monitor <handle>` from `args`: the native display handle
+/// (HMONITOR on Windows, CGDirectDisplayID/NSScreenNumber on macOS) that
+/// hosted the indicator. Zero or malformed values yield `None`; the panels
+/// then fall back to the rectangle probe.
+pub fn parse_anchor_monitor(args: &[String]) -> Option<u64> {
+    let mut iter = args.iter().map(String::as_str);
+    while let Some(arg) = iter.next() {
+        if arg == "--anchor-monitor" {
+            let raw: u64 = iter.next()?.trim().parse().ok()?;
+            return (raw != 0).then_some(raw);
+        }
+    }
+    None
+}
+
 /// Parse `--parent-pid <pid>` from `args`: the launching indicator's
 /// process id, watched by the panel so it exits when the indicator does.
+/// PID 0 has platform-specific broadcast semantics (`kill(0, 0)` always
+/// succeeds), so it is rejected rather than installing a watchdog that can
+/// never fire.
 pub fn parse_parent_pid(args: &[String]) -> Option<u32> {
     let mut iter = args.iter().map(String::as_str);
     while let Some(arg) = iter.next() {
         if arg == "--parent-pid" {
-            return iter.next()?.parse().ok();
+            let pid: u32 = iter.next()?.parse().ok()?;
+            return (pid != 0).then_some(pid);
         }
     }
     None
@@ -118,6 +141,20 @@ mod tests {
         );
         assert!(parse_parent_pid(&args(&["--parent-pid"])).is_none());
         assert!(parse_parent_pid(&args(&["--parent-pid", "x"])).is_none());
+        // PID 0 broadcasts on POSIX; it must not arm a watchdog.
+        assert!(parse_parent_pid(&args(&["--parent-pid", "0"])).is_none());
         assert!(parse_parent_pid(&args(&["--anchor", "1", "2", "3", "4"])).is_none());
+    }
+
+    #[test]
+    fn anchor_monitor_parses_and_rejects_zero() {
+        assert_eq!(
+            parse_anchor_monitor(&args(&["--anchor-monitor", "12345"])),
+            Some(12345)
+        );
+        assert!(parse_anchor_monitor(&args(&["--anchor-monitor", "0"])).is_none());
+        assert!(parse_anchor_monitor(&args(&["--anchor-monitor", "-1"])).is_none());
+        assert!(parse_anchor_monitor(&args(&["--anchor-monitor"])).is_none());
+        assert!(parse_anchor_monitor(&args(&["--anchor", "1", "2", "3", "4"])).is_none());
     }
 }
