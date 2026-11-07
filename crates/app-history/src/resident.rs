@@ -168,7 +168,7 @@ pub fn run_resident(cx: &mut App) {
                 .timer(Duration::from_millis(poll_ms))
                 .await;
 
-            let snapshot = cx.update(|_app| unsafe { shared.snapshot() });
+            let snapshot = cx.update(|_app| shared.snapshot());
             let parent_dead = unsafe { WaitForSingleObject(parent, 0) != WAIT_TIMEOUT };
             if parent_dead {
                 log_event("INFO", "history: parent process gone; exiting");
@@ -192,7 +192,7 @@ pub fn run_resident(cx: &mut App) {
                     activation_attempts = 0;
                     idle_since = Some(Instant::now());
                     trimmed = false;
-                    unsafe { shared.mark_hidden() };
+                    shared.mark_hidden();
                     trim_working_set();
                     continue;
                 }
@@ -217,7 +217,7 @@ pub fn run_resident(cx: &mut App) {
                             );
                         }
                     }
-                    unsafe { shared.mark_hidden() };
+                    shared.mark_hidden();
                     window = None;
                     first_load = None;
                     popup_size = None;
@@ -290,7 +290,7 @@ pub fn run_resident(cx: &mut App) {
                         }
                         None => {
                             dismissed_generation = Some(snapshot.generation);
-                            unsafe { shared.mark_hidden() };
+                            shared.mark_hidden();
                             window = None;
                             first_load = None;
                             popup_size = None;
@@ -328,7 +328,7 @@ pub fn run_resident(cx: &mut App) {
                         last_activation_attempt = Some(Instant::now());
                         if active {
                             activated = true;
-                            unsafe { shared.set_visible(true) };
+                            shared.set_visible(true);
                             log_event(
                                 "INFO",
                                 &format!(
@@ -347,7 +347,7 @@ pub fn run_resident(cx: &mut App) {
                         // click still closes it, but click-away cannot be
                         // armed. Log once for diagnosis.
                         activated = true;
-                        unsafe { shared.set_visible(true) };
+                        shared.set_visible(true);
                         // No activation edge means the view's observer never
                         // ran, so restore the pre-move size here.
                         if let Some(size) = popup_size {
@@ -406,7 +406,7 @@ pub fn run_resident(cx: &mut App) {
                         // Do not retry this request every poll: the next click
                         // advances the generation and re-arms the open path.
                         dismissed_generation = Some(snapshot.generation);
-                        unsafe { shared.mark_hidden() };
+                        shared.mark_hidden();
                         log_event("WARN", "history: resident window open failed");
                     }
                 }

@@ -43,10 +43,7 @@ use sysvitals_panel::{
     spawn_accent_watch, PanelSurface, CONTROL_RADIUS,
 };
 #[cfg(windows)]
-use sysvitals_panel::{
-    panel_font_family, preplace_hidden_window, set_per_monitor_dpi_aware, taskbar_al, utf16,
-    window_hwnd,
-};
+use sysvitals_panel::{panel_font_family, preplace_hidden_window, taskbar_al, utf16, window_hwnd};
 
 mod config;
 #[cfg(target_os = "macos")]
