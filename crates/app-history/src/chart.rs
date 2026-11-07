@@ -12,7 +12,7 @@ pub enum TimeRange {
 }
 
 impl TimeRange {
-    const ALL: [TimeRange; 4] = [
+    pub const ALL: [TimeRange; 4] = [
         TimeRange::Min5,
         TimeRange::Hour1,
         TimeRange::Day1,
@@ -92,19 +92,19 @@ impl TimeRange {
 /// point so the path stays finite, and the tooltip reports `--`.
 #[derive(Debug, Clone)]
 pub struct ChartPoint {
-    ts: i64,
-    cpu: f64,
-    mem: f64,
-    has_data: bool,
+    pub ts: i64,
+    pub cpu: f64,
+    pub mem: f64,
+    pub has_data: bool,
 }
 
 /// The exact query window shared by the chart, the axis labels and the
 /// `Visible` CSV export.
 #[derive(Debug, Clone, Copy)]
 pub struct VisibleQuery {
-    from: i64,
-    to: i64,
-    bucket: i64,
+    pub from: i64,
+    pub to: i64,
+    pub bucket: i64,
 }
 
 /// How often a visible history window reloads the stored samples. The

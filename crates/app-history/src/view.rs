@@ -2,12 +2,14 @@
 
 use super::*;
 
+use sysvitals_panel::restore_window_size_after_move;
+
 pub struct HistoryView {
-    lang: Language,
+    pub lang: Language,
     /// Created hidden by the resident launcher; do not claim activation on
     /// the first (offscreen) frame. The loop activates it after the first
     /// data load.
-    hidden_start: bool,
+    pub hidden_start: bool,
     /// Logical size the anchored popup was laid out for. Windows creates the
     /// window on whichever monitor the OS picks and then moves it to the
     /// target display; crossing a DPI boundary makes the OS suggest a
@@ -15,51 +17,51 @@ pub struct HistoryView {
     /// 125% primary on a 100% secondary shrinks to 542x311. Re-assert the
     /// intended size once the move has settled.
     #[cfg(windows)]
-    fixed_size: Option<gpui_kit::Size<Pixels>>,
+    pub fixed_size: Option<gpui_kit::Size<Pixels>>,
     /// One-shot guard for [`Self::restore_popup_size`].
     #[cfg(windows)]
-    size_fixed: bool,
-    range: TimeRange,
-    buckets: Vec<Bucket>,
+    pub size_fixed: bool,
+    pub range: TimeRange,
+    pub buckets: Vec<Bucket>,
     /// Window the current `buckets` were queried for; `points()` pads it to
     /// one slot per bucket so the category x axis stays time-linear.
-    query: Option<VisibleQuery>,
+    pub query: Option<VisibleQuery>,
     /// Generation ticket for wide background queries: a result whose ticket
     /// no longer matches the current one (the range switched mid-flight) is
     /// dropped instead of painting stale points under a new axis.
-    load_seq: u64,
+    pub load_seq: u64,
     /// One connection kept for the window's lifetime. Reopening SQLite every
     /// three seconds re-ran WAL/schema setup and contended with the
     /// indicator's writer for no benefit.
-    store: Option<Store>,
+    pub store: Option<Store>,
     /// One alert per failure streak: a corrupt database would otherwise log
     /// every refresh tick (3 s), drowning the useful history.
-    data_error_logged: bool,
-    csv_scope: CsvScope,
-    copied: bool,
-    copy_failed: bool,
+    pub data_error_logged: bool,
+    pub csv_scope: CsvScope,
+    pub copied: bool,
+    pub copy_failed: bool,
     /// Monotonic ticket for the copy confirmation timer. An older timer must
     /// not clear a newer copy's message.
-    copy_feedback_seq: u64,
+    pub copy_feedback_seq: u64,
     /// Last config mtime applied, in nanoseconds; the popup keeps language and
     /// CSV-scope settings live instead of freezing them at launch.
-    config_mtime: u64,
+    pub config_mtime: u64,
     /// Last OS window title applied, so a language hot-reload can update the
     /// title (Mission Control / taskbar) without re-setting it every frame.
-    last_title: Option<String>,
+    pub last_title: Option<String>,
     /// Guards blur-close: only close after the window has been active at
     /// least once, so a transient "inactive" signal at open time (a macOS
     /// nonactivating panel that has not become key yet) cannot close the
     /// popup the instant it appears.
-    ever_active: bool,
+    pub ever_active: bool,
     /// Kept alive so the activation observer is not cancelled; dropped when
     /// the view is released.
-    _activation: Option<Subscription>,
+    pub _activation: Option<Subscription>,
     /// Kept alive so the appearance observer is not cancelled. The panel
     /// always mirrors the OS light/dark theme (independent of the user's
     /// `display.theme` setting, which now only governs the indicator), so
     /// a live OS flip repaints this window too — see `observe_appearance`.
-    _appearance: Option<Subscription>,
+    pub _appearance: Option<Subscription>,
     /// Kept alive so the Esc observer is not cancelled. Esc closes the popup.
     /// This is an app-level keystroke observer, not a window paint-phase
     /// listener: registering from `render` with `Window::on_key_event` would
@@ -68,19 +70,19 @@ pub struct HistoryView {
     /// killing the process the moment the popup opens. This process owns a
     /// single window with no text fields, so a global keystroke observer is
     /// both safe and simpler.
-    _escape: Option<Subscription>,
+    pub _escape: Option<Subscription>,
     /// Last accent value seen by the live-refresh poll; the override only
     /// re-applies when this moves (see `start_accent_watch`). Seeded with
     /// `None` so the first tick always re-applies once (idempotent when the
     /// startup override already succeeded).
-    last_accent: Option<u32>,
+    pub last_accent: Option<u32>,
     /// Signals the resident launcher that the first database read finished.
     /// The window stays hidden until this flips, so the first visible frame
     /// already carries chart data.
-    first_load: Arc<AtomicBool>,
+    pub first_load: Arc<AtomicBool>,
     /// Shared command/status block in resident mode; `None` for the one-shot
     /// launch used on macOS and for the fallback path.
-    shared: Option<Arc<HistoryShared>>,
+    pub shared: Option<Arc<HistoryShared>>,
 }
 
 impl HistoryView {
@@ -711,7 +713,7 @@ impl HistoryView {
 }
 
 impl Render for HistoryView {
-    pub fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let lang = self.lang;
         let title = format!("SysVitals {}", t(lang, "chart.title"));
         if self.last_title.as_deref() != Some(title.as_str()) {

@@ -2,6 +2,8 @@
 
 use super::*;
 
+use sysvitals_panel::restore_window_size_after_move;
+
 // ---------------------------------------------------------------------------
 // Dropdown item builders
 // ---------------------------------------------------------------------------
@@ -34,59 +36,59 @@ pub type StringSelectState = SelectState<SearchableVec<String>>;
 // ---------------------------------------------------------------------------
 
 pub struct SettingsView {
-    cfg: Config,
+    pub cfg: Config,
     // Input states for prefixes
-    prefix_cpu: Entity<InputState>,
-    prefix_mem: Entity<InputState>,
-    prefix_up: Entity<InputState>,
-    prefix_down: Entity<InputState>,
+    pub prefix_cpu: Entity<InputState>,
+    pub prefix_mem: Entity<InputState>,
+    pub prefix_up: Entity<InputState>,
+    pub prefix_down: Entity<InputState>,
     // Toggle states
-    dual_row: bool,
-    show_resources: bool,
-    show_network: bool,
-    auto_start: bool,
+    pub dual_row: bool,
+    pub show_resources: bool,
+    pub show_network: bool,
+    pub auto_start: bool,
     /// Set only when the user actually clicks the launch-at-login switch.
     /// A config value inherited from defaults must not become an explicit
     /// platform side effect merely because another setting was saved.
-    auto_start_touched: bool,
+    pub auto_start_touched: bool,
     // Index-based selections
-    lang_idx: usize,
-    interval_idx: usize,
-    spacing_idx: usize,
-    margin_idx: usize,
-    theme_idx: usize,
-    anchor_idx: usize,
+    pub lang_idx: usize,
+    pub interval_idx: usize,
+    pub spacing_idx: usize,
+    pub margin_idx: usize,
+    pub theme_idx: usize,
+    pub anchor_idx: usize,
     // Dropdown states (item text may carry the selected language). Windows
     // renders the library Select; macOS raises a native menu from the index
     // fields instead.
     #[cfg(windows)]
-    spacing_select: Entity<StringSelectState>,
+    pub spacing_select: Entity<StringSelectState>,
     #[cfg(windows)]
-    margin_select: Entity<StringSelectState>,
+    pub margin_select: Entity<StringSelectState>,
     #[cfg(windows)]
-    anchor_select: Entity<StringSelectState>,
+    pub anchor_select: Entity<StringSelectState>,
     /// Whether the layout section is offered on this machine (see
     /// `layout_available`). False hides it entirely.
-    layout_available: bool,
+    pub layout_available: bool,
     /// Whether the taskbar is docked left/right (see `taskbar_is_vertical`),
     /// re-probed at most once a second while the window is open. On such a
     /// bar the margin row is shown unconditionally (the value offsets the
     /// indicator from the bar's top edge), while the anchor dropdown — which
     /// selects between the tray end and the far-left end of a HORIZONTAL bar
     /// — would be a dead control and stays hidden.
-    vertical_taskbar: bool,
+    pub vertical_taskbar: bool,
     /// Last accent value seen by the live-refresh poll; the override only
     /// re-applies when this moves (see `new`).
-    last_accent: Option<u32>,
+    pub last_accent: Option<u32>,
     /// Whether the most recent config write failed. Shown in the footer so a
     /// read-only/full disk does not silently swallow every setting change.
-    save_failed: std::cell::Cell<bool>,
+    pub save_failed: std::cell::Cell<bool>,
     /// Serialized form last written (or loaded) so a focus loss with no edits
     /// does not touch the file and trigger an indicator reload.
-    last_saved_toml: Option<String>,
+    pub last_saved_toml: Option<String>,
     /// Taskbar-shape probes are syscalls/registry reads; refresh them at most
     /// once a second on interaction-driven renders.
-    last_taskbar_probe: Option<Instant>,
+    pub last_taskbar_probe: Option<Instant>,
     /// The logical size the window was opened at. Windows derives a
     /// `WM_DPICHANGED` suggested rectangle from the *previous* display's DPI
     /// when the window is placed on a monitor with a different scale factor;
@@ -94,27 +96,27 @@ pub struct SettingsView {
     /// activation-edge check as the fallback (same correction as the history
     /// popup).
     #[cfg(windows)]
-    initial_size: gpui_kit::Size<Pixels>,
+    pub initial_size: gpui_kit::Size<Pixels>,
     /// One-shot guard for [`Self::restore_window_size`], so a user resize
     /// after the window has settled is never overwritten.
     #[cfg(windows)]
-    size_fixed: bool,
+    pub size_fixed: bool,
     /// Keep event subscriptions alive for the lifetime of the view.
-    _subscriptions: Vec<Subscription>,
+    pub _subscriptions: Vec<Subscription>,
     /// Flush guard: saves the current state whenever the window loses focus,
     /// so a prefix typed right before closing with the title-bar button is
     /// not lost (its field may never have received an explicit blur).
-    _deactivation: Option<Subscription>,
+    pub _deactivation: Option<Subscription>,
     /// Kept alive so the appearance observer is not cancelled: a live OS
     /// light/dark flip reloads the system palette (the panel always follows
     /// the system, independent of the indicator-only `display.theme`).
-    _appearance: Option<Subscription>,
+    pub _appearance: Option<Subscription>,
     /// Kept alive so the Cmd+W / Cmd+Q observer is not cancelled. macOS has
     /// no default window menu here, so those keys need an explicit handler;
     /// both close this window (the indicator is a separate process and keeps
     /// running).
     #[cfg(target_os = "macos")]
-    _shortcuts: Option<Subscription>,
+    pub _shortcuts: Option<Subscription>,
 }
 
 impl SettingsView {
@@ -492,7 +494,7 @@ impl SettingsView {
 }
 
 impl Render for SettingsView {
-    pub fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Re-probe the taskbar shape at most once a second: the user can move
         // or auto-hide the bar while this window stays open, but a registry
         // read plus `SHAppBarMessage` on every keystroke-triggered repaint is

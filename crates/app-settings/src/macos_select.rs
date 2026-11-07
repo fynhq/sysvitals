@@ -40,7 +40,7 @@ impl MenuGuard {
 }
 
 impl Drop for MenuGuard {
-    pub fn drop(&mut self) {
+    fn drop(&mut self) {
         MENU_OPEN.with(|open| open.set(false));
     }
 }
@@ -139,11 +139,11 @@ pub fn show(items: &[String], selected: usize) -> Option<usize> {
 #[cfg(target_os = "macos")]
 #[derive(Copy, Clone)]
 pub struct MacSelectStyle {
-    background: Hsla,
-    foreground: Hsla,
-    border: Hsla,
-    caret: Hsla,
-    radius: Pixels,
+    pub background: Hsla,
+    pub foreground: Hsla,
+    pub border: Hsla,
+    pub caret: Hsla,
+    pub radius: Pixels,
 }
 
 /// Raise the native menu for a macOS dropdown and commit the chosen index.

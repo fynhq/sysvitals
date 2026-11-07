@@ -9,7 +9,7 @@ use super::*;
 /// path never maps it.
 #[cfg(windows)]
 pub struct HistoryShared {
-    state: *mut sysvitals_core::HistoryState,
+    pub state: *mut sysvitals_core::HistoryState,
 }
 
 #[cfg(windows)]
