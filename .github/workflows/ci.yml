@@ -44,7 +44,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: stable
-        with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@e9d7b9f1e587218970671bac74e5511ed9506e6a # v2
       - name: Verify third-party notices are current
@@ -92,7 +91,7 @@ jobs:
           # Platform crates only run `cargo check` here (no clippy); denying
           # rustc warnings keeps unused imports/fields from accumulating in
           # code paths the Linux quality job never compiles.
-          RUSTFLAGS: -D warnings
+          RUSTFLAGS: "-D warnings"
         run: cargo check --locked ${{ matrix.packages }}
 
   # ---------------------------------------------------------------------------
@@ -165,7 +164,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: stable
-        with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@e9d7b9f1e587218970671bac74e5511ed9506e6a # v2
         with:
@@ -445,7 +443,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: stable
-        with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@e9d7b9f1e587218970671bac74e5511ed9506e6a # v2
         with:
