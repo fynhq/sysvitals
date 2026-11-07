@@ -82,7 +82,9 @@ pub(crate) fn open_history_state() -> Option<*mut sysvitals_core::HistoryState> 
 
 /// `--parent-pid <pid>`: the process exits when the indicator does, even if
 /// the launcher never gets a chance to terminate it. The pure parsing lives
-/// in `core::cli` (shared with the settings panel).
+/// in `core::cli` (shared with the settings panel). Resident mode is
+/// Windows-only; the macOS one-shot path uses the panel helper instead.
+#[cfg(windows)]
 pub(crate) fn parse_parent_pid() -> Option<u32> {
     let args: Vec<String> = env::args().skip(1).collect();
     sysvitals_core::cli::parse_parent_pid(&args)
