@@ -108,45 +108,12 @@ pub fn join_prefix(prefix: &str, value: &str) -> String {
     }
 }
 
-/// Approximate column width for proportional text with CJK: characters in the
-/// East Asian Wide/Fullwidth ranges count as 2, combining marks as 0, the rest
-/// as 1. Good enough for padding to visual width.
+/// Visual column width for proportional text with CJK and emoji. Uses the
+/// Unicode width tables instead of a hand-maintained range list, so newer
+/// emoji, flags, variation selectors and ZWJ sequences do not drift from the
+/// actual glyph width.
 pub fn display_width(s: &str) -> usize {
-    s.chars()
-        .map(|c| match unicode_width(c) {
-            0 => 0,
-            2 => 2,
-            _ => 1,
-        })
-        .sum()
-}
-
-fn unicode_width(c: char) -> usize {
-    let cp = c as u32;
-    // Combining marks (zero width).
-    if (0x0300..=0x036F).contains(&cp) || (0x200B..=0x200F).contains(&cp) {
-        return 0;
-    }
-    // CJK and other East Asian Wide/Fullwidth blocks commonly used in prefixes.
-    let wide = matches!(cp,
-        0x1100..=0x115F     // Hangul Jamo init
-        | 0x2E80..=0x303E   // CJK radicals, Kangxi, punctuation
-        | 0x3041..=0x33FF   // Hiragana..CJK compat
-        | 0x3400..=0x4DBF   // CJK ext A
-        | 0x4E00..=0x9FFF   // CJK unified
-        | 0xA000..=0xA4CF   // Yi
-        | 0xAC00..=0xD7A3   // Hangul syllables
-        | 0xF900..=0xFAFF   // CJK compat ideographs
-        | 0xFE30..=0xFE6F   // CJK compat forms
-        | 0xFF00..=0xFF60   // Fullwidth ASCII
-        | 0xFFE0..=0xFFE6   // Fullwidth signs
-        | 0x1F300..=0x1F64F // emoji
-        | 0x1F900..=0x1F9FF);
-    if wide {
-        2
-    } else {
-        1
-    }
+    unicode_width::UnicodeWidthStr::width(s)
 }
 
 /// Pad a cell's text with trailing spaces so the cell occupies `width`
@@ -511,6 +478,17 @@ mod tests {
         assert_eq!(display_width("内存"), 4);
         assert_eq!(display_width("上传"), 4);
         assert_eq!(display_width("U 1.2M/s"), 8);
+    }
+
+    #[test]
+    fn display_width_handles_emoji_and_variation_selectors() {
+        // These were outside the old hand-written ranges and made a custom
+        // prefix pad to the wrong number of columns.
+        assert_eq!(display_width("🚀"), 2);
+        assert_eq!(display_width("⌚"), 2);
+        assert_eq!(display_width("☀️"), 2);
+        assert_eq!(display_width("👨‍👩‍👧‍👦"), 2);
+        assert_eq!(display_width("🇨🇳"), 2);
     }
 
     #[test]

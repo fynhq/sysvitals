@@ -15,6 +15,7 @@ toml = { workspace = true }
 anyhow = { workspace = true }
 directories = { workspace = true }
 rusqlite = { workspace = true }
+unicode-width = { workspace = true }
 
 # Task Manager-equivalent CPU percent on Windows: the PDH counters
 # (`% Processor Utility` / `% Processor Time`) live outside sysinfo's public
