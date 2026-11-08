@@ -26,7 +26,7 @@ use sysvitals_core::backdrop::{
 // indicators): daily-file logging, the crash hook and the Windows probes.
 #[cfg(windows)]
 pub use sysvitals_support::{hkcu_dword, os_build_number, taskbar_al, utf16};
-pub use sysvitals_support::{install_panic_hook, log_event, prune_old_logs};
+pub use sysvitals_support::{install_panic_hook, log_event, log_sanitize_issues};
 
 /// Which panel is asking for the material tint. The history popup sits
 /// directly on the chart and keeps the standard tint; the settings page is

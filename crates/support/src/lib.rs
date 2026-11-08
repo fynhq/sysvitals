@@ -28,15 +28,16 @@ pub fn log_event(level: &str, message: &str) {
     sysvitals_core::logger::log_line(&dir, &date, &time, level, message);
 }
 
-/// Remove log files older than the retention window. Run once at startup;
-/// the logger itself prunes on every date roll while a process stays
-/// resident.
-pub fn prune_old_logs() {
-    let Ok(dir) = sysvitals_core::config::data_dir() else {
-        return;
-    };
-    let (date, _) = local_now();
-    sysvitals_core::logger::prune_logs(&dir, &date, sysvitals_core::logger::DEFAULT_RETENTION_DAYS);
+/// Log sanitized-config repairs with one stable prefix shared by the
+/// indicator, settings and history processes. `prefix` is the complete message
+/// prefix (for example `"config repair"` or `"settings: config merge repair"`).
+pub fn log_sanitize_issues(prefix: &str, issues: &[sysvitals_core::config::SanitizeIssue]) {
+    for issue in issues {
+        log_event(
+            "WARN",
+            &format!("{prefix} {}: {}", issue.field, issue.message),
+        );
+    }
 }
 
 /// Rust panic hook writing the panic (with location and backtrace) to the
@@ -115,6 +116,32 @@ pub fn hkcu_dword(key: &str, value: &str) -> Option<u32> {
     } else {
         None
     }
+}
+
+/// The Windows system directory (`%SystemRoot%\System32`), or `None` when
+/// the probe fails. System tools must be launched by absolute path: a bare
+/// `cmd.exe`/`timeout.exe`/`taskmgr.exe` is resolved through the current
+/// directory and `PATH`, so a file with the same name next to a portable
+/// launch or on a developer `PATH` can win.
+#[cfg(windows)]
+pub fn system_directory() -> Option<std::path::PathBuf> {
+    use windows::Win32::System::SystemInformation::GetSystemDirectoryW;
+
+    let mut buf = vec![0u16; 260];
+    let mut len = unsafe { GetSystemDirectoryW(Some(&mut buf[..])) } as usize;
+    if len == 0 {
+        return None;
+    }
+    if len >= buf.len() {
+        buf.resize(len + 1, 0);
+        len = unsafe { GetSystemDirectoryW(Some(&mut buf[..])) } as usize;
+        if len == 0 || len >= buf.len() {
+            return None;
+        }
+    }
+    Some(std::path::PathBuf::from(String::from_utf16_lossy(
+        &buf[..len],
+    )))
 }
 
 /// The Windows OS build number, or `None` if the version probe fails.
