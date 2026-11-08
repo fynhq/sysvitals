@@ -17,12 +17,29 @@ pub(crate) fn config_mtime() -> u64 {
 }
 
 pub(crate) fn log_config_issues(issues: &[sysvitals_core::config::SanitizeIssue]) {
-    for issue in issues {
-        log_event(
-            "WARN",
-            &format!("config repair {}: {}", issue.field, issue.message),
-        );
+    sysvitals_support::log_sanitize_issues("config repair", issues);
+}
+
+/// A failed auto-start apply is retried without waiting for the user to touch
+/// the setting again. The cooldown keeps a permanently failing
+/// `SMAppService` call from logging on every sample tick.
+const AUTO_START_RETRY_COOLDOWN: Duration = Duration::from_secs(300);
+
+thread_local! {
+    static AUTO_START_RETRY_AT: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+}
+
+/// Retry a failed login-item apply on its cooldown, even when the config file
+/// has not changed. The retry timer is only armed by a file-backed apply, so
+/// a missing/never-loaded config cannot start the side effect on its own.
+fn retry_auto_start_if_due() {
+    let due = AUTO_START_RETRY_AT.with(|slot| slot.get().is_some_and(|at| Instant::now() >= at));
+    if !due {
+        return;
     }
+    AUTO_START_RETRY_AT.with(|slot| slot.set(None));
+    let cfg = CONFIG.with(|c| c.borrow().clone());
+    apply_auto_start(&cfg);
 }
 
 /// Load or reload the config file. The mtime cache only advances after a
@@ -36,6 +53,7 @@ pub(crate) fn reload_config_if_changed() {
 
     let prev = CONFIG_MTIME.with(|m| *m.borrow());
     if mtime == prev {
+        retry_auto_start_if_due();
         return;
     }
     match Config::load_with_source(&path) {
@@ -66,6 +84,7 @@ pub(crate) fn reload_config_if_changed() {
                 // A missing file is not an explicit "off" choice; let a
                 // later re-created config apply its value again.
                 APPLIED_AUTO_START.with(|c| c.set(None));
+                AUTO_START_RETRY_AT.with(|slot| slot.set(None));
             }
             log_event(
                 "INFO",
@@ -151,15 +170,18 @@ pub(crate) fn apply_auto_start(cfg: &Config) {
         // Leave the system state alone, but forget the last applied bit
         // so a later explicit/legacy `true` can still repair the entry.
         APPLIED_AUTO_START.with(|c| c.set(None));
+        AUTO_START_RETRY_AT.with(|slot| slot.set(None));
         return;
     }
     let desired = cfg.startup.auto_start;
     if APPLIED_AUTO_START.with(|c| c.get()) == Some(desired) {
+        AUTO_START_RETRY_AT.with(|slot| slot.set(None));
         return;
     }
     match set_launch_at_login(desired) {
         Ok(status) => {
             APPLIED_AUTO_START.with(|c| c.set(Some(desired)));
+            AUTO_START_RETRY_AT.with(|slot| slot.set(None));
             match status {
                 Some(2) if desired => log_event(
                     "INFO",
@@ -175,12 +197,17 @@ pub(crate) fn apply_auto_start(cfg: &Config) {
                 None => {}
             }
         }
-        Err(e) => log_event(
-            "WARN",
-            &format!(
-                "auto-start {} failed: {e}",
-                if desired { "enable" } else { "disable" }
-            ),
-        ),
+        Err(e) => {
+            AUTO_START_RETRY_AT.with(|slot| {
+                slot.set(Some(Instant::now() + AUTO_START_RETRY_COOLDOWN));
+            });
+            log_event(
+                "WARN",
+                &format!(
+                    "auto-start {} failed: {e}",
+                    if desired { "enable" } else { "disable" }
+                ),
+            );
+        }
     }
 }

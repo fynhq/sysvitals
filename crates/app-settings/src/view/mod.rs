@@ -421,15 +421,7 @@ impl SettingsView {
         // non-UI field) survives. Only the UI-owned fields are overlaid.
         let mut cfg = match Config::load(&path) {
             Ok((disk, issues)) => {
-                for issue in &issues {
-                    log_event(
-                        "WARN",
-                        &format!(
-                            "settings: config merge repair {}: {}",
-                            issue.field, issue.message
-                        ),
-                    );
-                }
+                sysvitals_panel::log_sanitize_issues("settings: config merge repair", &issues);
                 disk
             }
             Err(e) => {

@@ -51,18 +51,13 @@ pub(crate) fn store_config(new: Config) {
 }
 
 pub(crate) fn log_config_issues(issues: &[sysvitals_core::config::SanitizeIssue]) {
-    for issue in issues {
-        log_event(
-            "WARN",
-            &format!("config repair {}: {}", issue.field, issue.message),
-        );
-    }
+    sysvitals_support::log_sanitize_issues("config repair", issues);
 }
 
 // ----------------------------------------------------------------- logging
 
-// Logging (`log_event`, `prune_old_logs`) comes from `sysvitals-support`
-// so every SysVitals process shares one implementation.
+// Logging (`log_event`) comes from `sysvitals-support` so every SysVitals
+// process shares one implementation.
 
 // ------------------------------------------------------------------ helpers
 
@@ -147,6 +142,15 @@ pub(crate) unsafe fn set_auto_start(enabled: bool) -> Result<bool, String> {
     }
 }
 
+/// A failed auto-start apply is retried without waiting for the user to touch
+/// the setting again. The cooldown keeps a permanently locked registry from
+/// producing one WARN per config poll.
+const AUTO_START_RETRY_COOLDOWN: Duration = Duration::from_secs(300);
+
+thread_local! {
+    static AUTO_START_RETRY_AT: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+}
+
 /// Apply the login-startup preference once per value change. The settings
 /// window writes the config; this process owns the registry side effect.
 pub(crate) fn apply_auto_start(cfg: &Config) {
@@ -158,16 +162,19 @@ pub(crate) fn apply_auto_start(cfg: &Config) {
         // Leave the system state alone, but forget the last applied bit
         // so a later explicit/legacy `true` can still repair the entry.
         APPLIED_AUTO_START.store(u32::MAX, Ordering::Relaxed);
+        AUTO_START_RETRY_AT.with(|slot| slot.set(None));
         return;
     }
     let desired = cfg.startup.auto_start;
     let desired_bits = desired as u32;
     if APPLIED_AUTO_START.load(Ordering::Relaxed) == desired_bits {
+        AUTO_START_RETRY_AT.with(|slot| slot.set(None));
         return;
     }
     match unsafe { set_auto_start(desired) } {
         Ok(changed) => {
             APPLIED_AUTO_START.store(desired_bits, Ordering::Relaxed);
+            AUTO_START_RETRY_AT.with(|slot| slot.set(None));
             if changed {
                 log_event(
                     "INFO",
@@ -178,14 +185,34 @@ pub(crate) fn apply_auto_start(cfg: &Config) {
                 );
             }
         }
-        Err(e) => log_event(
-            "WARN",
-            &format!(
-                "auto-start {} failed: {e}",
-                if desired { "enable" } else { "disable" }
-            ),
-        ),
+        Err(e) => {
+            AUTO_START_RETRY_AT.with(|slot| {
+                slot.set(Some(Instant::now() + AUTO_START_RETRY_COOLDOWN));
+            });
+            log_event(
+                "WARN",
+                &format!(
+                    "auto-start {} failed: {e}",
+                    if desired { "enable" } else { "disable" }
+                ),
+            );
+        }
     }
+}
+
+/// Retry a failed auto-start apply on its cooldown, even when the config file
+/// has not changed. Only a file-backed, successfully parsed config may drive
+/// this side effect.
+fn retry_auto_start_if_due() {
+    let due = AUTO_START_RETRY_AT.with(|slot| slot.get().is_some_and(|at| Instant::now() >= at));
+    if !due {
+        return;
+    }
+    AUTO_START_RETRY_AT.with(|slot| slot.set(None));
+    if !CONFIG_FROM_FILE.load(Ordering::Relaxed) {
+        return;
+    }
+    apply_auto_start(&config());
 }
 
 // ------------------------------------------------- config file watching
@@ -215,6 +242,7 @@ pub(crate) fn poll_config_change() {
     let current = config_mtime();
     let previous = CONFIG_MTIME.load(Ordering::Relaxed);
     if current == previous {
+        retry_auto_start_if_due();
         return;
     }
     let loaded = sysvitals_core::config::config_path().and_then(|p| Config::load_with_source(&p));
@@ -265,6 +293,7 @@ pub(crate) fn poll_config_change() {
         // Let a later re-created config apply its value again, even if it
         // matches the last one we applied.
         APPLIED_AUTO_START.store(u32::MAX, Ordering::Relaxed);
+        AUTO_START_RETRY_AT.with(|slot| slot.set(None));
     }
     log_event(
         "INFO",

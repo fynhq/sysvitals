@@ -81,12 +81,7 @@ pub(crate) fn load_config_with_backup() -> Config {
     };
     match Config::from_toml_str(&text) {
         Ok((cfg, issues)) => {
-            for issue in &issues {
-                log_event(
-                    "WARN",
-                    &format!("settings: config repair {}: {}", issue.field, issue.message),
-                );
-            }
+            sysvitals_panel::log_sanitize_issues("settings: config repair", &issues);
             log_event(
                 "INFO",
                 &format!("settings: config loaded from {}", path.display()),
