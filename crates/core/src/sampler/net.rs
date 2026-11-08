@@ -109,13 +109,9 @@ const VIRTUAL_PREFIXES: &[&str] = &[
     "tap",
     "tun",
     "utun",
-    "zt",   // zerotier
-    "wg",   // wireguard
-    "awdl", // macOS
-    "llnw", // macOS
-    "anpi", // macOS
-    "stun", // macOS
-    "gif",  // BSD tunnel
+    "zt",  // zerotier
+    "wg",  // wireguard
+    "gif", // BSD tunnel
     "stf",
     "isatap",
     "teredo",
