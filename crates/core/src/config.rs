@@ -26,6 +26,12 @@ pub const ALLOWED_INTERVAL_MS: [u64; 3] = [1000, 2000, 3000];
 /// Default sample interval: 2 seconds.
 pub const DEFAULT_INTERVAL_MS: u64 = 2000;
 
+/// Upper bound for `sample.cpu_smoothing`. The EMA weight is the history
+/// weight, so exactly `1.0` would freeze the displayed CPU forever; keep the
+/// hand-editable value just below it so a config typo cannot brick the
+/// indicator. Zero still disables smoothing exactly.
+const MAX_CPU_SMOOTHING: f64 = 0.99;
+
 /// Allowed item-spacing values in pixels for the single-row layout. The
 /// settings UI offers exactly these choices; any other value snaps to the
 /// nearest one.
@@ -63,7 +69,8 @@ pub struct Config {
 #[serde(default)]
 pub struct SampleConfig {
     pub interval_ms: u64,
-    /// Exponential smoothing factor for CPU percent. 0 disables smoothing.
+    /// Exponential smoothing factor for CPU percent. 0 disables smoothing;
+    /// values are sanitized to `[0, 0.99]` because 1.0 would freeze the EMA.
     pub cpu_smoothing: f64,
 }
 
@@ -107,7 +114,7 @@ pub struct HistoryConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum CsvScope {
-    /// Copy exactly what the chart currently shows.
+    /// Copy the measured buckets in the chart's current window.
     #[default]
     Visible,
     Last24h,
@@ -263,12 +270,12 @@ impl Config {
                 field: "sample.cpu_smoothing",
                 message: format!("reset to the default 0.3 (was {old})"),
             });
-        } else if !(0.0..=1.0).contains(&self.sample.cpu_smoothing) {
+        } else if !(0.0..=MAX_CPU_SMOOTHING).contains(&self.sample.cpu_smoothing) {
             let old = self.sample.cpu_smoothing;
-            self.sample.cpu_smoothing = old.clamp(0.0, 1.0);
+            self.sample.cpu_smoothing = old.clamp(0.0, MAX_CPU_SMOOTHING);
             issues.push(SanitizeIssue {
                 field: "sample.cpu_smoothing",
-                message: format!("clamped to [0,1] (was {old})"),
+                message: format!("clamped to [0,{MAX_CPU_SMOOTHING}] (was {old})"),
             });
         }
         if self.history.retention_days == 0 || self.history.retention_days > MAX_RETENTION_DAYS {
@@ -728,8 +735,20 @@ mod tests {
         let mut c = Config::default();
         c.sample.cpu_smoothing = 1.5;
         let issues = c.sanitize();
-        assert_eq!(c.sample.cpu_smoothing, 1.0);
+        assert_eq!(c.sample.cpu_smoothing, 0.99);
         assert!(issues.iter().any(|i| i.field == "sample.cpu_smoothing"));
+    }
+
+    #[test]
+    fn cpu_smoothing_one_is_clamped_below_freeze() {
+        // Exactly 1.0 is a valid EMA weight but makes the CPU display never
+        // absorb a new sample; sanitize keeps hand-edited configs below it.
+        let mut c = Config::default();
+        c.sample.cpu_smoothing = 1.0;
+        let issues = c.sanitize();
+        assert_eq!(c.sample.cpu_smoothing, 0.99);
+        assert!(issues.iter().any(|i| i.field == "sample.cpu_smoothing"));
+        assert!(c.sanitize().is_empty(), "sanitize must be idempotent");
     }
 
     #[test]
