@@ -9,9 +9,28 @@ use super::*;
 /// menu is what lets the left click open the trend chart immediately,
 /// without waiting for a possible second press.
 pub(crate) unsafe fn launch_taskmgr() {
+    let Some(system) = sysvitals_support::system_directory() else {
+        log_event(
+            "WARN",
+            "task manager: cannot determine the Windows system directory",
+        );
+        return;
+    };
+    // Never let the current directory or PATH choose Task Manager: a portable
+    // launch folder is user-writable, so a same-named executable there must
+    // not run instead of the signed system tool.
+    let path = system.join("taskmgr.exe");
+    if !path.is_file() {
+        log_event(
+            "WARN",
+            &format!("task manager not found at {}", path.display()),
+        );
+        return;
+    }
     let verb = utf16("open");
-    let target = utf16("taskmgr.exe");
-    let _ = ShellExecuteW(
+    let path_text = path.to_string_lossy();
+    let target = utf16(path_text.as_ref());
+    let result = ShellExecuteW(
         None,
         windows::core::PCWSTR(verb.as_ptr()),
         windows::core::PCWSTR(target.as_ptr()),
@@ -19,6 +38,12 @@ pub(crate) unsafe fn launch_taskmgr() {
         windows::core::PCWSTR::null(),
         SW_SHOWNORMAL,
     );
+    if (result.0 as usize) < 32 {
+        log_event(
+            "WARN",
+            &format!("task manager launch failed (code {})", result.0 as usize),
+        );
+    }
 }
 
 /// One row of the context menu. Separators use `id == 0` and an empty

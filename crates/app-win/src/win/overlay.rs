@@ -454,6 +454,11 @@ pub(crate) static MENU_TRACKING: AtomicBool = AtomicBool::new(false);
 /// process-global.
 pub(crate) static OVERLAY_CREATE_FAIL_LOGGED: AtomicBool = AtomicBool::new(false);
 
+/// Whether the virtual-desktop-manager creation warning was already emitted.
+/// `maintain_visibility` runs once per second while an overlay is cloaked; a
+/// permanent COM failure must not write one WARN per tick.
+static VD_MANAGER_FAIL_LOGGED: AtomicBool = AtomicBool::new(false);
+
 /// The Windows virtual-desktop manager, created on demand. The overlay is
 /// a top-level window, so Windows cloaks it when the user switches to
 /// another virtual desktop; the taskbar itself appears on every desktop,
@@ -467,9 +472,14 @@ pub(crate) unsafe fn vd_manager() -> Option<IVirtualDesktopManager> {
                 CLSCTX_INPROC_SERVER,
             );
             match created {
-                Ok(manager) => *slot.borrow_mut() = Some(manager),
+                Ok(manager) => {
+                    VD_MANAGER_FAIL_LOGGED.store(false, Ordering::Relaxed);
+                    *slot.borrow_mut() = Some(manager);
+                }
                 Err(e) => {
-                    log_event("WARN", &format!("virtual desktop manager unavailable: {e}"));
+                    if !VD_MANAGER_FAIL_LOGGED.swap(true, Ordering::Relaxed) {
+                        log_event("WARN", &format!("virtual desktop manager unavailable: {e}"));
+                    }
                     return None;
                 }
             }
@@ -669,6 +679,21 @@ pub(crate) unsafe fn maintain_topmost(hwnd: HWND) {
     );
 }
 
+/// Hide an overlay whose taskbar is no longer on screen. The hide is
+/// intentional, so the next visible tick must restore without reporting it as
+/// an unexpected disappearance; a repaint is needed when it returns.
+unsafe fn hide_overlay_for_missing_taskbar(hwnd: HWND) {
+    if IsWindowVisible(hwnd).as_bool() {
+        log_event(
+            "INFO",
+            "overlay hidden: taskbar not on screen (auto-hide or fullscreen app)",
+        );
+    }
+    with_overlay_mut(hwnd, |ov| ov.visibility_anomaly = true);
+    set_overlay_needs_render(hwnd, true);
+    let _ = ShowWindow(hwnd, SW_HIDE);
+}
+
 /// Move-only placement for one overlay. Visibility follows that overlay's
 /// taskbar alone: as long as the taskbar is on screen the indicator stays
 /// visible. It hides only when the taskbar itself is gone (auto-hide or a
@@ -679,17 +704,7 @@ pub(crate) unsafe fn reposition_overlay(hwnd: HWND) {
         return;
     };
     let Some(info) = taskbar_info_for(ov.taskbar) else {
-        if IsWindowVisible(hwnd).as_bool() {
-            log_event(
-                "INFO",
-                "overlay hidden: taskbar not on screen (auto-hide or fullscreen app)",
-            );
-        }
-        // The hide is intentional; the next visible tick should restore
-        // without reporting it as an unexpected disappearance.
-        with_overlay_mut(hwnd, |ov| ov.visibility_anomaly = true);
-        set_overlay_needs_render(hwnd, true);
-        let _ = ShowWindow(hwnd, SW_HIDE);
+        hide_overlay_for_missing_taskbar(hwnd);
         return;
     };
     maintain_visibility(hwnd);
@@ -746,17 +761,7 @@ pub(crate) unsafe fn apply_position(hwnd: HWND) {
         return;
     };
     let Some(info) = taskbar_info_for(ov.taskbar) else {
-        if IsWindowVisible(hwnd).as_bool() {
-            log_event(
-                "INFO",
-                "overlay hidden: taskbar not on screen (auto-hide or fullscreen app)",
-            );
-        }
-        // The hide is intentional; the next visible tick should restore
-        // without reporting it as an unexpected disappearance.
-        with_overlay_mut(hwnd, |ov| ov.visibility_anomaly = true);
-        set_overlay_needs_render(hwnd, true);
-        let _ = ShowWindow(hwnd, SW_HIDE);
+        hide_overlay_for_missing_taskbar(hwnd);
         return;
     };
     maintain_visibility(hwnd);

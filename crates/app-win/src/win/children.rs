@@ -1,6 +1,8 @@
 //! children: split out of `win` (see `win` for the module map).
 
 use super::*;
+use std::os::windows::process::CommandExt;
+use std::process::{Command, Stdio};
 
 // ------------------------------------------------------- child process launch
 
@@ -687,45 +689,59 @@ pub(crate) fn current_exe_dir() -> Option<String> {
 /// Restart the overlay: schedule a delayed relaunch of the current exe
 /// (after the single-instance mutex is released on exit), then exit.
 pub(crate) fn restart_self() {
+    /// `CREATE_NO_WINDOW`; passed as a raw flag because std's
+    /// `CommandExt::creation_flags` takes a `u32`.
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
     let Some(exe) = current_exe_path() else {
         log_event("WARN", "restart_self: cannot determine exe path");
         return;
     };
-    // Delay 2 seconds so this process exits and releases the mutex first.
-    let cmd = format!("/c timeout /t 2 /nobreak >nul & start \"\" \"{}\"", exe);
-    let cmd_w = utf16(&cmd);
-    let verb = utf16("open");
-    let target = utf16("cmd.exe");
-    let params = windows::core::PCWSTR(cmd_w.as_ptr());
-    // Schedule first; only tear the child panels down once Windows accepted
-    // the relaunch. Closing them before the check left the running indicator
-    // without its windows when `ShellExecuteW` failed.
-    log_event("INFO", "restart_self: scheduling relaunch and exiting");
-    unsafe {
-        let result = ShellExecuteW(
-            None,
-            windows::core::PCWSTR(verb.as_ptr()),
-            windows::core::PCWSTR(target.as_ptr()),
-            params,
-            windows::core::PCWSTR::null(),
-            SW_HIDE,
+    let Some(system) = sysvitals_support::system_directory() else {
+        log_event(
+            "WARN",
+            "restart_self: cannot determine the Windows system directory",
         );
-        // ShellExecuteW reports errors as an HINSTANCE whose value is
-        // below 32; a failed relaunch must not quit the running
-        // indicator, or the user is left with no SysVitals at all.
-        if (result.0 as usize) < 32 {
-            log_event(
-                "WARN",
-                &format!(
-                    "restart_self: relaunch failed (code {}), keeping the running instance",
-                    result.0 as usize
-                ),
-            );
-            return;
+        return;
+    };
+
+    // Launch through cmd only for the `start` builtin, but resolve both
+    // cmd.exe and ping.exe by absolute path. `timeout.exe` is deliberately
+    // not used: it fails immediately without console stdin (and a bare name
+    // can resolve to Git's MSYS timeout first), which would race the
+    // single-instance mutex. `ping` provides the delay without a console.
+    let cmd = system.join("cmd.exe");
+    let ping = system.join("ping.exe");
+    let script = format!(
+        "\"{}\" -n 3 127.0.0.1 >nul & start \"\" \"%SYSVITALS_RESTART_EXE%\"",
+        ping.display()
+    );
+    let spawned = Command::new(cmd)
+        .arg("/c")
+        // cmd.exe does not use C-runtime quoting; append the script verbatim so
+        // the inner quotes reach `start` intact.
+        .raw_arg(script)
+        // Pass the path in the environment, not interpolated into the command
+        // line: cmd expands `%VAR%` once, so a `%` in a legal install path is
+        // not reinterpreted.
+        .env("SYSVITALS_RESTART_EXE", &exe)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn();
+
+    match spawned {
+        Ok(_) => {
+            log_event("INFO", "restart_self: scheduling relaunch and exiting");
+            // The new instance starts with empty child slots; close ours so it
+            // cannot open a second History window next to the old one.
+            close_children();
+            unsafe { shutdown_and_quit() };
         }
-        // The new instance starts with empty child slots; close ours so it
-        // cannot open a second History window next to the old one.
-        close_children();
-        shutdown_and_quit();
+        Err(e) => log_event(
+            "WARN",
+            &format!("restart_self: relaunch failed ({e}), keeping the running instance"),
+        ),
     }
 }

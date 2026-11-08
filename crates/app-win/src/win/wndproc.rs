@@ -39,27 +39,57 @@ pub(crate) fn handle_history_click(hwnd: HWND) {
     }
 }
 
+/// Read the setting-area name carried by `WM_SETTINGCHANGE`. The string lives
+/// in the sender's address space and is not guaranteed to be readable here, so
+/// the read goes through `ReadProcessMemory`; `None` means "not readable".
+fn setting_change_name(lparam: LPARAM) -> Option<String> {
+    use std::ffi::c_void;
+    use windows::Win32::System::Diagnostics::Debug::ReadProcessMemory;
+    use windows::Win32::System::Threading::GetCurrentProcess;
+
+    if lparam.0 == 0 {
+        return None;
+    }
+    let mut buf = [0u16; 256];
+    let mut read = 0usize;
+    // A WM_SETTINGCHANGE string is owned by the sender. For a broadcast it is
+    // not guaranteed to be readable in this process, and any same-user process
+    // can send a bogus pointer; dereferencing it directly is an AV waiting to
+    // happen. ReadProcessMemory validates the range and never faults.
+    let ok = unsafe {
+        ReadProcessMemory(
+            GetCurrentProcess(),
+            lparam.0 as *const c_void,
+            buf.as_mut_ptr() as *mut c_void,
+            std::mem::size_of_val(&buf),
+            Some(&mut read as *mut usize),
+        )
+    }
+    .is_ok();
+    if !ok || read == 0 {
+        return None;
+    }
+    let units = (read / std::mem::size_of::<u16>()).min(buf.len());
+    let len = buf[..units].iter().position(|&c| c == 0).unwrap_or(units);
+    Some(String::from_utf16_lossy(&buf[..len]))
+}
+
 /// Whether a `WM_SETTINGCHANGE` broadcast affects the taskbar's appearance,
 /// metrics or clock format. `lParam == 0` is the documented "all settings"
-/// broadcast and is always honored; other categories (environment, policy,
-/// input language, ...) must not trigger registry reads and a full relayout
-/// on every taskbar.
+/// broadcast and is always honored. An unreadable/non-UTF-16 payload is
+/// treated conservatively as relevant instead of dereferencing an invalid
+/// pointer.
 fn relevant_setting_change(lparam: LPARAM) -> bool {
     if lparam.0 == 0 {
         return true;
     }
-    let ptr = lparam.0 as *const u16;
-    let mut len = 0usize;
-    // The payload is a NUL-terminated string owned by the sender. Bound the
-    // scan so a malformed pointer cannot run away.
-    while len < 256 && unsafe { *ptr.add(len) } != 0 {
-        len += 1;
+    match setting_change_name(lparam) {
+        Some(name) => matches!(
+            name.as_str(),
+            "ImmersiveColorSet" | "WindowMetrics" | "intl" | "HighContrast"
+        ),
+        None => true,
     }
-    let name = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(ptr, len) });
-    matches!(
-        name.as_str(),
-        "ImmersiveColorSet" | "WindowMetrics" | "intl" | "HighContrast"
-    )
 }
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
