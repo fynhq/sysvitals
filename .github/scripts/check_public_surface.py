@@ -47,6 +47,7 @@ TREE_ALLOW = {
     "THIRD_PARTY_NOTICES.md": {"email"},
     "Cargo.lock": {"env-narration"},
     "crates/core/src/i18n.rs": {"cjk"},
+    "crates/core/locales/zh.conf": {"cjk"},
     "crates/core/src/config.rs": {"cjk"},
     "crates/core/src/format.rs": {"cjk"},
     "crates/core/src/sampler/net.rs": {"env-narration"},
