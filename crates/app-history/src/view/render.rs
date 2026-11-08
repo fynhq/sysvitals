@@ -11,7 +11,13 @@ impl Render for HistoryView {
             self.last_title = Some(title);
         }
         let points = self.points();
+        let loading = self.data_loading;
         let empty = self.buckets.is_empty();
+        let placeholder = if loading {
+            t(lang, "chart.loading").to_string()
+        } else {
+            t(lang, "chart.no_data").to_string()
+        };
         // The chart itself paints no x labels (`x_tick_count(0)` below); this
         // panel draws them at a readable size instead. Labels are generated
         // from the time window (six evenly spaced positions), not from data
@@ -225,19 +231,14 @@ impl Render for HistoryView {
                         }
                     }),
             )
-            .when(empty, |this| {
+            .when(loading || empty, move |this| {
                 this.child(
                     h_flex()
                         .absolute()
                         .size_full()
                         .items_center()
                         .justify_center()
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(empty_color)
-                                .child(t(lang, "chart.no_data").to_string()),
-                        ),
+                        .child(div().text_sm().text_color(empty_color).child(placeholder)),
                 )
             });
 

@@ -13,10 +13,10 @@ fn open_store_for_read(path: &std::path::Path) -> Result<Store, String> {
 }
 
 impl HistoryView {
-    /// The exact query window the chart is showing: a start floored to the
-    /// range's label grid, the current time, and the fine curve bucket width.
-    /// CSV export and the chart both use this so "copy what you see" is true
-    /// at the window boundary too.
+    /// The initial query window: a start floored to the range's label grid,
+    /// the current time, and the fine curve bucket width. After a load, the
+    /// chart may trim `from` forward to the first real bucket; the `Visible`
+    /// CSV exports those real buckets rather than padding the gap.
     ///
     /// The bucket grid uses the offset at the *window start*, not at "now":
     /// across a DST transition the old sample side must keep the offset that
@@ -119,6 +119,7 @@ impl HistoryView {
                 match loaded {
                     Ok(buckets) => {
                         view.buckets = buckets;
+                        view.trim_leading_gap();
                         view.data_error_logged = false;
                     }
                     Err(e) => view.log_data_error(format!("history: query failed: {e}")),
@@ -155,15 +156,31 @@ impl HistoryView {
             }
         }
         self.buckets = buckets;
+        self.trim_leading_gap();
+    }
+
+    /// If the requested window begins before the first stored sample, start
+    /// the visible time window at that sample instead of filling the leading
+    /// slots with the first future value. The alternative (a flat line drawn
+    /// backwards from the first sample) reads as data that was never measured.
+    fn trim_leading_gap(&mut self) {
+        let Some(first) = self.buckets.first().map(|bucket| bucket.ts) else {
+            return;
+        };
+        if let Some(query) = self.query.as_mut() {
+            query.from = query.from.max(first);
+        }
     }
 
     pub(crate) fn points(&self) -> Vec<ChartPoint> {
         // The chart library's x scale is an index scale (`ScalePoint`), so
         // one point per bucket is required for a time-linear geometry. The
         // query returns only buckets that contain samples; pad the missing
-        // slots here. Missing values repeat the previous real point so the
-        // path stays finite; `has_data` lets the tooltip say "--" instead of
-        // presenting a fabricated value.
+        // slots here. The leading gap is trimmed to the first real bucket
+        // (`trim_leading_gap`), so this loop never fabricates a line before
+        // the first measurement. Within the window, missing values repeat the
+        // previous real point so the path stays finite; `has_data` lets the
+        // tooltip say "--" instead of presenting a fabricated value.
         let Some(query) = self.query else {
             return Vec::new();
         };
@@ -231,7 +248,10 @@ impl HistoryView {
                 k as f32 / (X_TICK_COUNT - 1) as f32
             };
             let ts = query.from + (span * f64::from(frac)).round() as i64;
-            let clean = floor_to_grid(ts, step, local_offset_at(ts));
+            // `query.from` can be trimmed to the first real bucket, which is
+            // not necessarily on the label grid; never print a label before
+            // the visible window.
+            let clean = floor_to_grid(ts, step, local_offset_at(ts)).max(query.from);
             let day = day_of(clean);
             let crosses = prev_day.as_ref().is_none_or(|previous| *previous != day);
             prev_day = Some(day);
@@ -269,8 +289,9 @@ impl HistoryView {
                 cx.notify();
                 return;
             }
-            // Exactly the points currently drawn, including the grid-aligned
-            // window start and the local-time bucket phase.
+            // The real buckets in the current window. The chart pads missing
+            // slots to keep its index axis time-linear, but the CSV deliberately
+            // exports measured rows only instead of fabricating values.
             self.finish_copy(self.buckets.clone(), lang, cx);
             return;
         }

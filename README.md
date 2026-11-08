@@ -33,7 +33,7 @@ Use your actual path when installed in `~/Applications`; add `sudo` on permissio
 - Settings save immediately. Configure language, sampling interval (1/2/3 s; default 2 s), layout, spacing, prefixes, indicator theme, and Windows taskbar anchor/margin; vertical taskbars are supported.
 - Settings and history follow system appearance and accent color; the Windows indicator theme can be auto, light, or dark.
 - Launch at login is off by default; on macOS the first enable may need approval in **System Settings → General → Login Items & Extensions**.
-- History ranges are 5 minutes, 1 hour, 1 day, and 1 month; data is retained for up to one month, and logs older than 7 days are removed. The copy button exports the visible range as TSV with a UTF-8 BOM; network rates are live-only.
+- History ranges are 5 minutes, 1 hour, 1 day, and 1 month; data is retained for up to one month, and logs older than 7 days are removed. The copy button exports the visible range as TSV with a UTF-8 BOM; network rates are live-only. History retention and copy scope are advanced `config.toml` settings (`history.*`), not settings-window controls.
 - On Windows, each visible taskbar gets its own indicator; enable "Show my taskbar on all displays" to show it on secondary screens.
 - All data stays local; there is no telemetry, cloud service, or account.
 
@@ -93,7 +93,7 @@ xattr -d -r com.apple.quarantine /Applications/SysVitals.app
 - 设置即时保存。可配置语言、采样间隔（1/2/3 秒，默认 2 秒）、布局、间距、前缀、指示器主题、Windows 任务栏锚位/边距；支持垂直任务栏。
 - 设置与走势图跟随系统亮暗与强调色；Windows 指示器主题可选自动/亮色/暗色。
 - 开机自启默认关闭；macOS 首次开启可能需要在“系统设置 → 通用 → 登录项与扩展”中允许。
-- 走势图范围：5 分钟、1 小时、1 天、1 个月，历史最多保留一个月，日志超过 7 天自动清理。复制按钮导出当前可视范围为 TSV（UTF-8 BOM）；网速只实时显示。
+- 走势图范围：5 分钟、1 小时、1 天、1 个月，历史最多保留一个月，日志超过 7 天自动清理。复制按钮导出当前可视范围为 TSV（UTF-8 BOM）；网速只实时显示。历史保留天数与复制范围是 `config.toml` 的高级配置（`history.*`），设置窗不提供入口。
 - Windows 上每个可见任务栏都有独立指示器；开启“在所有显示器上显示任务栏”后副屏才会出现。
 - 所有数据都在本地；无遥测、云服务或账号。
 
