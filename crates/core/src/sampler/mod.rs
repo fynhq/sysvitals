@@ -104,9 +104,10 @@ impl Sampler {
         }
     }
 
-    /// Take one reading. The first call returns CPU/MEM with NaN network rates
-    /// (it only seeds baselines); from the second call on, network rates are
-    /// real. `now_unix` is the local wall-clock timestamp to stamp the sample.
+    /// Take one reading. The first call seeds CPU/network baselines and
+    /// therefore reports NaN for CPU and network rates; memory is valid
+    /// immediately. From the second call on, CPU and network rates are real.
+    /// `now_unix` is the local wall-clock timestamp to stamp the sample.
     pub fn sample(&mut self, now_unix: i64) -> Snapshot {
         // Whole-machine CPU percent. On Windows the PDH counter follows
         // Task Manager's formula for the running OS build (frequency-weighted

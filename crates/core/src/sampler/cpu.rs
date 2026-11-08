@@ -82,6 +82,15 @@ impl CpuSampler {
     /// the sleep. Otherwise `None`/first tick passes the raw value through to
     /// avoid the classic EMA pull toward zero.
     pub fn update(&mut self, raw: f64, elapsed: Option<Duration>) -> f64 {
+        // The first sysinfo CPU refresh is not an interval average: sysinfo
+        // itself documents the first call as inaccurate and recommends two
+        // refreshes with ~200 ms between them. The sampler is constructed
+        // immediately before its first sample, so that reading must not prime
+        // the EMA or reach the display. Network already reports NaN for this
+        // frame; CPU follows the same "no usable interval" rule.
+        if elapsed.is_none() {
+            return self.last.unwrap_or(f64::NAN);
+        }
         // A non-finite reading is "no data", not zero: clamping would keep
         // NaN and poison every later EMA step. Leave the previous value (or
         // NaN on the very first tick) and wait for a finite sample.
@@ -122,16 +131,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn first_value_passes_through_unsmoothed() {
+    fn first_tick_has_no_rate_and_does_not_prime_the_ema() {
         let mut s = CpuSampler::new(0.3);
-        assert_eq!(s.update(50.0, None), 50.0);
+        // sysinfo's first refresh is not a valid interval average.
+        assert!(s.update(50.0, None).is_nan());
+        // The first sample with a measured interval primes the EMA.
+        assert_eq!(s.update(100.0, Some(Duration::from_millis(2000))), 100.0);
+        let v = s.update(50.0, Some(Duration::from_millis(2000)));
+        assert!((v - 65.0).abs() < 1e-9, "got {v}");
     }
 
     #[test]
     fn smoothing_weights_history_by_alpha() {
         let mut s = CpuSampler::new(0.3);
-        s.update(50.0, None); // prime at 50
-                              // second: 0.7*raw + 0.3*prev = 70 + 15 = 85
+        s.update(50.0, Some(Duration::from_millis(2000))); // prime at 50
+                                                           // second: 0.7*raw + 0.3*prev = 70 + 15 = 85
         let v = s.update(100.0, Some(Duration::from_millis(2000)));
         assert!((v - 85.0).abs() < 1e-9, "got {v}");
     }
@@ -141,7 +155,7 @@ mod tests {
         // The documented meaning of `cpu_smoothing = 0`: no smoothing, so the
         // displayed value is the raw reading (not frozen at the previous one).
         let mut s = CpuSampler::new(0.0);
-        s.update(50.0, None);
+        s.update(50.0, Some(Duration::from_millis(2000)));
         let v = s.update(100.0, Some(Duration::from_millis(2000)));
         assert_eq!(v, 100.0);
     }
@@ -149,9 +163,10 @@ mod tests {
     #[test]
     fn alpha_one_freezes_at_previous() {
         // alpha = 1 is full history weight (maximum smoothing): the value never
-        // moves off the primed sample.
+        // moves off the primed sample. Config sanitization caps the hand-edited
+        // value below 1.0, so this is only reachable by direct construction.
         let mut s = CpuSampler::new(1.0);
-        s.update(50.0, None);
+        s.update(50.0, Some(Duration::from_millis(2000)));
         let v = s.update(100.0, Some(Duration::from_millis(2000)));
         assert_eq!(v, 50.0);
     }
@@ -161,14 +176,14 @@ mod tests {
         // alpha 0 = pass-through, so the clamp on the raw value is directly
         // observable.
         let mut s = CpuSampler::new(0.0);
-        assert_eq!(s.update(140.0, None), 100.0);
+        assert_eq!(s.update(140.0, Some(Duration::from_millis(1000))), 100.0);
         assert_eq!(s.update(-10.0, Some(Duration::from_millis(1000))), 0.0);
     }
 
     #[test]
     fn non_finite_alpha_falls_back_to_default() {
         let mut s = CpuSampler::new(f64::NAN);
-        s.update(50.0, None);
+        s.update(50.0, Some(Duration::from_millis(2000)));
         let v = s.update(100.0, Some(Duration::from_millis(2000)));
         assert!((v - 85.0).abs() < 1e-9, "NaN alpha poisoned the EMA: {v}");
     }
@@ -176,8 +191,10 @@ mod tests {
     #[test]
     fn non_finite_raw_does_not_poison_the_ema() {
         let mut s = CpuSampler::new(0.3);
-        assert!(s.update(f64::NAN, None).is_nan());
-        s.update(50.0, None);
+        assert!(s
+            .update(f64::NAN, Some(Duration::from_millis(1000)))
+            .is_nan());
+        s.update(50.0, Some(Duration::from_millis(2000)));
         // A bad frame returns the last good value and leaves the EMA intact.
         let bad = s.update(f64::INFINITY, Some(Duration::from_millis(1000)));
         assert_eq!(bad, 50.0);
@@ -191,7 +208,7 @@ mod tests {
         // the raw value passes through untouched rather than blending toward
         // the pre-sleep sample.
         let mut s = CpuSampler::new(0.3);
-        s.update(50.0, None);
+        s.update(50.0, Some(Duration::from_millis(2000)));
         let big = Duration::from_secs_f64(STALE_GAP_SECS + 10.0);
         let v = s.update(100.0, Some(big));
         assert_eq!(v, 100.0, "stale gap must re-prime to raw, not blend");
