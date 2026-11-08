@@ -26,7 +26,7 @@
 use std::cell::Cell;
 use std::time::Duration;
 
-use rusqlite::{params, Connection, TransactionBehavior};
+use rusqlite::{params, Connection, ErrorCode, TransactionBehavior};
 
 /// How long raw two-second samples are kept. Must cover the widest window
 /// that reads raw points: the 1-hour view starts up to one label step
@@ -81,6 +81,25 @@ pub struct Store {
 pub fn floor_to_grid(ts: i64, step: i64, offset: i64) -> i64 {
     let step = step.max(1);
     (ts + offset).div_euclid(step) * step - offset
+}
+
+/// Whether an error from opening or writing the database says the file is
+/// structurally corrupt. The history writer quarantines only these errors:
+/// a future schema, a permission failure or a busy/locked database must not
+/// be renamed aside.
+pub(crate) fn is_corruption_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause.downcast_ref::<rusqlite::Error>().is_some_and(|err| {
+            matches!(
+                err,
+                rusqlite::Error::SqliteFailure(code, _)
+                    if matches!(
+                        code.code,
+                        ErrorCode::DatabaseCorrupt | ErrorCode::NotADatabase
+                    )
+            )
+        })
+    })
 }
 
 impl Store {
@@ -450,6 +469,23 @@ mod tests {
             })
             .unwrap();
         assert_eq!((ts, cpu_sum, mem_sum, n), (60, 25.0, 60.0, 1));
+    }
+
+    #[test]
+    fn wall_clock_rollback_samples_are_kept() {
+        // `ts` is a sample time, not a monotonic sequence: after an NTP
+        // rollback an earlier timestamp must remain queryable instead of
+        // being rejected or hidden by the "now" query bound.
+        let s = Store::in_memory().unwrap();
+        s.insert(1_700_000_000, 10.0, 20.0).unwrap();
+        s.insert(1_699_999_000, 30.0, 40.0).unwrap();
+        assert_eq!(s.row_count(), 2);
+        let b = s
+            .buckets_offset(1_699_998_990, 1_699_999_010, 10, 0)
+            .unwrap();
+        assert_eq!(b.len(), 1);
+        assert_eq!(b[0].ts, 1_699_999_000);
+        assert!((b[0].cpu - 30.0).abs() < 1e-9);
     }
 
     #[test]

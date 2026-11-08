@@ -36,16 +36,14 @@ pub(crate) use theme::*;
 pub(crate) use wndproc::*;
 
 use std::cell::RefCell;
-use std::sync::atomic::{
-    AtomicBool, AtomicI32, AtomicI64, AtomicIsize, AtomicU32, AtomicU64, Ordering,
-};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use sysvitals_core::format::FormattedRow;
 use sysvitals_core::{
-    format_frame, format_frame_vertical, t, Config, HistoryWriter, Language, NetSelection, Sampler,
-    Theme,
+    format_frame, format_frame_vertical, t, Config, HistoryWriterSlot, Language, NetSelection,
+    Sampler, Theme,
 };
 // Shared process plumbing (daily-file logging, panic hook, HKCU probes)
 // lives in `sysvitals-support` so the overlay and the GPUI panels cannot
@@ -273,10 +271,6 @@ static CONFIG_ERROR_MTIME: AtomicU64 = AtomicU64::new(0);
 /// Whether `TIMER_SAMPLE` is currently armed. A failed initial `SetTimer`
 /// leaves the overlay frozen on its startup frame; the watchdog retries it.
 static SAMPLE_TIMER_OK: AtomicBool = AtomicBool::new(false);
-/// Last history sample timestamp. Kept monotonic across NTP/DST rollbacks so
-/// the raw table's primary key never rejects a run of new samples.
-static LAST_SAMPLE_TS: AtomicI64 = AtomicI64::new(i64::MIN);
-
 fn sentinel_hwnd() -> HWND {
     HWND(SENTINEL_HWND.load(Ordering::Relaxed) as *mut std::ffi::c_void)
 }
@@ -290,13 +284,9 @@ thread_local! {
     /// One entry per visible taskbar; the registry the sentinel drives.
     static OVERLAYS: RefCell<Vec<Overlay>> = const { RefCell::new(Vec::new()) };
     /// Background SQLite writer. Created on the first enabled sample so a
-    /// missing data dir or a failed spawn never blocks the indicator.
-    static HISTORY_WRITER: RefCell<Option<HistoryWriter>> = const { RefCell::new(None) };
-    /// When the last writer spawn failed. A failed spawn (thread creation or
-    /// history-path resolution) retries after a cooldown instead of disabling
-    /// history for the rest of the process lifetime.
-    static HISTORY_WRITER_FAILED_AT: std::cell::Cell<Option<Instant>> =
-        const { std::cell::Cell::new(None) };
+    /// missing data dir or a failed spawn never blocks the indicator; the
+    /// slot owns the lazy-spawn retry policy.
+    static HISTORY_WRITER: RefCell<HistoryWriterSlot> = const { RefCell::new(HistoryWriterSlot::new()) };
     /// Last occlusion probe; the diagnostic is throttled to 5 s because
     /// `WindowFromPoint` is not free and an occluder is not actionable.
     static LAST_OCCLUSION_PROBE: std::cell::Cell<Option<Instant>> =

@@ -50,7 +50,7 @@ use objc2_foundation::{
 
 use sysvitals_core::config::config_path;
 use sysvitals_core::format::{format_frame, join_prefix};
-use sysvitals_core::{t, Config, FormattedRow, HistoryWriter, Metric, NetSelection, Sampler};
+use sysvitals_core::{t, Config, FormattedRow, HistoryWriterSlot, Metric, NetSelection, Sampler};
 
 // `SMAppService` lives in ServiceManagement.framework. Linking it keeps the
 // class registered for the runtime lookup below; no typed bindings are
@@ -88,7 +88,7 @@ const SV_BUILD_ID: &str = match option_env!("SV_BUILD_ID") {
     None => concat!("v", env!("CARGO_PKG_VERSION")),
 };
 
-// Logging (`log_event`, `prune_old_logs`) and the Rust panic hook come
+// Logging (`log_event`) and the Rust panic hook come
 // from `sysvitals-support`, shared with the Windows overlay and the GPUI
 // panels. The macOS side additionally logs uncaught Objective-C
 // exceptions below; a mach-exception port handler was judged out of
@@ -163,9 +163,6 @@ fn acquire_single_instance() -> bool {
     true
 }
 
-/// How long a failed history-writer spawn waits before retrying.
-const HISTORY_WRITER_RETRY_COOLDOWN: Duration = Duration::from_secs(300);
-
 thread_local! {
     static SAMPLER: RefCell<Option<Sampler>> = const { RefCell::new(None) };
     static CONFIG: RefCell<Config> = RefCell::new(Config::default());
@@ -174,18 +171,13 @@ thread_local! {
     /// inside one second must still be visible to the poller.
     static CONFIG_MTIME: RefCell<u64> = const { RefCell::new(0) };
     static CONFIG_ERROR_MTIME: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-    /// Last history sample timestamp; monotonic across wall-clock rollbacks.
-    static LAST_SAMPLE_TS: std::cell::Cell<i64> = const { std::cell::Cell::new(i64::MIN) };
     static MTM: RefCell<Option<MainThreadMarker>> = const { RefCell::new(None) };
     // History writes run on a dedicated worker thread. SQLite open /
     // insert / prune on the main RunLoop (up to the 250 ms busy timeout)
-    // could freeze the menu bar and its menus on a slow disk.
-    static HISTORY_WRITER: RefCell<Option<HistoryWriter>> = const { RefCell::new(None) };
-    /// When the last writer spawn failed. A failed spawn (thread creation
-    /// refused under resource pressure) retries after a cooldown instead
-    /// of disabling history for the rest of the process lifetime.
-    static HISTORY_WRITER_FAILED_AT: std::cell::Cell<Option<Instant>> =
-        const { std::cell::Cell::new(None) };
+    // could freeze the menu bar and its menus on a slow disk; the slot owns
+    // the lazy-spawn retry policy.
+    static HISTORY_WRITER: RefCell<HistoryWriterSlot> =
+        const { RefCell::new(HistoryWriterSlot::new()) };
     // The repeating sample timer, kept so the interval can be re-applied
     // when the config file changes it (parity with the Windows overlay,
     // which re-seeds its sample timer on config hot-reload).

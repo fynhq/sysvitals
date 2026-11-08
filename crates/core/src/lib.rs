@@ -225,7 +225,7 @@ impl HistoryState {
 
 pub use config::Config;
 pub use format::{format_frame, format_frame_vertical, FormattedRow, Line};
-pub use history_writer::HistoryWriter;
+pub use history_writer::{HistoryWriter, HistoryWriterSlot};
 pub use i18n::{t, Language};
 pub use model::{Anchor, Metric, Snapshot, Theme};
 pub use sampler::{NetSelection, Sampler};
