@@ -42,7 +42,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use sysvitals_core::cli::AnchorRect;
-use sysvitals_core::config::{config_path, history_path, Config, CsvScope};
+use sysvitals_core::config::{config_path, history_path, Config};
 use sysvitals_core::i18n::{t, Language};
 use sysvitals_core::store::{floor_to_grid, Bucket, Store};
 #[cfg(windows)]

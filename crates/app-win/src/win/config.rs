@@ -245,27 +245,11 @@ pub(crate) fn poll_config_change() {
             (loaded, source)
         }
     };
-    // The sampler fixes `cpu_smoothing` at construction; detect a change
-    // before swapping in the new config so it can rebuild afterwards.
-    let smoothing_changed = config().sample.cpu_smoothing != loaded.sample.cpu_smoothing;
     CONFIG_FROM_FILE.store(
         source == sysvitals_core::config::ConfigSource::File,
         Ordering::Relaxed,
     );
     store_config(loaded.clone());
-    if smoothing_changed {
-        // Drop the sampler; the next tick rebuilds it with the new factor.
-        // Rebuilding re-primes the CPU EMA and re-seeds the network
-        // baseline, i.e. one "--" frame — the same cost as a restart.
-        SAMPLER.with(|s| *s.borrow_mut() = None);
-        log_event(
-            "INFO",
-            &format!(
-                "cpu_smoothing changed to {}: sampler rebuilds on the next tick",
-                loaded.sample.cpu_smoothing
-            ),
-        );
-    }
     // A missing file (for example after saving a corrupt config aside)
     // is not an explicit "auto-start off" choice. Only an existing,
     // parsed file may apply the platform side effect.

@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use windows::Win32::NetworkManagement::IpHelper::{FreeMibTable, GetIfTable2, MIB_IF_TABLE2};
 use windows::Win32::NetworkManagement::Ndis::MediaConnectStateDisconnected;
 
-use super::net::{CounterFrame, NetSelection};
+use super::net::CounterFrame;
 
 /// The hardware-interface set is only needed on the sysinfo fallback path.
 /// It changes on plug/unplug or adapter enable/disable, so a few seconds of
@@ -25,7 +25,7 @@ const HARDWARE_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 /// octets and the `HardwareInterface` bit all come from the same row, so this
 /// avoids sysinfo's per-refresh adapter/address enumeration entirely.
 /// `None` means the table could not be read and the caller must fall back.
-pub(crate) fn native_counters(selection: &NetSelection) -> Option<CounterFrame> {
+pub(crate) fn native_counters() -> Option<CounterFrame> {
     unsafe {
         let mut table: *mut MIB_IF_TABLE2 = std::ptr::null_mut();
         if GetIfTable2(&mut table).0 != 0 {
@@ -33,28 +33,22 @@ pub(crate) fn native_counters(selection: &NetSelection) -> Option<CounterFrame> 
         }
         let rows =
             std::slice::from_raw_parts((*table).Table.as_ptr(), (*table).NumEntries as usize);
-        let auto = matches!(selection, NetSelection::Auto);
         let mut frame = Vec::new();
         for row in rows {
             // Match sysinfo's active-link filter: a disconnected or addressless
-            // adapter must not enter an explicit selection with stale counters.
+            // adapter must not enter the frame with stale counters.
             if (row.TransmitLinkSpeed == 0 && row.ReceiveLinkSpeed == 0)
                 || row.MediaConnectState == MediaConnectStateDisconnected
                 || row.PhysicalAddressLength == 0
             {
                 continue;
             }
-            if auto && row.InterfaceAndOperStatusFlags._bitfield & 0x01 == 0 {
+            if row.InterfaceAndOperStatusFlags._bitfield & 0x01 == 0 {
                 continue;
             }
             let Some(name) = alias_string(&row.Alias) else {
                 continue;
             };
-            if let NetSelection::Interfaces(_) = selection {
-                if !selection.matches(&name) {
-                    continue;
-                }
-            }
             frame.push((name, row.InOctets, row.OutOctets));
         }
         FreeMibTable(table as *const core::ffi::c_void);

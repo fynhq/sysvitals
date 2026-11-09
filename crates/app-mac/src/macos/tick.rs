@@ -50,9 +50,6 @@ pub(crate) fn reschedule_if_interval_changed() {
 /// old-database rollup backfill, or a prune/VACUUM cannot freeze the menu
 /// bar.
 pub(crate) fn record_history(cfg: &Config, now: i64, snapshot: &sysvitals_core::Snapshot) {
-    if !cfg.history.enabled {
-        return;
-    }
     let log: sysvitals_core::history_writer::LogFn =
         Arc::new(|level: &str, message: &str| log_event(level, message));
     HISTORY_WRITER.with(|slot| {
@@ -80,8 +77,7 @@ pub(crate) fn tick() {
 
     let snapshot = SAMPLER.with(|s| {
         let mut guard = s.borrow_mut();
-        let sampler =
-            guard.get_or_insert_with(|| Sampler::new(NetSelection::Auto, cfg.sample.cpu_smoothing));
+        let sampler = guard.get_or_insert_with(Sampler::new);
         sampler.sample(now)
     });
 

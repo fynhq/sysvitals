@@ -10,7 +10,7 @@
 //!    unit-tested against synthetic counter feeds — no real NIC required.
 //! 2. [`NetSampler::poll`] adapts either the native Windows interface table or
 //!    `sysinfo::Networks` (real cumulative counters) into that
-//!    `(name, rx, tx)` vector after applying interface selection, then calls
+//!    `(name, rx, tx)` vector after filtering to physical adapters, then calls
 //!    `compute_rates`. The native path exists because sysinfo's Windows
 //!    refresh also re-enumerates every adapter's addresses, which a counter
 //!    sampler does not need; macOS keeps sysinfo.
@@ -23,44 +23,10 @@ use std::time::Duration;
 
 use sysinfo::Networks;
 
-/// NIC selection policy.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub enum NetSelection {
-    /// Sum physical adapters only. Virtual switches and VPN tunnels mirror
-    /// traffic that the physical NIC already counts, so including them would
-    /// double-count it. On Windows the NDIS `HardwareInterface` flag decides;
-    /// macOS/Linux and the Windows fallback use a name heuristic.
-    #[default]
-    Auto,
-    /// Aggregate exactly these interface names (user override in settings).
-    ///
-    /// Reserved capability: fully implemented and tested, but no settings UI
-    /// exposes it yet — the display layers currently always pass `Auto`.
-    Interfaces(Vec<String>),
-}
-
-impl NetSelection {
-    /// Whether an interface name is a candidate under this policy. Auto mode
-    /// keeps physical adapters via [`is_physical_name`] (the sampler replaces
-    /// that with the native Windows hardware set when it is readable);
-    /// explicit mode requires an exact name match.
-    pub fn matches(&self, name: &str) -> bool {
-        self.matches_with_hardware(name, None)
-    }
-
-    /// [`Self::matches`] with the native hardware-interface set injected for
-    /// auto mode. All selection consumers use this one predicate so a change
-    /// to the auto policy cannot drift between the native and sysinfo paths.
-    pub fn matches_with_hardware(&self, name: &str, hardware: Option<&HashSet<String>>) -> bool {
-        match self {
-            NetSelection::Auto => auto_matches(name, hardware),
-            NetSelection::Interfaces(list) => list.iter().any(|n| n == name),
-        }
-    }
-}
-
 /// Auto-mode decision: the NDIS hardware set is authoritative when available;
-/// otherwise the name heuristic decides.
+/// otherwise the name heuristic decides. Virtual switches and VPN tunnels
+/// mirror traffic that the physical NIC already counts, so they never count
+/// toward the link rate.
 fn auto_matches(name: &str, hardware: Option<&HashSet<String>>) -> bool {
     match hardware {
         Some(names) => names.contains(name),
@@ -213,9 +179,9 @@ pub fn compute_rates(
     (up.max(0.0), down.max(0.0))
 }
 
-/// Stateful NIC sampler wrapping [`compute_rates`] plus selection.
+/// Stateful NIC sampler wrapping [`compute_rates`] plus physical-adapter
+/// filtering.
 pub struct NetSampler {
-    selection: NetSelection,
     baseline: HashMap<String, (u64, u64)>,
     /// Alias set of NDIS hardware interfaces (Windows only). Refreshed on the
     /// sysinfo fallback path so plug/unplug is picked up; `None` until the
@@ -224,10 +190,15 @@ pub struct NetSampler {
     hardware: crate::sampler::net_win::HardwareInterfaces,
 }
 
+impl Default for NetSampler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NetSampler {
-    pub fn new(selection: NetSelection) -> Self {
+    pub fn new() -> Self {
         NetSampler {
-            selection,
             baseline: HashMap::new(),
             #[cfg(windows)]
             hardware: crate::sampler::net_win::HardwareInterfaces::new(),
@@ -252,7 +223,7 @@ impl NetSampler {
 
         #[cfg(windows)]
         {
-            if let Some(frame) = crate::sampler::net_win::native_counters(&self.selection) {
+            if let Some(frame) = crate::sampler::net_win::native_counters() {
                 return compute_rates(&mut self.baseline, &frame, elapsed_secs);
             }
             // `false` keeps interfaces that momentarily disappear from the list
@@ -260,7 +231,7 @@ impl NetSampler {
             // lives in `compute_rates`.
             networks.refresh(false);
             self.hardware.refresh();
-            let frame = collect_frame(networks, &self.selection, self.hardware.names());
+            let frame = collect_frame(networks, self.hardware.names());
             compute_rates(&mut self.baseline, &frame, elapsed_secs)
         }
 
@@ -270,30 +241,25 @@ impl NetSampler {
             // so a transient unplug doesn't destroy the baseline; reconciliation
             // lives in `compute_rates`.
             networks.refresh(false);
-            let frame = collect_frame(networks, &self.selection, None);
+            let frame = collect_frame(networks, None);
             compute_rates(&mut self.baseline, &frame, elapsed_secs)
         }
     }
 }
 
-/// Extract a filtered counter frame from a `sysinfo::Networks` handle.
-/// Auto mode keeps physical adapters only; `hardware` is the native Windows
-/// hardware set when readable. The native Windows counter path produces the
-/// same shape directly.
-fn collect_frame(
-    networks: &Networks,
-    selection: &NetSelection,
-    hardware: Option<&HashSet<String>>,
-) -> CounterFrame {
+/// Extract a filtered counter frame from a `sysinfo::Networks` handle:
+/// physical adapters only. `hardware` is the native Windows hardware set when
+/// readable; the native Windows counter path produces the same shape directly.
+fn collect_frame(networks: &Networks, hardware: Option<&HashSet<String>>) -> CounterFrame {
     networks
         .iter()
         .filter_map(|(name, data)| {
             // Interface names are `OsString` since sysinfo 0.40; the release
             // platforms (Windows/macOS) provide Unicode names, so the lossy
-            // form is exact in practice and keeps selection matched against
-            // the configured text.
+            // form is exact in practice and keeps matching against the
+            // hardware set stable.
             let name = name.to_string_lossy();
-            let selected = selection.matches_with_hardware(name.as_ref(), hardware);
+            let selected = auto_matches(name.as_ref(), hardware);
             if selected {
                 Some((
                     name.into_owned(),
@@ -503,19 +469,5 @@ mod tests {
         // Without the native set the heuristic decides.
         assert!(auto_matches("eth0", None));
         assert!(!auto_matches("docker0", None));
-    }
-
-    #[test]
-    fn selection_only_mode_filters_names() {
-        let sel = NetSelection::Interfaces(vec!["en0".to_string()]);
-        assert!(sel.matches("en0"));
-        assert!(!sel.matches("en1"));
-        // An explicit choice matches even a loopback-looking name (user intent).
-        let sel2 = NetSelection::Interfaces(vec!["lo".to_string()]);
-        assert!(sel2.matches("lo"));
-        // An explicit list skips the loopback guard for unlisted names too.
-        let sel3 = NetSelection::Interfaces(vec!["vEthernet (WSL)".to_string()]);
-        assert!(sel3.matches("vEthernet (WSL)"));
-        assert!(!sel3.matches("WLAN"));
     }
 }

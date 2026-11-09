@@ -51,23 +51,7 @@ pub(crate) fn reload_config_if_changed() {
         } => (config, issues, source),
     };
     log_config_issues(&issues);
-    // The sampler fixes `cpu_smoothing` at construction; a changed value
-    // drops it so the next tick rebuilds it (re-primes the CPU EMA and
-    // re-seeds the network baseline — one "--" frame, the same cost as a
-    // restart).
-    let smoothing_changed =
-        CONFIG.with(|c| c.borrow().sample.cpu_smoothing != cfg.sample.cpu_smoothing);
     CONFIG.with(|c| *c.borrow_mut() = cfg.clone());
-    if smoothing_changed {
-        SAMPLER.with(|s| *s.borrow_mut() = None);
-        log_event(
-            "INFO",
-            &format!(
-                "cpu_smoothing changed to {}: sampler rebuilds on the next tick",
-                cfg.sample.cpu_smoothing
-            ),
-        );
-    }
     if source == sysvitals_core::config::ConfigSource::File {
         apply_auto_start(&cfg);
     } else {

@@ -6,10 +6,10 @@
 //! exponential smoothing and clamps to a sane range. The first real value is
 //! passed through un-smoothed to avoid the classic EMA pull toward zero.
 //!
-//! Smoothing semantics: `alpha` is the weight of history, matching the
-//! `sample.cpu_smoothing` config field ("exponential smoothing factor; 0
-//! disables smoothing"). `alpha = 0` therefore tracks the raw signal exactly;
-//! larger values follow the raw signal *less* closely.
+//! Smoothing semantics: `alpha` is the weight of history. `alpha = 0`
+//! therefore tracks the raw signal exactly; larger values follow the raw
+//! signal *less* closely. [`crate::Sampler`] uses the default weight (0.3);
+//! the configurable knob was removed to keep the exposed settings minimal.
 
 use std::time::Duration;
 
@@ -62,8 +62,7 @@ impl Default for CpuSampler {
 impl CpuSampler {
     pub fn new(alpha: f64) -> Self {
         CpuSampler {
-            // `clamp` keeps NaN; callers load this from a hand-editable
-            // config, so treat a non-finite factor as the default.
+            // `clamp` keeps NaN; a non-finite factor falls back to the default.
             alpha: if alpha.is_finite() {
                 alpha.clamp(0.0, 1.0)
             } else {
@@ -152,8 +151,8 @@ mod tests {
 
     #[test]
     fn alpha_zero_disables_smoothing_and_tracks_raw() {
-        // The documented meaning of `cpu_smoothing = 0`: no smoothing, so the
-        // displayed value is the raw reading (not frozen at the previous one).
+        // Zero history weight means no smoothing, so the displayed value is
+        // the raw reading (not frozen at the previous one).
         let mut s = CpuSampler::new(0.0);
         s.update(50.0, Some(Duration::from_millis(2000)));
         let v = s.update(100.0, Some(Duration::from_millis(2000)));
@@ -163,8 +162,8 @@ mod tests {
     #[test]
     fn alpha_one_freezes_at_previous() {
         // alpha = 1 is full history weight (maximum smoothing): the value never
-        // moves off the primed sample. Config sanitization caps the hand-edited
-        // value below 1.0, so this is only reachable by direct construction.
+        // moves off the primed sample. The sampler uses 0.3, so this is only
+        // reachable by direct construction.
         let mut s = CpuSampler::new(1.0);
         s.update(50.0, Some(Duration::from_millis(2000)));
         let v = s.update(100.0, Some(Duration::from_millis(2000)));

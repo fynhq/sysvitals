@@ -10,13 +10,13 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use sysvitals_core::{format_frame, Config, NetSelection, Sampler};
+use sysvitals_core::{format_frame, Config, Sampler};
 
 fn main() {
     let mut cfg = Config::default();
     cfg.sanitize(); // exercise validation; defaults are already valid
 
-    let mut sampler = Sampler::new(NetSelection::Auto, cfg.sample.cpu_smoothing);
+    let mut sampler = Sampler::new();
     let tick = Duration::from_millis(cfg.sample.interval_ms);
 
     println!("SysVitals core monitor (Ctrl-C to stop) — single row, then dual row\n");

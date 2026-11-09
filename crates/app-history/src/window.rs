@@ -37,7 +37,6 @@ pub(crate) fn open_history_window(
         }
     };
     let lang = cfg.display.language;
-    let csv_scope = cfg.history.csv_scope;
     let window_title = format!("SysVitals {}", t(lang, "chart.title"));
 
     // Popup geometry in GPUI logical pixels. Height cut 25% (520 -> 390):
@@ -131,17 +130,7 @@ pub(crate) fn open_history_window(
         let first_load = first_load.clone();
         let shared = shared.clone();
         move |_window, cx| {
-            cx.new(|cx| {
-                HistoryView::new(
-                    lang,
-                    csv_scope,
-                    hidden_start,
-                    layout_size,
-                    first_load,
-                    shared,
-                    cx,
-                )
-            })
+            cx.new(|cx| HistoryView::new(lang, hidden_start, layout_size, first_load, shared, cx))
         }
     });
     let (window_handle, _view) = match opened {

@@ -423,7 +423,7 @@ impl SettingsView {
 
     /// Persist the UI-owned fields. The settings model is a startup snapshot,
     /// so a blind whole-file write would silently revert fields this window
-    /// does not edit (`history.*`, `sample.cpu_smoothing`) after a manual edit.
+    /// does not edit (`history.retention_days`) after a manual edit.
     /// Re-read the current file and carry those fields forward; only UI-owned
     /// fields come from the view. Also skip the write when the serialized
     /// result is unchanged, so merely focusing away does not bump the mtime
@@ -439,8 +439,8 @@ impl SettingsView {
             return;
         };
         // Start from the file currently on disk so every field this window
-        // does not own (history.*, sample.cpu_smoothing, and any future
-        // non-UI field) survives. Only the UI-owned fields are overlaid.
+        // does not own (history.retention_days, and any future non-UI field)
+        // survives. Only the UI-owned fields are overlaid.
         let mut cfg = match Config::load(&path) {
             Ok((disk, issues)) => {
                 sysvitals_panel::log_sanitize_issues("settings: config merge repair", &issues);

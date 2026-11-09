@@ -43,7 +43,6 @@ pub(crate) struct HistoryView {
     /// One alert per failure streak: a corrupt database would otherwise log
     /// every refresh tick (3 s), drowning the useful history.
     pub(crate) data_error_logged: bool,
-    pub(crate) csv_scope: CsvScope,
     pub(crate) copied: bool,
     pub(crate) copy_failed: bool,
     /// Monotonic ticket for the copy confirmation timer. An older timer must
@@ -99,7 +98,6 @@ pub(crate) struct HistoryView {
 impl HistoryView {
     pub(crate) fn new(
         lang: Language,
-        csv_scope: CsvScope,
         hidden_start: bool,
         fixed_size: Option<gpui_kit::Size<Pixels>>,
         first_load: Arc<AtomicBool>,
@@ -122,7 +120,6 @@ impl HistoryView {
             load_seq: 0,
             store: None,
             data_error_logged: false,
-            csv_scope,
             copied: false,
             copy_failed: false,
             copy_feedback_seq: 0,
@@ -286,10 +283,11 @@ impl HistoryView {
     /// Reload the stored samples every [`REFRESH_INTERVAL`] while the window
     /// lives. The loop stops as soon as the view entity is released, i.e.
     /// when the window closes.
-    /// Reload language and CSV scope when the config file changes while the
-    /// popup is open. The theme is system-owned; only these two settings are
-    /// consumed by this panel. Returns whether anything visible changed so
-    /// the static 1 d / 1 mo views can skip their three-second repaint.
+    /// Reload language when the config file changes while the popup is open.
+    /// The theme is system-owned and the history retention is consumed by the
+    /// writer, so language is the only setting this panel consumes. Returns
+    /// whether anything visible changed so the static 1 d / 1 mo views can
+    /// skip their three-second repaint.
     pub(crate) fn reload_config(&mut self) -> bool {
         match self.config_watcher.poll() {
             ConfigPoll::Unchanged => false,
@@ -302,10 +300,8 @@ impl HistoryView {
                 false
             }
             ConfigPoll::Loaded { config, .. } => {
-                let changed = self.lang != config.display.language
-                    || self.csv_scope != config.history.csv_scope;
+                let changed = self.lang != config.display.language;
                 self.lang = config.display.language;
-                self.csv_scope = config.history.csv_scope;
                 changed
             }
         }

@@ -43,7 +43,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use sysvitals_core::format::FormattedRow;
 use sysvitals_core::{
     format_frame, format_frame_vertical, t, Config, ConfigPoll, ConfigWatcher, HistoryWriterSlot,
-    Language, NetSelection, Sampler, Theme,
+    Language, Sampler, Theme,
 };
 // Shared process plumbing (daily-file logging, panic hook, HKCU probes)
 // lives in `sysvitals-support` so the overlay and the GPUI panels cannot

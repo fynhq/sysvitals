@@ -51,8 +51,7 @@ use objc2_foundation::{
 use sysvitals_core::config::config_path;
 use sysvitals_core::format::{format_frame, join_prefix};
 use sysvitals_core::{
-    t, Config, ConfigPoll, ConfigWatcher, FormattedRow, HistoryWriterSlot, Metric, NetSelection,
-    Sampler,
+    t, Config, ConfigPoll, ConfigWatcher, FormattedRow, HistoryWriterSlot, Metric, Sampler,
 };
 
 // `SMAppService` lives in ServiceManagement.framework. Linking it keeps the

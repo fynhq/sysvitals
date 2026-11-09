@@ -185,10 +185,9 @@ impl HistoryView {
 
     /// Whether the copy command can run now. Shared by the Copy button's
     /// disabled state and the keyboard shortcut so both gates stay identical:
-    /// a visible-range export needs loaded, non-empty data, while the wider
-    /// CSV scopes always have a retention window to export.
+    /// the visible range needs loaded, non-empty data.
     pub(crate) fn copy_available(&self) -> bool {
-        self.csv_scope != CsvScope::Visible || (!self.data_loading && !self.buckets.is_empty())
+        !self.data_loading && !self.buckets.is_empty()
     }
 
     /// Keyboard entry point: identical to pressing the Copy button, including
@@ -203,68 +202,23 @@ impl HistoryView {
         self.copy_failed = false;
         let lang = self.lang;
 
-        if self.csv_scope == CsvScope::Visible {
-            if self.data_loading {
-                // A wide range is still being queried and `buckets` is
-                // intentionally empty; copying now would produce a
-                // header-only file that looks like real data.
-                log_event(
-                    "INFO",
-                    "history: copy requested while the range is still loading",
-                );
-                self.copy_failed = true;
-                self.schedule_copied_reset(cx);
-                cx.notify();
-                return;
-            }
-            // The real buckets in the current window. The chart pads missing
-            // slots to keep its index axis time-linear, but the CSV deliberately
-            // exports measured rows only instead of fabricating values.
-            self.finish_copy(self.buckets.clone(), lang, cx);
+        if self.data_loading {
+            // A wide range is still being queried and `buckets` is
+            // intentionally empty; copying now would produce a header-only
+            // file that looks like real data.
+            log_event(
+                "INFO",
+                "history: copy requested while the range is still loading",
+            );
+            self.copy_failed = true;
+            self.schedule_copied_reset(cx);
+            cx.notify();
             return;
         }
-
-        // The longer scopes scan the whole retention window; a month of raw
-        // samples on the UI thread visibly froze the popup. Query in the
-        // background and only build the clipboard text back on the UI thread.
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        let (seconds, bucket_secs) = match self.csv_scope {
-            CsvScope::Visible => unreachable!(),
-            CsvScope::Last24h => (86_400, 120),
-            CsvScope::Last7d => (604_800, 600),
-            CsvScope::Last30d => (2_592_000, 3600),
-        };
-        let start = now - seconds;
-        let from = floor_to_grid(start, bucket_secs, local_offset_at(start));
-        let query = VisibleQuery {
-            from,
-            to: now,
-            bucket: bucket_secs,
-        };
-        let executor = cx.background_executor().clone();
-        cx.spawn(async move |this, cx| {
-            let loaded = executor
-                .spawn(async move {
-                    let path = history_path().map_err(|e| e.to_string())?;
-                    let store = open_store_for_read(&path).map_err(|e| e.to_string())?;
-                    query_buckets(&store, query)
-                })
-                .await;
-            let _ = this.update(cx, |view: &mut HistoryView, cx| match loaded {
-                Ok(buckets) => view.finish_copy(buckets, lang, cx),
-                Err(e) => {
-                    log_event("WARN", &format!("history: CSV query failed: {e}"));
-                    view.copied = false;
-                    view.copy_failed = true;
-                    view.schedule_copied_reset(cx);
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
+        // The real buckets in the current window. The chart pads missing
+        // slots to keep its index axis time-linear, but the CSV deliberately
+        // exports measured rows only instead of fabricating values.
+        self.finish_copy(self.buckets.clone(), lang, cx);
     }
 
     /// Build the clipboard text, write it, and arm the confirmation reset.

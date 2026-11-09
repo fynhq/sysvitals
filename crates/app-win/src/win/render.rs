@@ -169,8 +169,7 @@ pub(crate) unsafe fn sample_tick() {
         .unwrap_or(0);
     let snapshot = SAMPLER.with(|s| {
         let mut guard = s.borrow_mut();
-        let sampler =
-            guard.get_or_insert_with(|| Sampler::new(NetSelection::Auto, cfg.sample.cpu_smoothing));
+        let sampler = guard.get_or_insert_with(Sampler::new);
         sampler.sample(now)
     });
     LAST_SNAPSHOT.with(|s| *s.borrow_mut() = Some(snapshot));
@@ -233,9 +232,6 @@ pub(crate) unsafe fn relayout_overlay(hwnd: HWND) {
 /// taskbar message loop. The writer owns the open/insert/prune policy and
 /// its own failure logging.
 pub(crate) fn record_history(cfg: &Config, now: i64, snapshot: &sysvitals_core::Snapshot) {
-    if !cfg.history.enabled {
-        return;
-    }
     let log: sysvitals_core::history_writer::LogFn =
         Arc::new(|level: &str, message: &str| log_event(level, message));
     HISTORY_WRITER.with(|slot| {

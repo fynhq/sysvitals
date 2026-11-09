@@ -21,13 +21,12 @@
 //! - Only physical NICs are aggregated: virtual switches and VPN tunnels
 //!   mirror traffic the physical link already counts, so they are excluded
 //!   (Windows uses the NDIS `HardwareInterface` flag, elsewhere a name
-//!   heuristic); a user override can pin any interface list.
+//!   heuristic).
 //! - CPU percent follows Task Manager on Windows (the PDH counter is chosen
 //!   per OS build: frequency-weighted `% Processor Utility` below Windows 11
 //!   24H2, time-based `% Processor Time` from 24H2 on, where Task Manager
 //!   switched formulas) and the OS monitor on macOS (time-based), then is
-//!   exponentially smoothed with the `sample.cpu_smoothing` history weight
-//!   (0 disables) and clamped.
+//!   exponentially smoothed with a fixed history weight (0.3) and clamped.
 
 mod cpu;
 mod mem;
@@ -39,7 +38,7 @@ mod cpu_win;
 mod net_win;
 
 pub use cpu::CpuSampler;
-pub use net::{NetSampler, NetSelection};
+pub use net::NetSampler;
 
 pub use cpu::STALE_GAP_SECS;
 
@@ -68,15 +67,19 @@ pub struct Sampler {
     last_tick: Option<Instant>,
 }
 
+impl Default for Sampler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Sampler {
     /// Build a sampler and seed the first CPU / memory baseline. The network
     /// baseline is seeded by the first [`Sampler::sample`] call; on Windows a
     /// successful native counter read never needs sysinfo's interface list.
-    /// `cpu_smoothing` is the `sample.cpu_smoothing` weight (0 disables
-    /// smoothing). The config pollers rebuild the sampler when that value
-    /// changes, which re-primes the CPU EMA and re-seeds the network baseline
-    /// (one `--` frame, equivalent to a restart).
-    pub fn new(interfaces: NetSelection, cpu_smoothing: f64) -> Self {
+    /// CPU smoothing uses the fixed default weight (0.3, see
+    /// [`CpuSampler`]); the network layer always aggregates physical adapters.
+    pub fn new() -> Self {
         // sysinfo 0.40 made both constructors fallible for platforms without
         // the required backends. They only fail on targets this workspace
         // does not build for (Windows and macOS always succeed), and the
@@ -96,8 +99,8 @@ impl Sampler {
         Sampler {
             system,
             networks,
-            net: NetSampler::new(interfaces),
-            cpu: CpuSampler::new(cpu_smoothing),
+            net: NetSampler::new(),
+            cpu: CpuSampler::default(),
             #[cfg(windows)]
             cpu_counter: cpu_win::CpuCounter::new(),
             last_tick: None,

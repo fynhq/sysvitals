@@ -26,12 +26,6 @@ pub const ALLOWED_INTERVAL_MS: [u64; 3] = [1000, 2000, 3000];
 /// Default sample interval: 2 seconds.
 pub const DEFAULT_INTERVAL_MS: u64 = 2000;
 
-/// Upper bound for `sample.cpu_smoothing`. The EMA weight is the history
-/// weight, so exactly `1.0` would freeze the displayed CPU forever; keep the
-/// hand-editable value just below it so a config typo cannot brick the
-/// indicator. Zero still disables smoothing exactly.
-const MAX_CPU_SMOOTHING: f64 = 0.99;
-
 /// Allowed item-spacing values in pixels for the single-row layout. The
 /// settings UI offers exactly these choices; any other value snaps to the
 /// nearest one.
@@ -69,9 +63,6 @@ pub struct Config {
 #[serde(default)]
 pub struct SampleConfig {
     pub interval_ms: u64,
-    /// Exponential smoothing factor for CPU percent. 0 disables smoothing;
-    /// values are sanitized to `[0, 0.99]` because 1.0 would freeze the EMA.
-    pub cpu_smoothing: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -106,20 +97,7 @@ pub struct PrefixConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HistoryConfig {
-    pub enabled: bool,
     pub retention_days: u32,
-    pub csv_scope: CsvScope,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum CsvScope {
-    /// Copy the measured buckets in the chart's current window.
-    #[default]
-    Visible,
-    Last24h,
-    Last7d,
-    Last30d,
 }
 
 /// Login-startup preference, shared by both platforms. The settings window
@@ -155,7 +133,6 @@ impl Default for SampleConfig {
     fn default() -> Self {
         SampleConfig {
             interval_ms: DEFAULT_INTERVAL_MS,
-            cpu_smoothing: 0.3,
         }
     }
 }
@@ -199,11 +176,7 @@ impl Default for PrefixConfig {
 
 impl Default for HistoryConfig {
     fn default() -> Self {
-        HistoryConfig {
-            enabled: true,
-            retention_days: 30,
-            csv_scope: CsvScope::default(),
-        }
+        HistoryConfig { retention_days: 30 }
     }
 }
 
@@ -260,24 +233,6 @@ impl Config {
             });
         }
 
-        if !self.sample.cpu_smoothing.is_finite() {
-            // `f64::clamp` keeps NaN, and a NaN smoothing factor poisons the
-            // CPU EMA forever (the display would stay at "--%"). TOML accepts
-            // `nan`, so this is reachable from a hand-edited config.
-            let old = self.sample.cpu_smoothing;
-            self.sample.cpu_smoothing = 0.3;
-            issues.push(SanitizeIssue {
-                field: "sample.cpu_smoothing",
-                message: format!("reset to the default 0.3 (was {old})"),
-            });
-        } else if !(0.0..=MAX_CPU_SMOOTHING).contains(&self.sample.cpu_smoothing) {
-            let old = self.sample.cpu_smoothing;
-            self.sample.cpu_smoothing = old.clamp(0.0, MAX_CPU_SMOOTHING);
-            issues.push(SanitizeIssue {
-                field: "sample.cpu_smoothing",
-                message: format!("clamped to [0,{MAX_CPU_SMOOTHING}] (was {old})"),
-            });
-        }
         if self.history.retention_days == 0 || self.history.retention_days > MAX_RETENTION_DAYS {
             let old = self.history.retention_days;
             self.history.retention_days = if old == 0 { 30 } else { MAX_RETENTION_DAYS };
@@ -339,10 +294,10 @@ impl Config {
     }
 
     /// Replace the fields owned by the settings UI with `ui`, leaving every
-    /// other field (history, CPU smoothing, and any future non-UI fields)
-    /// untouched. Settings starts from the file it just read and overlays
-    /// only these fields, so a manual edit outside the UI is not reverted by
-    /// the next save.
+    /// other field (history retention and any future non-UI fields) untouched.
+    /// Settings starts from the file it just read and overlays only these
+    /// fields, so a manual edit outside the UI is not reverted by the next
+    /// save.
     pub fn overlay_ui_from(&mut self, ui: &Config) {
         self.display = ui.display.clone();
         self.sample.interval_ms = ui.sample.interval_ms;
@@ -386,14 +341,6 @@ impl Config {
             &["right", "left"],
             "right",
             "windows.anchor",
-            &mut issues,
-        );
-        repair_enum(
-            &mut value,
-            ("history", "csv_scope"),
-            &["visible", "last24h", "last7d", "last30d"],
-            "visible",
-            "history.csv_scope",
             &mut issues,
         );
         let mut cfg: Config = value.try_into()?;
@@ -707,7 +654,6 @@ mod tests {
         c.startup.auto_start = true;
         c.startup.auto_start_explicit = true;
         c.windows.anchor = Anchor::Left;
-        c.history.csv_scope = CsvScope::Last7d;
         let text = c.to_toml_string().unwrap();
         let (back, _) = Config::from_toml_str(&text).unwrap();
         assert_eq!(back, c);
@@ -728,39 +674,6 @@ mod tests {
         // would turn auto-start on during an upgrade, so it must stay inert.
         let (c, _) = Config::from_toml_str("[windows]\nauto_start = true\n").unwrap();
         assert!(!c.startup.auto_start);
-    }
-
-    #[test]
-    fn cpu_smoothing_out_of_range_clamped() {
-        let mut c = Config::default();
-        c.sample.cpu_smoothing = 1.5;
-        let issues = c.sanitize();
-        assert_eq!(c.sample.cpu_smoothing, 0.99);
-        assert!(issues.iter().any(|i| i.field == "sample.cpu_smoothing"));
-    }
-
-    #[test]
-    fn cpu_smoothing_one_is_clamped_below_freeze() {
-        // Exactly 1.0 is a valid EMA weight but makes the CPU display never
-        // absorb a new sample; sanitize keeps hand-edited configs below it.
-        let mut c = Config::default();
-        c.sample.cpu_smoothing = 1.0;
-        let issues = c.sanitize();
-        assert_eq!(c.sample.cpu_smoothing, 0.99);
-        assert!(issues.iter().any(|i| i.field == "sample.cpu_smoothing"));
-        assert!(c.sanitize().is_empty(), "sanitize must be idempotent");
-    }
-
-    #[test]
-    fn cpu_smoothing_nan_resets_to_default() {
-        // `clamp` keeps NaN; a sanitized config must never carry a poison
-        // smoothing factor into the sampler.
-        let mut c = Config::default();
-        c.sample.cpu_smoothing = f64::NAN;
-        let issues = c.sanitize();
-        assert_eq!(c.sample.cpu_smoothing, 0.3);
-        assert!(issues.iter().any(|i| i.field == "sample.cpu_smoothing"));
-        assert!(c.sanitize().is_empty(), "sanitize must be idempotent");
     }
 
     #[test]
@@ -913,20 +826,37 @@ item_spacing = 16
 anchor = "Middle"
 [history]
 retention_days = 14
-csv_scope = "LastYear"
 "#;
         let (cfg, issues) = Config::from_toml_str(text).unwrap();
         assert_eq!(cfg.display.language, Language::Zh);
         assert_eq!(cfg.display.theme, Theme::Auto);
         assert_eq!(cfg.windows.anchor, Anchor::Right);
-        assert_eq!(cfg.history.csv_scope, CsvScope::Visible);
         // Unrelated values in the same file survive.
         assert_eq!(cfg.display.item_spacing, 16);
         assert_eq!(cfg.history.retention_days, 14);
-        assert_eq!(issues.len(), 3, "theme, anchor and csv_scope reported");
+        assert_eq!(issues.len(), 2, "theme and anchor reported");
         assert!(issues.iter().any(|i| i.field == "display.theme"));
         assert!(issues.iter().any(|i| i.field == "windows.anchor"));
-        assert!(issues.iter().any(|i| i.field == "history.csv_scope"));
+    }
+
+    #[test]
+    fn legacy_hidden_config_keys_are_ignored() {
+        // Old configs may still contain the removed debug/optional keys.
+        // Deserialization ignores unknown fields, so they must not fail the
+        // whole file or affect the retained settings.
+        let text = r#"
+[sample]
+interval_ms = 3000
+cpu_smoothing = 0.6
+[history]
+enabled = false
+retention_days = 14
+csv_scope = "last7d"
+"#;
+        let (cfg, issues) = Config::from_toml_str(text).unwrap();
+        assert!(issues.is_empty());
+        assert_eq!(cfg.sample.interval_ms, 3000);
+        assert_eq!(cfg.history.retention_days, 14);
     }
 
     #[test]
@@ -945,8 +875,6 @@ csv_scope = "LastYear"
     fn ui_overlay_preserves_non_ui_fields_from_disk() {
         let mut disk = Config::default();
         disk.history.retention_days = 7;
-        disk.history.csv_scope = CsvScope::Last7d;
-        disk.sample.cpu_smoothing = 0.6;
         disk.display.prefix.cpu = "DISK".to_string();
 
         let mut ui = Config::default();
@@ -962,8 +890,6 @@ csv_scope = "LastYear"
         assert!(disk.startup.auto_start);
         // Non-UI fields survive.
         assert_eq!(disk.history.retention_days, 7);
-        assert_eq!(disk.history.csv_scope, CsvScope::Last7d);
-        assert_eq!(disk.sample.cpu_smoothing, 0.6);
     }
 
     #[test]
