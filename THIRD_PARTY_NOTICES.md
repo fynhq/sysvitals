@@ -7,7 +7,7 @@ The list covers the components used by the Windows and macOS binaries
 (509 packages in the union of all four shipped targets).
 A package may be present on only some platforms or architectures.
 
-Generated from Cargo.lock. Dependency-set fingerprint: b4c57927c5df0f237c0ab547dc30aee1f207306ff20210be4ac85f8bd36066ef.
+Generated from Cargo.lock. Dependency-set fingerprint: c7c09dce968d736165f7ff0e07587aef311d0597947787cc66016cc6e6ef9432.
 
 License expressions are shown as declared by the upstream package (usually
 SPDX syntax). Where a component is offered under several licenses, SysVitals
@@ -159,27 +159,27 @@ authoritative.
 | glob | 0.3.4 | MIT OR Apache-2.0 | https://github.com/rust-lang/glob |
 | globset | 0.4.21 | Unlicense OR MIT | https://github.com/BurntSushi/ripgrep/tree/master/crates/globset |
 | globwalk | 0.8.1 | MIT | https://github.com/gilnaa/globwalk |
-| gpui-base | 0.9.0 | Apache-2.0 | https://github.com/longbridge/gpui-kit |
-| gpui-component | 0.9.0 | Apache-2.0 | https://github.com/longbridge/gpui-kit |
-| gpui-component-macros | 0.9.0 | Apache-2.0 | https://crates.io/crates/gpui-component-macros/0.9.0 |
-| gpui-kit | 0.9.0 | Apache-2.0 | https://github.com/longbridge/gpui-kit |
-| gpui-kit-assets | 0.9.0 | Apache-2.0 | https://github.com/longbridge/gpui-kit |
-| gpui-pre | 0.3.11 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-apple | 0.3.11 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-collections | 0.3.11 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-derive-refineable | 0.3.11 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-http-client | 0.3.11 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-macos | 0.3.11 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-macros | 0.3.11 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-platform | 0.3.11 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-refineable | 0.3.11 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-scheduler | 0.3.11 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-shared-string | 0.3.11 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-sum-tree | 0.3.11 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-util | 0.3.11 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-windows | 0.3.11 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-ztracing | 0.3.11 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-ztracing-macro | 0.3.11 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-base | 0.9.1 | Apache-2.0 | https://github.com/longbridge/gpui-kit |
+| gpui-component | 0.9.1 | Apache-2.0 | https://github.com/longbridge/gpui-kit |
+| gpui-component-macros | 0.9.1 | Apache-2.0 | https://crates.io/crates/gpui-component-macros/0.9.1 |
+| gpui-kit | 0.9.1 | Apache-2.0 | https://github.com/longbridge/gpui-kit |
+| gpui-kit-assets | 0.9.1 | Apache-2.0 | https://github.com/longbridge/gpui-kit |
+| gpui-pre | 0.3.12 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-apple | 0.3.12 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-collections | 0.3.12 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-derive-refineable | 0.3.12 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-http-client | 0.3.12 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-macos | 0.3.12 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-macros | 0.3.12 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-platform | 0.3.12 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-refineable | 0.3.12 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-scheduler | 0.3.12 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-shared-string | 0.3.12 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-sum-tree | 0.3.12 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-util | 0.3.12 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-windows | 0.3.12 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-ztracing | 0.3.12 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-ztracing-macro | 0.3.12 | Apache-2.0 | https://github.com/zed-industries/zed |
 | granit-parser | 1.3.0 | MIT OR Apache-2.0 | https://github.com/bourumir-wyngs/granit-parser |
 | half | 2.7.1 | MIT OR Apache-2.0 | https://github.com/VoidStarKat/half-rs |
 | hash32 | 0.3.1 | MIT OR Apache-2.0 | https://github.com/japaric/hash32 |
@@ -5790,7 +5790,7 @@ SOFTWARE.
 
 ### LICENSE-APACHE / longbridge__gpui-kit / main__LICENSE-APACHE / longbridge__gpui-kit / master__LICENSE-APACHE
 
-Used by: gpui-base 0.9.0, gpui-component 0.9.0, gpui-component-macros 0.9.0, gpui-kit 0.9.0
+Used by: gpui-base 0.9.1, gpui-component 0.9.1, gpui-component-macros 0.9.1, gpui-kit 0.9.1
 
 <pre>
 Copyright 2024 - 2026 Longbridge <https://longbridge.com>
@@ -5988,7 +5988,7 @@ END OF TERMS AND CONDITIONS
 
 ### LICENSE-LUCIDE
 
-Used by: gpui-kit-assets 0.9.0
+Used by: gpui-kit-assets 0.9.1
 
 <pre>
 ISC License
@@ -6038,7 +6038,7 @@ SOFTWARE.
 
 ### LICENSE-APACHE
 
-Used by: gpui-pre 0.3.11, gpui-pre-apple 0.3.11, gpui-pre-collections 0.3.11, gpui-pre-derive-refineable 0.3.11, gpui-pre-http-client 0.3.11, gpui-pre-macos 0.3.11, gpui-pre-macros 0.3.11, gpui-pre-platform 0.3.11, gpui-pre-refineable 0.3.11, gpui-pre-scheduler 0.3.11, gpui-pre-shared-string 0.3.11, gpui-pre-sum-tree 0.3.11, gpui-pre-util 0.3.11, gpui-pre-windows 0.3.11, gpui-pre-ztracing 0.3.11, gpui-pre-ztracing-macro 0.3.11
+Used by: gpui-pre 0.3.12, gpui-pre-apple 0.3.12, gpui-pre-collections 0.3.12, gpui-pre-derive-refineable 0.3.12, gpui-pre-http-client 0.3.12, gpui-pre-macos 0.3.12, gpui-pre-macros 0.3.12, gpui-pre-platform 0.3.12, gpui-pre-refineable 0.3.12, gpui-pre-scheduler 0.3.12, gpui-pre-shared-string 0.3.12, gpui-pre-sum-tree 0.3.12, gpui-pre-util 0.3.12, gpui-pre-windows 0.3.12, gpui-pre-ztracing 0.3.12, gpui-pre-ztracing-macro 0.3.12
 
 <pre>
 Copyright 2022 - 2025 Zed Industries, Inc.
