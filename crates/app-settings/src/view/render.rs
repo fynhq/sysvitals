@@ -5,6 +5,24 @@ use super::*;
 use sysvitals_core::format::{format_frame, format_frame_vertical, MB};
 use sysvitals_core::Snapshot;
 
+/// Tall enough for the dual-row and vertical layouts; single-row keeps the
+/// same height so switching layouts never resizes the fixed footer.
+const PREVIEW_STRIP_HEIGHT: f32 = 52.0;
+
+/// Preview-only stand-in for the taskbar's left margin. The real presets go
+/// up to 256 px, which would push the sample past the right edge of this
+/// ~368 px strip; the schematic therefore maps the presets onto the left half
+/// of the strip: the smallest margin sits at the left edge and the largest
+/// reads as roughly centered.
+fn preview_margin_fraction(left_margin_px: u32) -> f32 {
+    let last = (ALLOWED_LEFT_MARGIN_PX.len() - 1) as f32;
+    let index = ALLOWED_LEFT_MARGIN_PX
+        .iter()
+        .position(|&px| px == left_margin_px)
+        .unwrap_or(0) as f32;
+    index / last * 0.5
+}
+
 impl Render for SettingsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Re-probe the taskbar shape at most once a second: the user can move
@@ -402,40 +420,35 @@ impl Render for SettingsView {
         // A Windows indicator anchored far left sits at the taskbar's left
         // edge, offset by `windows.left_margin_px`; the default (and every
         // macOS status item) sits at the right end, where the margin does not
-        // apply. The strip's left edge stands in for the taskbar edge, so the
-        // real margin is applied as its left padding.
+        // apply. The strip's left edge stands in for the taskbar edge, but the
+        // preview is schematic rather than to scale: two flexible spacers move
+        // the sample from that edge towards the middle as the preset grows,
+        // so the largest margin reads as roughly centered instead of being
+        // clipped at the far right.
         let preview_start = cfg!(windows)
             && !self.vertical_taskbar
             && self.layout_available
             && preview_cfg.windows.anchor == sysvitals_core::Anchor::Left;
-        let preview_left_pad = if preview_start {
-            preview_cfg.windows.left_margin_px as f32
-        } else {
-            12.
-        };
-        let preview_height = if self.vertical_taskbar || preview_cfg.display.dual_row {
-            52.
-        } else {
-            44.
-        };
         let preview_strip = h_flex()
             .w_full()
-            .h(px(preview_height))
+            .h(px(PREVIEW_STRIP_HEIGHT))
             .flex_shrink_0()
             .overflow_hidden()
             .rounded(px(CONTROL_RADIUS))
             .bg(preview_bg)
             .border_1()
             .border_color(preview_border)
-            .pl(px(preview_left_pad))
-            .pr(px(12.))
+            .px_3()
             .py_2()
-            .items_center()
-            .child(preview_content);
+            .items_center();
         let preview_strip = if preview_start {
-            preview_strip.justify_start()
+            let shift = preview_margin_fraction(preview_cfg.windows.left_margin_px);
+            preview_strip
+                .child(div().flex_grow(shift))
+                .child(preview_content)
+                .child(div().flex_grow(1.0 - shift))
         } else {
-            preview_strip.justify_end()
+            preview_strip.justify_end().child(preview_content)
         };
         let preview_section = v_flex()
             .gap_1()
