@@ -18,7 +18,6 @@
 // terminal flashes up beside the history window every time it launches.
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
-use std::collections::HashMap;
 use std::env;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -36,7 +35,6 @@ use windows::Win32::System::Threading::{
     PROCESS_SYNCHRONIZE,
 };
 
-use chrono::{DateTime, Local};
 use gpui_kit::base::plot::label::{PlotLabel, Text as PlotText};
 use gpui_kit::component::button::*;
 use gpui_kit::component::chart::AreaChart;

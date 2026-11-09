@@ -1,111 +1,18 @@
-//! chart: split out of the crate root (see `main.rs` for the module map).
+//! chart: UI-only chart constants and palette.
+//!
+//! The pure data/time logic (ranges, query windows, bucket padding, axis
+//! labels, CSV text) lives in `sysvitals_core::chart` so the Linux quality
+//! gate can test it; this module keeps the GPUI-facing layout constants and
+//! colors, and re-exports the core items the rest of this binary uses.
 
-use super::*;
+use std::time::Duration;
 
-/// Time range options for the chart.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TimeRange {
-    Min5,
-    Hour1,
-    Day1,
-    Month1,
-}
+use gpui_kit::{hsla, Hsla};
 
-impl TimeRange {
-    pub(crate) const ALL: [TimeRange; 4] = [
-        TimeRange::Min5,
-        TimeRange::Hour1,
-        TimeRange::Day1,
-        TimeRange::Month1,
-    ];
-
-    pub(crate) fn seconds(self) -> i64 {
-        match self {
-            TimeRange::Min5 => 300,
-            TimeRange::Hour1 => 3600,
-            TimeRange::Day1 => 86400,
-            TimeRange::Month1 => 2_592_000,
-        }
-    }
-
-    /// Fine bucket width shared by the chart curve and the CSV export:
-    /// detailed enough to preserve resolution at each range while staying
-    /// bounded (a month is ~720 rows, not 1.3M). The curve draws one point
-    /// per fine bucket; only the sparse axis *labels* use the coarser clean
-    /// step from [`Self::label_step_secs`].
-    pub(crate) fn bucket_secs(self) -> i64 {
-        match self {
-            TimeRange::Min5 => 2,
-            TimeRange::Hour1 => 10,
-            TimeRange::Day1 => 120,
-            TimeRange::Month1 => 3600,
-        }
-    }
-
-    /// The clean wall-clock step the x-axis labels are floored to — the
-    /// range picks the step so every label reads as a round local time:
-    ///   5 min    = 60 s       (every local minute)
-    ///   1 hour   = 600 s      (every :10 / :20 / ... local ten-minute mark)
-    ///   1 day    = 7 200 s    (every 2 h at 00/02/.../22 local time)
-    ///   1 month  = 432 000 s  (every 5 days at local midnight)
-    /// Every grid is offset-aligned to the machine's local time zone; steps
-    /// like 7200 s do not divide every real UTC offset (e.g. +5:30), so a
-    /// zero-offset grid would read :30 instead of the intended marks.
-    /// The curve is NOT drawn at this step: it uses [`Self::bucket_secs`] so
-    /// the line keeps its detail. Each label point floors its own timestamp
-    /// to this grid, so the six spread ticks read as clean times while the
-    /// line stays fine-grained. The query window start is aligned down to
-    /// this grid (see [`floor_to_grid`]), so the first label dates the window
-    /// start.
-    pub(crate) fn label_step_secs(self) -> i64 {
-        match self {
-            TimeRange::Min5 => 60,
-            TimeRange::Hour1 => 600,
-            TimeRange::Day1 => 7_200,
-            TimeRange::Month1 => 432_000,
-        }
-    }
-
-    pub(crate) fn label(self, lang: Language) -> &'static str {
-        match self {
-            TimeRange::Min5 => t(lang, "chart.range.5m"),
-            TimeRange::Hour1 => t(lang, "chart.range.1h"),
-            TimeRange::Day1 => t(lang, "chart.range.1d"),
-            TimeRange::Month1 => t(lang, "chart.range.1mo"),
-        }
-    }
-
-    /// Whether the open popup should reload this range every few seconds.
-    /// 5 m and 1 h read a small tail of the raw table and stay live; 1 d and
-    /// 1 mo scan the whole retention window (the month aggregate is seconds
-    /// at the 30-day cap), so they load once on open/range switch and stay
-    /// static while open. Clicking the active range button reloads it.
-    pub(crate) fn auto_refresh(self) -> bool {
-        matches!(self, TimeRange::Min5 | TimeRange::Hour1)
-    }
-}
-
-/// One dense chart slot. The x axis is an index axis, so the renderer must
-/// emit one point per bucket in the visible window; otherwise missing
-/// intervals compress time. `has_data` is false for padded slots (app not
-/// running, sleep, history disabled); their values repeat the previous real
-/// point so the path stays finite, and the tooltip reports `--`.
-#[derive(Debug, Clone)]
-pub(crate) struct ChartPoint {
-    pub(crate) ts: i64,
-    pub(crate) cpu: f64,
-    pub(crate) mem: f64,
-    pub(crate) has_data: bool,
-}
-
-/// The exact query window shared by the chart, the axis labels and the
-/// `Visible` CSV export.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct VisibleQuery {
-    pub(crate) from: i64,
-    pub(crate) to: i64,
-    pub(crate) bucket: i64,
-}
+pub(crate) use sysvitals_core::chart::{
+    axis_labels, build_csv, fmt_date_time, format_ts_full, local_offset_at, points, query_buckets,
+    trim_leading_gap, ChartPoint, TimeRange, VisibleQuery,
+};
 
 /// How often a visible history window reloads the stored samples. The
 /// indicator writes samples every sample interval, so redrawing every few
@@ -174,72 +81,4 @@ pub(crate) fn mem_color() -> Hsla {
 /// which is exactly two lines with no shading.
 pub(crate) fn transparent_color() -> Hsla {
     hsla(0.0, 0.0, 0.0, 0.0)
-}
-
-/// Local UTC offset (seconds east) at a specific timestamp. Unlike
-/// `Local::now().offset()`, this stays correct on the old side of a DST
-/// transition when formatting labels.
-pub(crate) fn local_offset_at(ts: i64) -> i64 {
-    DateTime::from_timestamp(ts, 0)
-        .map(|dt| dt.with_timezone(&Local).offset().local_minus_utc() as i64)
-        .unwrap_or(0)
-}
-
-pub(crate) fn query_buckets(store: &Store, query: VisibleQuery) -> Result<Vec<Bucket>, String> {
-    store
-        .buckets_offset(
-            query.from,
-            query.to,
-            query.bucket,
-            local_offset_at(query.from),
-        )
-        .map_err(|e| e.to_string())
-}
-
-/// Format a unix timestamp as HH:MM in the machine's local time zone.
-pub(crate) fn fmt_time(ts: i64) -> String {
-    DateTime::from_timestamp(ts, 0)
-        .map(|dt| dt.with_timezone(&Local).format("%H:%M").to_string())
-        .unwrap_or_default()
-}
-
-/// Format a unix timestamp as MM-DD, the terse date label for the month
-/// view's x axis (year is redundant inside a 30-day window).
-pub(crate) fn fmt_date(ts: i64) -> String {
-    DateTime::from_timestamp(ts, 0)
-        .map(|dt| dt.with_timezone(&Local).format("%m-%d").to_string())
-        .unwrap_or_default()
-}
-
-/// Format a unix timestamp as `MM-DD HH:MM`, used when a shorter view's x
-/// axis crosses midnight and the tick that opens a new day must show both.
-pub(crate) fn fmt_date_time(ts: i64) -> String {
-    DateTime::from_timestamp(ts, 0)
-        .map(|dt| dt.with_timezone(&Local).format("%m-%d %H:%M").to_string())
-        .unwrap_or_default()
-}
-
-/// Local calendar date as a stable comparison key (`YYYY-MM-DD`). Two
-/// timestamps match only if their wall-clock date in the user's zone
-/// matches, which is the exact "day crossed" test the x-axis labels need.
-/// A string key is used rather than an integer day count because it relies
-/// on only the `%Y-%m-%d` format directive, avoiding a version-dependent
-/// helper on `NaiveDate`.
-pub(crate) fn day_of(ts: i64) -> String {
-    DateTime::from_timestamp(ts, 0)
-        .map(|dt| dt.with_timezone(&Local).format("%Y-%m-%d").to_string())
-        .unwrap_or_default()
-}
-
-/// Format a unix timestamp as YYYY-MM-DD HH:MM:SS in the machine's local
-/// time zone. Used by both the CSV export and the hover tooltip so exported
-/// rows and the point readout agree.
-pub(crate) fn format_ts_full(ts: i64) -> String {
-    DateTime::from_timestamp(ts, 0)
-        .map(|dt| {
-            dt.with_timezone(&Local)
-                .format("%Y-%m-%d %H:%M:%S")
-                .to_string()
-        })
-        .unwrap_or_default()
 }

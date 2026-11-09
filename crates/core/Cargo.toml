@@ -1,6 +1,6 @@
 [package]
 name = "sysvitals-core"
-description = "Platform-agnostic sampling, formatting, configuration and i18n for SysVitals."
+description = "Core sampling, formatting, configuration, history and chart logic for SysVitals."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -16,6 +16,7 @@ anyhow = { workspace = true }
 directories = { workspace = true }
 rusqlite = { workspace = true }
 unicode-width = { workspace = true }
+chrono = { workspace = true }
 
 # Task Manager-equivalent CPU percent on Windows: the PDH counters
 # (`% Processor Utility` / `% Processor Time`) live outside sysinfo's public

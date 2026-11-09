@@ -159,116 +159,28 @@ impl HistoryView {
         self.trim_leading_gap();
     }
 
-    /// If the requested window begins before the first stored sample, start
-    /// the visible time window at that sample instead of filling the leading
-    /// slots with the first future value. The alternative (a flat line drawn
-    /// backwards from the first sample) reads as data that was never measured.
+    /// Trim the visible window to the first stored sample. The math lives in
+    /// `core::chart` so it runs in the Linux unit-test gate.
     fn trim_leading_gap(&mut self) {
-        let Some(first) = self.buckets.first().map(|bucket| bucket.ts) else {
-            return;
-        };
         if let Some(query) = self.query.as_mut() {
-            query.from = query.from.max(first);
+            trim_leading_gap(query, &self.buckets);
         }
     }
 
     pub(crate) fn points(&self) -> Vec<ChartPoint> {
-        // The chart library's x scale is an index scale (`ScalePoint`), so
-        // one point per bucket is required for a time-linear geometry. The
-        // query returns only buckets that contain samples; pad the missing
-        // slots here. The leading gap is trimmed to the first real bucket
-        // (`trim_leading_gap`), so this loop never fabricates a line before
-        // the first measurement. Within the window, missing values repeat the
-        // previous real point so the path stays finite; `has_data` lets the
-        // tooltip say "--" instead of presenting a fabricated value.
-        let Some(query) = self.query else {
-            return Vec::new();
-        };
-        let Some(first) = self.buckets.first().copied() else {
-            return Vec::new();
-        };
-        let mut by_ts: HashMap<i64, Bucket> = self
-            .buckets
-            .iter()
-            .map(|bucket| (bucket.ts, *bucket))
-            .collect();
-        let bucket = query.bucket.max(1);
-        let mut last = first;
-        let mut points = Vec::new();
-        let mut ts = query.from;
-        while ts <= query.to {
-            if let Some(bucket) = by_ts.remove(&ts) {
-                last = bucket;
-                points.push(ChartPoint {
-                    ts,
-                    cpu: bucket.cpu,
-                    mem: bucket.mem,
-                    has_data: true,
-                });
-            } else {
-                points.push(ChartPoint {
-                    ts,
-                    cpu: last.cpu,
-                    mem: last.mem,
-                    has_data: false,
-                });
-            }
-            ts = match ts.checked_add(bucket) {
-                Some(next) => next,
-                None => break,
-            };
-        }
-        points
+        // One dense slot per bucket keeps the library's index x scale
+        // time-linear; missing slots repeat the previous real value and are
+        // flagged for the tooltip. The math lives in `core::chart`.
+        self.query
+            .map_or_else(Vec::new, |query| points(query, &self.buckets))
     }
 
-    /// Six axis labels spread over the **time window**, not the data index.
-    /// Each label floors its own timestamp to the range's clean grid using
-    /// the offset at that timestamp, so a window crossing a DST transition
-    /// still reads the correct local time on both sides.
+    /// Six axis labels spread over the time window, each floored to the
+    /// range's clean local grid. The math lives in `core::chart`.
     pub(crate) fn axis_labels(&self) -> Vec<(f32, String)> {
-        let Some(query) = self.query else {
-            return Vec::new();
-        };
-        if self.buckets.is_empty() {
-            return Vec::new();
-        }
-        if query.to <= query.from {
-            return Vec::new();
-        }
-        let month_view = self.range == TimeRange::Month1;
-        let step = self.range.label_step_secs();
-        let span = (query.to - query.from) as f64;
-        let mut labels = Vec::new();
-        let mut prev_day: Option<String> = None;
-        let mut last_shown: Option<String> = None;
-        for k in 0..X_TICK_COUNT {
-            let frac = if X_TICK_COUNT <= 1 {
-                0.5
-            } else {
-                k as f32 / (X_TICK_COUNT - 1) as f32
-            };
-            let ts = query.from + (span * f64::from(frac)).round() as i64;
-            // `query.from` can be trimmed to the first real bucket, which is
-            // not necessarily on the label grid; never print a label before
-            // the visible window.
-            let clean = floor_to_grid(ts, step, local_offset_at(ts)).max(query.from);
-            let day = day_of(clean);
-            let crosses = prev_day.as_ref().is_none_or(|previous| *previous != day);
-            prev_day = Some(day);
-            let text = if month_view {
-                fmt_date(clean)
-            } else if crosses {
-                fmt_date_time(clean)
-            } else {
-                fmt_time(clean)
-            };
-            if last_shown.as_deref() == Some(text.as_str()) {
-                continue;
-            }
-            last_shown = Some(text.clone());
-            labels.push((frac, text));
-        }
-        labels
+        self.query.map_or_else(Vec::new, |query| {
+            axis_labels(self.range, query, &self.buckets, X_TICK_COUNT)
+        })
     }
 
     pub(crate) fn copy_csv(&mut self, cx: &mut Context<Self>) {
@@ -346,26 +258,10 @@ impl HistoryView {
         lang: Language,
         cx: &mut Context<Self>,
     ) {
-        // Tab-separated rows paste straight into spreadsheet cells (WPS /
-        // Excel split on tabs on paste), and unlike a space separator they
-        // do not collide with the internal space of the "YYYY-MM-DD HH:MM:SS"
-        // timestamp column. The UTF-8 BOM keeps CJK headers readable in Excel.
-        let mut csv = String::from("\u{FEFF}");
-        // Header labels come from the core i18n table (single source of truth
-        // for the CSV columns), not a local copy, so a header edit lives in
-        // exactly one place.
-        let header = format!(
-            "{}\t{}\t{}",
-            t(lang, "csv.header.timestamp"),
-            t(lang, "csv.header.cpu"),
-            t(lang, "csv.header.mem")
-        );
-        csv.push_str(&header);
-        csv.push('\n');
-        for b in &buckets {
-            let ts_str = format_ts_full(b.ts);
-            csv.push_str(&format!("{ts_str}\t{:.1}\t{:.1}\n", b.cpu, b.mem));
-        }
+        // The CSV format (UTF-8 BOM, locale header, Tab separator, local
+        // timestamps and real buckets only) lives in `core::chart` so the
+        // Linux gate can test it byte-for-byte.
+        let csv = build_csv(&buckets, lang);
 
         match arboard::Clipboard::new() {
             Ok(mut clipboard) => match clipboard.set_text(csv) {
