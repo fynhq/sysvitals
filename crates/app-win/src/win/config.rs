@@ -217,55 +217,37 @@ fn retry_auto_start_if_due() {
 
 // ------------------------------------------------- config file watching
 
-/// Read the config file's last-modified time as nanoseconds since UNIX
-/// epoch. Returns 0 when the file does not exist or cannot be read.
-pub(crate) fn config_mtime() -> u64 {
-    let Ok(path) = sysvitals_core::config::config_path() else {
-        return 0;
-    };
-    let Ok(meta) = std::fs::metadata(&path) else {
-        return 0;
-    };
-    let Ok(modified) = meta.modified() else {
-        return 0;
-    };
-    modified
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0)
-}
-
 /// Called on each TIMER_CONFIG tick. Compares the config file's mtime
 /// against the cached value; on change, reloads the config, re-seeds the
 /// sample timer (interval may have changed), and re-lays out every overlay.
 pub(crate) fn poll_config_change() {
-    let current = config_mtime();
-    let previous = CONFIG_MTIME.load(Ordering::Relaxed);
-    if current == previous {
-        retry_auto_start_if_due();
-        return;
-    }
-    let loaded = sysvitals_core::config::config_path().and_then(|p| Config::load_with_source(&p));
-    let (loaded, source) = match loaded {
-        Ok((c, issues, source)) => {
-            log_config_issues(&issues);
-            (c, source)
+    let poll = CONFIG_WATCHER.with(|watcher| watcher.borrow_mut().poll());
+    let (loaded, source) = match poll {
+        ConfigPoll::Unchanged => {
+            retry_auto_start_if_due();
+            return;
         }
-        Err(e) => {
-            // Keep the last good config. Do not advance CONFIG_MTIME, so a
-            // fixed file is picked up on the next poll; throttle the log
-            // to one line per broken mtime.
-            if CONFIG_ERROR_MTIME.swap(current, Ordering::Relaxed) != current {
-                log_event("WARN", &format!("config reload failed: {e}"));
+        ConfigPoll::Failed { error, logged } => {
+            // Keep the last good config. A fixed file is picked up on the
+            // next poll; the watcher throttles the log to one line per
+            // broken mtime.
+            if logged {
+                log_event("WARN", &format!("config reload failed: {error}"));
             }
             return;
+        }
+        ConfigPoll::Loaded {
+            config: loaded,
+            issues,
+            source,
+        } => {
+            log_config_issues(&issues);
+            (loaded, source)
         }
     };
     // The sampler fixes `cpu_smoothing` at construction; detect a change
     // before swapping in the new config so it can rebuild afterwards.
     let smoothing_changed = config().sample.cpu_smoothing != loaded.sample.cpu_smoothing;
-    CONFIG_MTIME.store(current, Ordering::Relaxed);
-    CONFIG_ERROR_MTIME.store(0, Ordering::Relaxed);
     CONFIG_FROM_FILE.store(
         source == sysvitals_core::config::ConfigSource::File,
         Ordering::Relaxed,

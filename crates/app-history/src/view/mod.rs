@@ -2,6 +2,8 @@
 
 use super::*;
 
+use sysvitals_core::config_watch::{ConfigPoll, ConfigWatcher};
+
 #[cfg(windows)]
 use sysvitals_panel::restore_window_size_after_move;
 
@@ -47,9 +49,9 @@ pub(crate) struct HistoryView {
     /// Monotonic ticket for the copy confirmation timer. An older timer must
     /// not clear a newer copy's message.
     pub(crate) copy_feedback_seq: u64,
-    /// Last config mtime applied, in nanoseconds; the popup keeps language and
-    /// CSV-scope settings live instead of freezing them at launch.
-    pub(crate) config_mtime: u64,
+    /// Config-file watcher; the popup keeps language and CSV-scope settings
+    /// live instead of freezing them at launch.
+    pub(crate) config_watcher: ConfigWatcher,
     /// Last OS window title applied, so a language hot-reload can update the
     /// title (Mission Control / taskbar) without re-setting it every frame.
     pub(crate) last_title: Option<String>,
@@ -123,7 +125,7 @@ impl HistoryView {
             copied: false,
             copy_failed: false,
             copy_feedback_seq: 0,
-            config_mtime: 0,
+            config_watcher: ConfigWatcher::new().without_retry(),
             last_title: None,
             ever_active: false,
             _activation: None,
@@ -278,33 +280,22 @@ impl HistoryView {
     /// consumed by this panel. Returns whether anything visible changed so
     /// the static 1 d / 1 mo views can skip their three-second repaint.
     pub(crate) fn reload_config(&mut self) -> bool {
-        let Ok(path) = config_path() else {
-            return false;
-        };
-        let mtime = std::fs::metadata(&path)
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_nanos() as u64)
-            .unwrap_or(0);
-        if mtime == self.config_mtime {
-            return false;
-        }
-        match Config::load(&path) {
-            Ok((cfg, _)) => {
-                self.config_mtime = mtime;
-                let changed =
-                    self.lang != cfg.display.language || self.csv_scope != cfg.history.csv_scope;
-                self.lang = cfg.display.language;
-                self.csv_scope = cfg.history.csv_scope;
-                changed
-            }
-            Err(e) => {
-                // Retry only when the file changes again, and keep the last
-                // good values in the meantime.
-                self.config_mtime = mtime;
-                log_event("WARN", &format!("history: config reload failed: {e}"));
+        match self.config_watcher.poll() {
+            ConfigPoll::Unchanged => false,
+            ConfigPoll::Failed { error, logged } => {
+                // The watcher keeps the last good values and does not retry
+                // this mtime again; log only the first failure.
+                if logged {
+                    log_event("WARN", &format!("history: config reload failed: {error}"));
+                }
                 false
+            }
+            ConfigPoll::Loaded { config, .. } => {
+                let changed = self.lang != config.display.language
+                    || self.csv_scope != config.history.csv_scope;
+                self.lang = config.display.language;
+                self.csv_scope = config.history.csv_scope;
+                changed
             }
         }
     }

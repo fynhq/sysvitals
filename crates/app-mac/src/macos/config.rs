@@ -2,20 +2,6 @@
 
 use super::*;
 
-/// Last-modified time of the config path in nanoseconds, or 0 when the
-/// file does not exist or cannot be read.
-pub(crate) fn config_mtime() -> u64 {
-    let Ok(path) = config_path() else {
-        return 0;
-    };
-    std::fs::metadata(&path)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0)
-}
-
 pub(crate) fn log_config_issues(issues: &[sysvitals_core::config::SanitizeIssue]) {
     sysvitals_support::log_sanitize_issues("config repair", issues);
 }
@@ -42,73 +28,67 @@ fn retry_auto_start_if_due() {
     apply_auto_start(&cfg);
 }
 
-/// Load or reload the config file. The mtime cache only advances after a
+/// Load or reload the config file. The watcher only advances its cache on a
 /// successful parse, so a corrupt file keeps the last good config and is
 /// retried when it changes again.
 pub(crate) fn reload_config_if_changed() {
-    let Ok(path) = config_path() else {
-        return;
+    let poll = CONFIG_WATCHER.with(|watcher| watcher.borrow_mut().poll());
+    let (cfg, issues, source) = match poll {
+        ConfigPoll::Unchanged => {
+            retry_auto_start_if_due();
+            return;
+        }
+        ConfigPoll::Failed { error, logged } => {
+            if logged {
+                log_event("WARN", &format!("config reload failed: {error}"));
+            }
+            return;
+        }
+        ConfigPoll::Loaded {
+            config,
+            issues,
+            source,
+        } => (config, issues, source),
     };
-    let mtime = config_mtime();
-
-    let prev = CONFIG_MTIME.with(|m| *m.borrow());
-    if mtime == prev {
-        retry_auto_start_if_due();
-        return;
+    log_config_issues(&issues);
+    // The sampler fixes `cpu_smoothing` at construction; a changed value
+    // drops it so the next tick rebuilds it (re-primes the CPU EMA and
+    // re-seeds the network baseline — one "--" frame, the same cost as a
+    // restart).
+    let smoothing_changed =
+        CONFIG.with(|c| c.borrow().sample.cpu_smoothing != cfg.sample.cpu_smoothing);
+    CONFIG.with(|c| *c.borrow_mut() = cfg.clone());
+    if smoothing_changed {
+        SAMPLER.with(|s| *s.borrow_mut() = None);
+        log_event(
+            "INFO",
+            &format!(
+                "cpu_smoothing changed to {}: sampler rebuilds on the next tick",
+                cfg.sample.cpu_smoothing
+            ),
+        );
     }
-    match Config::load_with_source(&path) {
-        Ok((cfg, issues, source)) => {
-            log_config_issues(&issues);
-            // The sampler fixes `cpu_smoothing` at construction; a
-            // changed value drops it so the next tick rebuilds it
-            // (re-primes the CPU EMA and re-seeds the network baseline —
-            // one "--" frame, the same cost as a restart).
-            let smoothing_changed =
-                CONFIG.with(|c| c.borrow().sample.cpu_smoothing != cfg.sample.cpu_smoothing);
-            CONFIG_MTIME.with(|m| *m.borrow_mut() = mtime);
-            CONFIG_ERROR_MTIME.set(0);
-            CONFIG.with(|c| *c.borrow_mut() = cfg.clone());
-            if smoothing_changed {
-                SAMPLER.with(|s| *s.borrow_mut() = None);
-                log_event(
-                    "INFO",
-                    &format!(
-                        "cpu_smoothing changed to {}: sampler rebuilds on the next tick",
-                        cfg.sample.cpu_smoothing
-                    ),
-                );
-            }
-            if source == sysvitals_core::config::ConfigSource::File {
-                apply_auto_start(&cfg);
-            } else {
-                // A missing file is not an explicit "off" choice; let a
-                // later re-created config apply its value again.
-                APPLIED_AUTO_START.with(|c| c.set(None));
-                AUTO_START_RETRY_AT.with(|slot| slot.set(None));
-            }
-            log_event(
-                "INFO",
-                &format!(
-                    "config reloaded: interval={}ms dual_row={} show_resources={} \
-                         show_network={} item_spacing={}px auto_start={}",
-                    cfg.sample.interval_ms,
-                    cfg.display.dual_row,
-                    cfg.display.show_resources,
-                    cfg.display.show_network,
-                    cfg.display.item_spacing,
-                    cfg.startup.auto_start,
-                ),
-            );
-        }
-        Err(e) => {
-            // Keep the last good config and retry on the next mtime
-            // change; log once per broken mtime.
-            if CONFIG_ERROR_MTIME.get() != mtime {
-                CONFIG_ERROR_MTIME.set(mtime);
-                log_event("WARN", &format!("config reload failed: {e}"));
-            }
-        }
+    if source == sysvitals_core::config::ConfigSource::File {
+        apply_auto_start(&cfg);
+    } else {
+        // A missing file is not an explicit "off" choice; let a later
+        // re-created config apply its value again.
+        APPLIED_AUTO_START.with(|c| c.set(None));
+        AUTO_START_RETRY_AT.with(|slot| slot.set(None));
     }
+    log_event(
+        "INFO",
+        &format!(
+            "config reloaded: interval={}ms dual_row={} show_resources={} \
+                 show_network={} item_spacing={}px auto_start={}",
+            cfg.sample.interval_ms,
+            cfg.display.dual_row,
+            cfg.display.show_resources,
+            cfg.display.show_network,
+            cfg.display.item_spacing,
+            cfg.startup.auto_start,
+        ),
+    );
 }
 
 /// Ask `SMAppService` for the current login-item state. Returns the new

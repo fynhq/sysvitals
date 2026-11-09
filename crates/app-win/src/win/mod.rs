@@ -36,14 +36,14 @@ pub(crate) use theme::*;
 pub(crate) use wndproc::*;
 
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use sysvitals_core::format::FormattedRow;
 use sysvitals_core::{
-    format_frame, format_frame_vertical, t, Config, HistoryWriterSlot, Language, NetSelection,
-    Sampler, Theme,
+    format_frame, format_frame_vertical, t, Config, ConfigPoll, ConfigWatcher, HistoryWriterSlot,
+    Language, NetSelection, Sampler, Theme,
 };
 // Shared process plumbing (daily-file logging, panic hook, HKCU probes)
 // lives in `sysvitals-support` so the overlay and the GPUI panels cannot
@@ -261,13 +261,6 @@ static SENTINEL_HWND: AtomicIsize = AtomicIsize::new(0);
 static HISTORY_ANCHOR_MONITOR: AtomicIsize = AtomicIsize::new(0);
 /// `RegisterWindowMessageW("TaskbarCreated")`; 0 until registered.
 static TASKBAR_CREATED: OnceLock<u32> = OnceLock::new();
-/// Last observed config mtime in nanoseconds since UNIX_EPOCH. Nanosecond
-/// precision is required: the settings window saves on every click, and
-/// two saves inside one second would otherwise be invisible to the poller.
-static CONFIG_MTIME: AtomicU64 = AtomicU64::new(0);
-/// mtime of the last config parse failure, so a broken file logs once
-/// instead of every CONFIG_POLL_MS tick.
-static CONFIG_ERROR_MTIME: AtomicU64 = AtomicU64::new(0);
 /// Whether `TIMER_SAMPLE` is currently armed. A failed initial `SetTimer`
 /// leaves the overlay frozen on its startup frame; the watchdog retries it.
 static SAMPLE_TIMER_OK: AtomicBool = AtomicBool::new(false);
@@ -277,6 +270,8 @@ fn sentinel_hwnd() -> HWND {
 
 thread_local! {
     static SAMPLER: RefCell<Option<Sampler>> = const { RefCell::new(None) };
+    /// Config-file mtime cache and parse-error throttle, message-thread only.
+    static CONFIG_WATCHER: RefCell<ConfigWatcher> = RefCell::new(ConfigWatcher::new());
     /// Raw sample shared by every overlay, so a config/DPI/theme change can
     /// rebuild each layout without taking another reading (which used to
     /// inject a millisecond-scale network spike on every save).

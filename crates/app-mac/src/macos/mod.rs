@@ -50,7 +50,10 @@ use objc2_foundation::{
 
 use sysvitals_core::config::config_path;
 use sysvitals_core::format::{format_frame, join_prefix};
-use sysvitals_core::{t, Config, FormattedRow, HistoryWriterSlot, Metric, NetSelection, Sampler};
+use sysvitals_core::{
+    t, Config, ConfigPoll, ConfigWatcher, FormattedRow, HistoryWriterSlot, Metric, NetSelection,
+    Sampler,
+};
 
 // `SMAppService` lives in ServiceManagement.framework. Linking it keeps the
 // class registered for the runtime lookup below; no typed bindings are
@@ -167,10 +170,8 @@ thread_local! {
     static SAMPLER: RefCell<Option<Sampler>> = const { RefCell::new(None) };
     static CONFIG: RefCell<Config> = RefCell::new(Config::default());
     static STATUS_ITEM: RefCell<Option<Retained<NSStatusItem>>> = const { RefCell::new(None) };
-    /// Last successfully applied config mtime in nanoseconds. Two saves
-    /// inside one second must still be visible to the poller.
-    static CONFIG_MTIME: RefCell<u64> = const { RefCell::new(0) };
-    static CONFIG_ERROR_MTIME: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Config-file mtime cache and parse-error throttle, main-thread only.
+    static CONFIG_WATCHER: RefCell<ConfigWatcher> = RefCell::new(ConfigWatcher::new());
     static MTM: RefCell<Option<MainThreadMarker>> = const { RefCell::new(None) };
     // History writes run on a dedicated worker thread. SQLite open /
     // insert / prune on the main RunLoop (up to the 250 ms busy timeout)
@@ -464,7 +465,7 @@ pub(crate) fn run() {
                 Ok((cfg, issues, source)) => {
                     log_config_issues(&issues);
                     CONFIG.with(|c| *c.borrow_mut() = cfg);
-                    CONFIG_MTIME.with(|m| *m.borrow_mut() = config_mtime());
+                    CONFIG_WATCHER.with(|w| w.borrow_mut().seed_now());
                     initial_config_ok = source == sysvitals_core::config::ConfigSource::File;
                 }
                 Err(e) => {
@@ -475,9 +476,9 @@ pub(crate) fn run() {
                             path.display()
                         ),
                     );
-                    // Leave CONFIG_MTIME unset so the first tick retries (and
-                    // recovers if the failure was transient); the reload path
-                    // throttles its own log to one line per broken mtime.
+                    // Leave CONFIG_WATCHER unseeded so the first tick retries
+                    // (and recovers if the failure was transient); the reload
+                    // path throttles its own log to one line per broken mtime.
                 }
             },
             Err(e) => {

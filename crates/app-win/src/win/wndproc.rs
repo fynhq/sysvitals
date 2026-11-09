@@ -204,7 +204,7 @@ pub(crate) fn run() {
         let cfg = config();
 
         // Seed the config mtime so the first poll does not false-trigger.
-        CONFIG_MTIME.store(config_mtime(), Ordering::Relaxed);
+        CONFIG_WATCHER.with(|watcher| watcher.borrow_mut().seed_now());
 
         // Daily-file logging: the first line also opens the file and prunes
         // stale logs (see `core::logger`), so no separate startup prune.
