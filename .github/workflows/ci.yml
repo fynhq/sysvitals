@@ -82,17 +82,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: stable
+          components: clippy
       - uses: Swatinem/rust-cache@e9d7b9f1e587218970671bac74e5511ed9506e6a # v2
         with:
           key: platform-check-${{ matrix.os }}
-      - name: Check platform crates
+      - name: Clippy platform crates
         shell: bash
         env:
-          # Platform crates only run `cargo check` here (no clippy); denying
-          # rustc warnings keeps unused imports/fields from accumulating in
-          # code paths the Linux quality job never compiles.
+          # Deny rustc warnings in the code paths the Linux quality job
+          # never compiles; clippy's own lints are denied by the trailing
+          # `-D warnings`.
           RUSTFLAGS: "-D warnings"
-        run: cargo check --locked ${{ matrix.packages }}
+        run: cargo clippy --locked --all-targets ${{ matrix.packages }} -- -D warnings
 
   # ---------------------------------------------------------------------------
   # Public-surface guard: reject private-document references, local environment
