@@ -152,8 +152,10 @@ pub fn system_directory() -> Option<std::path::PathBuf> {
 pub fn os_build_number() -> Option<u32> {
     use windows::Wdk::System::SystemServices::RtlGetVersion;
     use windows::Win32::System::SystemInformation::OSVERSIONINFOW;
-    let mut info = OSVERSIONINFOW::default();
-    info.dwOSVersionInfoSize = std::mem::size_of::<OSVERSIONINFOW>() as u32;
+    let mut info = OSVERSIONINFOW {
+        dwOSVersionInfoSize: std::mem::size_of::<OSVERSIONINFOW>() as u32,
+        ..Default::default()
+    };
     if unsafe { RtlGetVersion(&mut info) }.is_err() {
         return None;
     }

@@ -22,8 +22,10 @@ pub(crate) unsafe fn refresh_theme() {
     // High contrast is an accessibility override: when it is on, the
     // taskbar no longer follows the normal light/dark palette, so keep the
     // system text color instead of our black/white choice.
-    let mut hc = HIGHCONTRASTW::default();
-    hc.cbSize = std::mem::size_of::<HIGHCONTRASTW>() as u32;
+    let mut hc = HIGHCONTRASTW {
+        cbSize: std::mem::size_of::<HIGHCONTRASTW>() as u32,
+        ..Default::default()
+    };
     let queried = SystemParametersInfoW(
         SPI_GETHIGHCONTRAST,
         hc.cbSize,
