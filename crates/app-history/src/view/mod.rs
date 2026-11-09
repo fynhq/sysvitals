@@ -164,7 +164,7 @@ impl HistoryView {
         spawn_accent_watch(
             cx,
             |view: &mut HistoryView| &mut view.last_accent,
-            |cx| apply_theme_and_accent(cx),
+            apply_theme_and_accent,
         );
     }
 

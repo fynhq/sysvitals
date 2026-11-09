@@ -35,7 +35,9 @@ fn os_build() -> Option<u32> {
         };
         // `NTSTATUS::ok()` yields a `Result`, not an `Option`, so build the
         // `Option` from `is_ok` directly.
-        RtlGetVersion(&mut info).is_ok().then(|| info.dwBuildNumber)
+        RtlGetVersion(&mut info)
+            .is_ok()
+            .then_some(info.dwBuildNumber)
     }
 }
 

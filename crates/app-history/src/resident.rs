@@ -274,7 +274,7 @@ pub(crate) fn run_resident(cx: &mut App) {
                         bottom: snapshot.anchor[3],
                     };
                     let monitor =
-                        (snapshot.monitor != 0).then(|| DisplayId::new(snapshot.monitor as u64));
+                        (snapshot.monitor != 0).then_some(DisplayId::new(snapshot.monitor as u64));
                     let reopened = cx.update(|app| {
                         apply_theme_and_accent(app);
                         open_history_window(app, Some(anchor), monitor, true, Some(shared.clone()))
@@ -380,14 +380,14 @@ pub(crate) fn run_resident(cx: &mut App) {
                 && windows.is_empty()
                 && Some(snapshot.generation) != dismissed_generation
             {
-                let anchor = snapshot.anchor_is_valid().then(|| AnchorRect {
+                let anchor = snapshot.anchor_is_valid().then_some(AnchorRect {
                     left: snapshot.anchor[0],
                     top: snapshot.anchor[1],
                     right: snapshot.anchor[2],
                     bottom: snapshot.anchor[3],
                 });
                 let monitor =
-                    (snapshot.monitor != 0).then(|| DisplayId::new(snapshot.monitor as u64));
+                    (snapshot.monitor != 0).then_some(DisplayId::new(snapshot.monitor as u64));
                 let opened = cx.update(|app| {
                     // The OS accent may have changed while the popup was
                     // closed; re-apply before the first paint.

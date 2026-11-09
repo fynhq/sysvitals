@@ -66,7 +66,11 @@ pub(crate) fn native_counters(selection: &NetSelection) -> Option<CounterFrame> 
 /// selection keys.
 fn alias_string(alias: &[u16]) -> Option<String> {
     let len = alias.iter().position(|&c| c == 0).unwrap_or(alias.len());
-    (len > 0).then(|| String::from_utf16_lossy(&alias[..len]))
+    if len > 0 {
+        Some(String::from_utf16_lossy(&alias[..len]))
+    } else {
+        None
+    }
 }
 
 /// Cached alias set of NDIS hardware interfaces.

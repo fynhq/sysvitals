@@ -389,7 +389,7 @@ impl SettingsView {
         spawn_accent_watch(
             cx,
             |view: &mut SettingsView| &mut view.last_accent,
-            |cx| apply_theme_and_accent(cx),
+            apply_theme_and_accent,
         );
         view
     }
