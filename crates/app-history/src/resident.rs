@@ -32,6 +32,15 @@ impl HistoryShared {
     }
 }
 
+// SAFETY: `state` points into a process-lifetime file mapping owned by the
+// indicator. All access goes through the seqlock/volatile accessors in
+// `sysvitals_core::HistoryState`, which are built for concurrent cross-process
+// reads and writes, so sharing the handle across threads is sound.
+#[cfg(windows)]
+unsafe impl Send for HistoryShared {}
+#[cfg(windows)]
+unsafe impl Sync for HistoryShared {}
+
 #[cfg(not(windows))]
 pub(crate) struct HistoryShared;
 
@@ -311,8 +320,8 @@ pub(crate) fn run_resident(cx: &mut App) {
                 if !activated {
                     let ready = first_load
                         .as_ref()
-                        .map_or(true, |flag| flag.load(Ordering::Acquire));
-                    let timed_out = opened_at.map_or(true, |opened| {
+                        .is_none_or(|flag| flag.load(Ordering::Acquire));
+                    let timed_out = opened_at.is_none_or(|opened| {
                         opened.elapsed() > Duration::from_millis(1500)
                     });
                     // GPUI's Windows activate() injects a synthetic Alt press
