@@ -68,15 +68,16 @@ pub(crate) struct HistoryView {
     /// `display.theme` setting, which now only governs the indicator), so
     /// a live OS flip repaints this window too — see `observe_appearance`.
     pub(crate) _appearance: Option<Subscription>,
-    /// Kept alive so the Esc observer is not cancelled. Esc closes the popup.
-    /// This is an app-level keystroke observer, not a window paint-phase
-    /// listener: registering from `render` with `Window::on_key_event` would
-    /// touch the dispatch tree's active node, which does not exist yet for
-    /// the root view on the first paint frame — GPUI unwraps it and panics,
-    /// killing the process the moment the popup opens. This process owns a
-    /// single window with no text fields, so a global keystroke observer is
-    /// both safe and simpler.
-    pub(crate) _escape: Option<Subscription>,
+    /// Kept alive so the Esc / copy shortcut observer is not cancelled. Esc
+    /// closes the popup; Ctrl+C (Cmd+C on macOS) copies the CSV exactly like
+    /// the Copy button. This is an app-level keystroke observer, not a window
+    /// paint-phase listener: registering from `render` with
+    /// `Window::on_key_event` would touch the dispatch tree's active node,
+    /// which does not exist yet for the root view on the first paint frame —
+    /// GPUI unwraps it and panics, killing the process the moment the popup
+    /// opens. This process owns a single window with no text fields, so a
+    /// global keystroke observer is both safe and simpler.
+    pub(crate) _shortcuts: Option<Subscription>,
     /// Last accent value seen by the live-refresh poll; the override only
     /// re-applies when this moves (see `start_accent_watch`). Seeded with
     /// `None` so the first tick always re-applies once (idempotent when the
@@ -130,13 +131,13 @@ impl HistoryView {
             ever_active: false,
             _activation: None,
             _appearance: None,
-            _escape: None,
+            _shortcuts: None,
             last_accent: None,
             first_load,
             shared,
         };
         view.start_refresh_loop(cx);
-        view.start_escape_observer(cx);
+        view.start_shortcut_observer(cx);
         view.start_accent_watch(cx);
         view
     }
@@ -168,18 +169,28 @@ impl HistoryView {
         );
     }
 
-    /// Dismiss the popup when Esc is pressed.
-    pub(crate) fn start_escape_observer(&mut self, cx: &mut Context<Self>) {
-        if self._escape.is_some() {
+    /// Dismiss the popup when Esc is pressed; copy the CSV on Ctrl+C
+    /// (Cmd+C on macOS), mirroring the Copy button including its
+    /// confirmation flash and disabled states.
+    pub(crate) fn start_shortcut_observer(&mut self, cx: &mut Context<Self>) {
+        if self._shortcuts.is_some() {
             return;
         }
-        let subscription = cx.observe_keystrokes(|view, event, window, _cx| {
-            if event.keystroke.key == "escape" {
+        let subscription = cx.observe_keystrokes(|view, event, window, cx| {
+            let keystroke = &event.keystroke;
+            if keystroke.key == "escape" {
                 view.mark_hidden();
                 window.remove_window();
+                return;
+            }
+            if keystroke.key == "c"
+                && keystroke.modifiers.secondary(cx)
+                && keystroke.modifiers.number_of_modifiers() == 1
+            {
+                view.copy_from_shortcut(cx);
             }
         });
-        self._escape = Some(subscription);
+        self._shortcuts = Some(subscription);
     }
 
     /// Watch the window's OS-appearance changes and re-apply the system
@@ -187,7 +198,7 @@ impl HistoryView {
     /// indicator-only). Idempotent, and registered from the first render
     /// pass like `observe_activation` — never from a paint-phase callback,
     /// which would hit the empty active-node stack on the root view's first
-    /// frame (see the crash note on `_escape`).
+    /// frame (see the crash note on `_shortcuts`).
     pub(crate) fn observe_appearance(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self._appearance.is_some() {
             return;

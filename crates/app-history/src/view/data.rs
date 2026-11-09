@@ -183,6 +183,22 @@ impl HistoryView {
         })
     }
 
+    /// Whether the copy command can run now. Shared by the Copy button's
+    /// disabled state and the keyboard shortcut so both gates stay identical:
+    /// a visible-range export needs loaded, non-empty data, while the wider
+    /// CSV scopes always have a retention window to export.
+    pub(crate) fn copy_available(&self) -> bool {
+        self.csv_scope != CsvScope::Visible || (!self.data_loading && !self.buckets.is_empty())
+    }
+
+    /// Keyboard entry point: identical to pressing the Copy button, including
+    /// its disabled state (a no-op) and its confirmation feedback.
+    pub(crate) fn copy_from_shortcut(&mut self, cx: &mut Context<Self>) {
+        if self.copy_available() {
+            self.copy_csv(cx);
+        }
+    }
+
     pub(crate) fn copy_csv(&mut self, cx: &mut Context<Self>) {
         self.copy_failed = false;
         let lang = self.lang;

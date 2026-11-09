@@ -128,8 +128,7 @@ impl Render for HistoryView {
         // An empty/loading *visible* range has nothing to export. Longer
         // hand-edited CSV scopes still have a full retention window to copy,
         // so they are not gated on the on-screen buckets.
-        let visible_copy = self.csv_scope == CsvScope::Visible;
-        let copy_disabled = visible_copy && (loading || empty);
+        let copy_disabled = !self.copy_available();
         let copy_tip = if copied {
             t(lang, "chart.copied").to_string()
         } else if copy_failed {

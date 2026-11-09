@@ -5,7 +5,8 @@
 //! range selector and a Copy CSV button. When the launcher passes the
 //! indicator rectangle via `--anchor`, the window opens as a topmost
 //! borderless popup beside the indicator; otherwise it opens centered.
-//! Closes on Esc or window blur.
+//! Closes on Esc or window blur. Ctrl+C (Cmd+C on macOS) copies the CSV
+//! exactly like the Copy button.
 //!
 //! Module map: `view/mod` (state, lifecycle observers and config reload),
 //! `view/data` (queries, CSV and chart point preparation), `view/render`
