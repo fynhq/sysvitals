@@ -308,10 +308,10 @@ impl SettingsView {
                             }
                             this.save(cx);
                         }
-                        // Repaint the live indicator preview on every edit.
-                        // The value is only *read* here; truncation still
-                        // happens on commit so an active IME composition is
-                        // never rewritten mid-keystroke.
+                        // Repaint so the parent-computed `n/8` counter
+                        // tracks every edit. The value is only *read* here;
+                        // truncation still happens on commit so an active IME
+                        // composition is never rewritten mid-keystroke.
                         InputEvent::Change => cx.notify(),
                         _ => {}
                     }

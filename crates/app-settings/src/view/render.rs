@@ -2,27 +2,6 @@
 
 use super::*;
 
-use sysvitals_core::format::{format_frame, format_frame_vertical, MB};
-use sysvitals_core::Snapshot;
-
-/// Tall enough for the dual-row and vertical layouts; single-row keeps the
-/// same height so switching layouts never resizes the fixed footer.
-const PREVIEW_STRIP_HEIGHT: f32 = 52.0;
-
-/// Preview-only stand-in for the taskbar's left margin. The real presets go
-/// up to 256 px, which would push the sample past the right edge of this
-/// ~368 px strip; the schematic therefore maps the presets onto the left half
-/// of the strip: the smallest margin sits at the left edge and the largest
-/// reads as roughly centered.
-fn preview_margin_fraction(left_margin_px: u32) -> f32 {
-    let last = (ALLOWED_LEFT_MARGIN_PX.len() - 1) as f32;
-    let index = ALLOWED_LEFT_MARGIN_PX
-        .iter()
-        .position(|&px| px == left_margin_px)
-        .unwrap_or(0) as f32;
-    index / last * 0.5
-}
-
 impl Render for SettingsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Re-probe the taskbar shape at most once a second: the user can move
@@ -288,177 +267,6 @@ impl Render for SettingsView {
 
         let dark = cx.theme().mode.is_dark();
 
-        // Live indicator preview: render the same frame the status bar would
-        // for a representative sample, using the current (unsaved) UI state.
-        // This is the settings page's cause-and-effect surface — prefixes,
-        // dual-row, item spacing, orientation and the indicator theme are all
-        // visible before the user looks at the actual taskbar / menu bar.
-        let preview_cfg = self.collect_config(cx);
-        let preview_snapshot = Snapshot {
-            ts: 0,
-            cpu_pct: 12.4,
-            mem_pct: 43.1,
-            up_bps: 1.2 * MB,
-            down_bps: 3.4 * MB,
-        };
-        let preview = if self.vertical_taskbar {
-            format_frame_vertical(&preview_snapshot, &preview_cfg)
-        } else {
-            format_frame(&preview_snapshot, &preview_cfg)
-        };
-        // macOS has no indicator-color entry; its menu-bar title is drawn by
-        // AppKit and follows the system appearance. On Windows the user's
-        // indicator theme drives the preview, so switching it is visible here
-        // even though this window itself never restyles.
-        let preview_dark = if cfg!(target_os = "macos") {
-            dark
-        } else {
-            match preview_cfg.display.theme {
-                sysvitals_core::Theme::Dark => true,
-                sysvitals_core::Theme::Light => false,
-                sysvitals_core::Theme::Auto => dark,
-            }
-        };
-        let preview_fg = if preview_dark {
-            hsla(0., 0., 1., 0.92)
-        } else {
-            hsla(0., 0., 0., 0.86)
-        };
-        let preview_bg = if preview_dark {
-            hsla(0., 0., 0.10, 1.)
-        } else {
-            hsla(0., 0., 0.96, 1.)
-        };
-        let preview_border = if preview_dark {
-            hsla(0., 0., 0.22, 1.)
-        } else {
-            hsla(0., 0., 0.88, 1.)
-        };
-        // Dual-row and vertical indicators use a smaller optical size on the
-        // real display; mirror that here without pretending to match the
-        // platform font metrics pixel for pixel.
-        let preview_text_size = if preview_cfg.display.dual_row || self.vertical_taskbar {
-            11.0
-        } else {
-            12.0
-        };
-        let preview_spacing = preview_cfg.display.item_spacing as f32;
-        let preview_text = |text: String| {
-            div()
-                .text_size(px(preview_text_size))
-                .text_color(preview_fg)
-                .child(text)
-        };
-        let preview_content = if self.vertical_taskbar {
-            // A vertical taskbar stacks each metric's label over its value.
-            // Rendering all eleven formatter lines would need a 180px column,
-            // so show the blocks side by side: each block keeps the stacked
-            // label/value reading order without turning the fixed header into
-            // a second page.
-            let mut blocks: Vec<Vec<String>> = Vec::new();
-            let mut current: Vec<String> = Vec::new();
-            for line in &preview.lines {
-                let text = line.render();
-                if text.trim().is_empty() {
-                    if !current.is_empty() {
-                        blocks.push(std::mem::take(&mut current));
-                    }
-                } else {
-                    current.push(text);
-                }
-            }
-            if !current.is_empty() {
-                blocks.push(current);
-            }
-            let mut row = h_flex().gap(px(preview_spacing)).items_end();
-            for block in blocks {
-                let mut column = v_flex().items_end();
-                for text in block {
-                    column = column.child(preview_text(text));
-                }
-                row = row.child(column);
-            }
-            row.into_any_element()
-        } else if preview_cfg.display.dual_row {
-            // Two real columns, one per quadrant: left = CPU over MEM, right =
-            // U over D. The formatter pads cells with spaces for a fixed-width
-            // text grid, but proportional fonts make that padding inexact in
-            // this window, so each metric gets its own column and the two rows
-            // align by construction.
-            let mut left_col = v_flex().gap(px(2.)).items_start();
-            let mut right_col = v_flex().gap(px(2.)).items_start();
-            let mut has_right = false;
-            for line in &preview.lines {
-                left_col = left_col.child(preview_text(line.left.trim_end().to_string()));
-                if !line.right.is_empty() {
-                    has_right = true;
-                    right_col = right_col.child(preview_text(line.right.trim_end().to_string()));
-                }
-            }
-            let mut row = h_flex()
-                .gap(px(preview_spacing))
-                .items_start()
-                .child(left_col);
-            if has_right {
-                row = row.child(right_col);
-            }
-            row.into_any_element()
-        } else if !preview.items.is_empty() {
-            let mut row = h_flex().gap(px(preview_spacing)).items_center();
-            for item in &preview.items {
-                row = row.child(preview_text(item.clone()));
-            }
-            row.into_any_element()
-        } else {
-            let text = preview
-                .lines
-                .first()
-                .map(|line| line.render())
-                .unwrap_or_default();
-            h_flex().child(preview_text(text)).into_any_element()
-        };
-        // A Windows indicator anchored far left sits at the taskbar's left
-        // edge, offset by `windows.left_margin_px`; the default (and every
-        // macOS status item) sits at the right end, where the margin does not
-        // apply. The strip's left edge stands in for the taskbar edge, but the
-        // preview is schematic rather than to scale: two flexible spacers move
-        // the sample from that edge towards the middle as the preset grows,
-        // so the largest margin reads as roughly centered instead of being
-        // clipped at the far right.
-        let preview_start = cfg!(windows)
-            && !self.vertical_taskbar
-            && self.layout_available
-            && preview_cfg.windows.anchor == sysvitals_core::Anchor::Left;
-        let preview_strip = h_flex()
-            .w_full()
-            .h(px(PREVIEW_STRIP_HEIGHT))
-            .flex_shrink_0()
-            .overflow_hidden()
-            .rounded(px(CONTROL_RADIUS))
-            .bg(preview_bg)
-            .border_1()
-            .border_color(preview_border)
-            .px_3()
-            .py_2()
-            .items_center();
-        let preview_strip = if preview_start {
-            let shift = preview_margin_fraction(preview_cfg.windows.left_margin_px);
-            preview_strip
-                .child(div().flex_grow(shift))
-                .child(preview_content)
-                .child(div().flex_grow(1.0 - shift))
-        } else {
-            preview_strip.justify_end().child(preview_content)
-        };
-        let preview_section = v_flex()
-            .gap_1()
-            .child(section_label(
-                t(lang, "settings.preview").to_string(),
-                IconName::Eye,
-                dim,
-            ))
-            .child(preview_strip);
-
         // Native separators are hairlines: one device pixel. GPUI lays out in
         // logical pixels, so divide by the display scale to land on one
         // physical pixel on Retina instead of drawing a two-pixel line.
@@ -719,18 +527,8 @@ impl Render for SettingsView {
                 ),
         );
 
-        // The preview is the window's fixed footer: it stays visible while
-        // the setting cards and version stamp scroll above it. A failed-save
-        // banner stays outside the scroll area too, at the top, for the same
-        // always-visible reason.
-        let preview_footer = v_flex()
-            .w_full()
-            .flex_shrink_0()
-            .px_4()
-            .pt_2()
-            .pb_4()
-            .child(preview_section);
-
+        // A failed-save banner stays outside the scroll area, pinned under the
+        // title bar, so it remains visible while the user edits further down.
         let body = v_flex()
             .size_full()
             .p_4()
@@ -841,6 +639,5 @@ impl Render for SettingsView {
         }
 
         root.child(div().flex_1().overflow_hidden().child(body))
-            .child(preview_footer)
     }
 }
