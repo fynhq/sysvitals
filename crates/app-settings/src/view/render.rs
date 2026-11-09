@@ -206,8 +206,8 @@ impl Render for SettingsView {
         }
 
         // macOS raises the three dropdowns as native menus. The trigger keeps
-        // the same 160/240px slots and filled-control look, so the layout
-        // below is shared with Windows.
+        // the same 180px slot and filled-control look, so the layout below is
+        // shared with Windows.
         #[cfg(target_os = "macos")]
         let mac_style = {
             let theme = cx.theme();
@@ -224,7 +224,7 @@ impl Render for SettingsView {
         #[cfg(windows)]
         let margin_control = blur_on_outside(div().w(px(180.))).child(margin_select);
         #[cfg(windows)]
-        let anchor_control = blur_on_outside(div().w(px(160.))).child(anchor_select);
+        let anchor_control = blur_on_outside(div().w(px(180.))).child(anchor_select);
         #[cfg(target_os = "macos")]
         let spacing_control = div().w(px(180.)).child(mac_select_trigger(
             "spacing-trigger",
@@ -254,7 +254,7 @@ impl Render for SettingsView {
             }),
         ));
         #[cfg(target_os = "macos")]
-        let anchor_control = div().w(px(160.)).child(mac_select_trigger(
+        let anchor_control = div().w(px(180.)).child(mac_select_trigger(
             "anchor-trigger",
             anchor_items(self.current_lang())[self.anchor_idx].clone(),
             mac_style,
@@ -362,16 +362,29 @@ impl Render for SettingsView {
             }
             row.into_any_element()
         } else if preview_cfg.display.dual_row {
-            let mut rows = v_flex().gap(px(2.)).items_end();
+            // Two real columns, one per quadrant: left = CPU over MEM, right =
+            // U over D. The formatter pads cells with spaces for a fixed-width
+            // text grid, but proportional fonts make that padding inexact in
+            // this window, so each metric gets its own column and the two rows
+            // align by construction.
+            let mut left_col = v_flex().gap(px(2.)).items_start();
+            let mut right_col = v_flex().gap(px(2.)).items_start();
+            let mut has_right = false;
             for line in &preview.lines {
-                let mut row = h_flex().gap(px(preview_spacing)).items_center();
-                row = row.child(preview_text(line.left.clone()));
+                left_col = left_col.child(preview_text(line.left.trim_end().to_string()));
                 if !line.right.is_empty() {
-                    row = row.child(preview_text(line.right.clone()));
+                    has_right = true;
+                    right_col = right_col.child(preview_text(line.right.trim_end().to_string()));
                 }
-                rows = rows.child(row);
             }
-            rows.into_any_element()
+            let mut row = h_flex()
+                .gap(px(preview_spacing))
+                .items_start()
+                .child(left_col);
+            if has_right {
+                row = row.child(right_col);
+            }
+            row.into_any_element()
         } else if !preview.items.is_empty() {
             let mut row = h_flex().gap(px(preview_spacing)).items_center();
             for item in &preview.items {
@@ -386,11 +399,20 @@ impl Render for SettingsView {
                 .unwrap_or_default();
             h_flex().child(preview_text(text)).into_any_element()
         };
-        // A Windows indicator anchored far left sits at the left edge; the
-        // default (and every macOS status item) sits at the right end.
+        // A Windows indicator anchored far left sits at the taskbar's left
+        // edge, offset by `windows.left_margin_px`; the default (and every
+        // macOS status item) sits at the right end, where the margin does not
+        // apply. The strip's left edge stands in for the taskbar edge, so the
+        // real margin is applied as its left padding.
         let preview_start = cfg!(windows)
             && !self.vertical_taskbar
+            && self.layout_available
             && preview_cfg.windows.anchor == sysvitals_core::Anchor::Left;
+        let preview_left_pad = if preview_start {
+            preview_cfg.windows.left_margin_px as f32
+        } else {
+            12.
+        };
         let preview_height = if self.vertical_taskbar || preview_cfg.display.dual_row {
             52.
         } else {
@@ -405,7 +427,8 @@ impl Render for SettingsView {
             .bg(preview_bg)
             .border_1()
             .border_color(preview_border)
-            .px_3()
+            .pl(px(preview_left_pad))
+            .pr(px(12.))
             .py_2()
             .items_center()
             .child(preview_content);
@@ -421,13 +444,7 @@ impl Render for SettingsView {
                 IconName::Eye,
                 dim,
             ))
-            .child(preview_strip)
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(faint)
-                    .child(t(lang, "settings.preview_hint").to_string()),
-            );
+            .child(preview_strip);
 
         // Native separators are hairlines: one device pixel. GPUI lays out in
         // logical pixels, so divide by the display scale to land on one
@@ -580,14 +597,7 @@ impl Render for SettingsView {
                 IconName::Network,
                 network_switch,
                 dim,
-            ))
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(faint)
-                    .pt_1()
-                    .child(t(lang, "settings.keep_one_hint").to_string()),
-            );
+            ));
 
         // Layout always carries item spacing, so the section never vanishes;
         // the anchor row either renders its control, shows why it is
@@ -644,78 +654,69 @@ impl Render for SettingsView {
         let prefix_mem_count = self.prefix_mem.read(cx).value().chars().count();
         let prefix_up_count = self.prefix_up.read(cx).value().chars().count();
         let prefix_down_count = self.prefix_down.read(cx).value().chars().count();
-        let prefix_card = settings_card(card_bg, card_border)
-            .child(
-                // The 2x2 prefix grid uses spacing rather than a divider
-                // between its two rows (2026-10-26, user request); the other
-                // cards keep their row separators.
-                v_flex()
-                    .gap_3()
-                    .child(
-                        h_flex()
-                            .gap_4()
-                            .child(prefix_cell(
-                                t(lang, "settings.cpu").to_string(),
-                                IconName::Cpu,
-                                &self.prefix_cpu,
-                                dim,
-                                faint,
-                                prefix_cpu_count,
-                                control,
-                            ))
-                            .child(prefix_cell(
-                                t(lang, "settings.mem").to_string(),
-                                IconName::MemoryStick,
-                                &self.prefix_mem,
-                                dim,
-                                faint,
-                                prefix_mem_count,
-                                control,
-                            )),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_4()
-                            .child(prefix_cell(
-                                t(lang, "settings.upload").to_string(),
-                                IconName::ArrowUp,
-                                &self.prefix_up,
-                                dim,
-                                faint,
-                                prefix_up_count,
-                                control,
-                            ))
-                            .child(prefix_cell(
-                                t(lang, "settings.download").to_string(),
-                                IconName::ArrowDown,
-                                &self.prefix_down,
-                                dim,
-                                faint,
-                                prefix_down_count,
-                                control,
-                            )),
-                    ),
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(faint)
-                    .pt_2()
-                    .child(t(lang, "settings.prefix_hint").to_string()),
-            );
+        let prefix_card = settings_card(card_bg, card_border).child(
+            // The 2x2 prefix grid uses spacing rather than a divider
+            // between its two rows (2026-10-26, user request); the other
+            // cards keep their row separators.
+            v_flex()
+                .gap_3()
+                .child(
+                    h_flex()
+                        .gap_4()
+                        .child(prefix_cell(
+                            t(lang, "settings.cpu").to_string(),
+                            IconName::Cpu,
+                            &self.prefix_cpu,
+                            dim,
+                            faint,
+                            prefix_cpu_count,
+                            control,
+                        ))
+                        .child(prefix_cell(
+                            t(lang, "settings.mem").to_string(),
+                            IconName::MemoryStick,
+                            &self.prefix_mem,
+                            dim,
+                            faint,
+                            prefix_mem_count,
+                            control,
+                        )),
+                )
+                .child(
+                    h_flex()
+                        .gap_4()
+                        .child(prefix_cell(
+                            t(lang, "settings.upload").to_string(),
+                            IconName::ArrowUp,
+                            &self.prefix_up,
+                            dim,
+                            faint,
+                            prefix_up_count,
+                            control,
+                        ))
+                        .child(prefix_cell(
+                            t(lang, "settings.download").to_string(),
+                            IconName::ArrowDown,
+                            &self.prefix_down,
+                            dim,
+                            faint,
+                            prefix_down_count,
+                            control,
+                        )),
+                ),
+        );
 
-        // The preview and a failed-save banner stay outside the scroll area:
-        // they must remain visible while the user edits controls further down
-        // the page (prefixes are at the bottom).
-        let mut header_extra = v_flex().w_full().flex_shrink_0().px_4().pt_4().gap_3();
-        if self.save_failed.get() {
-            header_extra = header_extra.child(error_banner(
-                t(lang, "settings.save_failed").to_string(),
-                t(lang, "settings.save_failed_hint").to_string(),
-                dark,
-            ));
-        }
-        header_extra = header_extra.child(preview_section);
+        // The preview is the window's fixed footer: it stays visible while
+        // the setting cards and version stamp scroll above it. A failed-save
+        // banner stays outside the scroll area too, at the top, for the same
+        // always-visible reason.
+        let preview_footer = v_flex()
+            .w_full()
+            .flex_shrink_0()
+            .px_4()
+            .pt_2()
+            .pb_4()
+            .child(preview_section);
 
         let body = v_flex()
             .size_full()
@@ -778,53 +779,55 @@ impl Render for SettingsView {
         // component title bar (caption drag + window controls) with a
         // transparent background, making the caption part of the page.
         #[cfg(target_os = "macos")]
-        {
-            let title = t(lang, "settings.title").to_string();
-            v_flex()
-                .size_full()
+        let mut root = v_flex().size_full().child(
+            h_flex()
+                .h(px(34.))
+                .w_full()
+                .flex_shrink_0()
+                .items_center()
+                .justify_center()
                 .child(
-                    h_flex()
-                        .h(px(34.))
-                        .w_full()
-                        .flex_shrink_0()
-                        .items_center()
-                        .justify_center()
-                        .child(
-                            div()
-                                .text_size(px(13.))
-                                .font_semibold()
-                                .text_color(cx.theme().foreground.opacity(0.9))
-                                .child(title),
-                        ),
-                )
-                .child(header_extra)
-                .child(div().flex_1().overflow_hidden().child(body))
-        }
+                    div()
+                        .text_size(px(13.))
+                        .font_semibold()
+                        .text_color(cx.theme().foreground.opacity(0.9))
+                        .child(t(lang, "settings.title").to_string()),
+                ),
+        );
         #[cfg(windows)]
-        {
-            let title = t(lang, "settings.title").to_string();
-            v_flex()
-                .size_full()
+        let mut root = v_flex().size_full().child(
+            TitleBar::new()
+                .w_full()
+                .pl(px(16.))
+                .bg(hsla(0., 0., 0., 0.))
+                .border_color(hsla(0., 0., 0., 0.))
                 .child(
-                    TitleBar::new()
-                        .w_full()
-                        .pl(px(16.))
-                        .bg(hsla(0., 0., 0., 0.))
-                        .border_color(hsla(0., 0., 0., 0.))
-                        .child(
-                            div()
-                                .text_size(px(13.))
-                                .font_semibold()
-                                .text_color(cx.theme().foreground.opacity(0.9))
-                                .child(title),
-                        ),
-                )
-                .child(header_extra)
-                .child(div().flex_1().overflow_hidden().child(body))
-        }
+                    div()
+                        .text_size(px(13.))
+                        .font_semibold()
+                        .text_color(cx.theme().foreground.opacity(0.9))
+                        .child(t(lang, "settings.title").to_string()),
+                ),
+        );
         #[cfg(not(any(windows, target_os = "macos")))]
-        {
-            v_flex().size_full().child(header_extra).child(body)
+        let mut root = v_flex().size_full();
+
+        if self.save_failed.get() {
+            root = root.child(
+                h_flex()
+                    .w_full()
+                    .flex_shrink_0()
+                    .px_4()
+                    .pt_4()
+                    .child(error_banner(
+                        t(lang, "settings.save_failed").to_string(),
+                        t(lang, "settings.save_failed_hint").to_string(),
+                        dark,
+                    )),
+            );
         }
+
+        root.child(div().flex_1().overflow_hidden().child(body))
+            .child(preview_footer)
     }
 }
