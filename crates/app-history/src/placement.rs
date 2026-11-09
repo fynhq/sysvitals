@@ -42,77 +42,21 @@ pub(crate) fn anchor_work_area(
 pub(crate) const POPUP_GAP: f32 = 8.0;
 
 /// Origin for the popup. The indicator sits inside the taskbar/menu bar,
-/// which is *outside* the work area, so anchoring to `anchor.top - gap`
-/// leaves almost no visual gap to the bar. Place the popup relative to the
-/// work-area edge instead, with the same breathing room the shell's own
-/// tray flyouts use. The bar side is inferred from the anchor being outside
-/// the work area on that edge.
+/// which is *outside* the work area, so the popup is placed relative to the
+/// work-area edge with the same breathing room the shell's own tray flyouts
+/// use. The math lives in `core::layout` so it runs in the Linux unit-test
+/// gate; this wrapper only adapts GPUI types.
 pub(crate) fn anchor_origin(
     anchor: &AnchorRect,
     size_w: f32,
     size_h: f32,
     work: &Bounds<Pixels>,
 ) -> Point<Pixels> {
-    let work_left = f32::from(work.origin.x);
-    let work_right = work_left + f32::from(work.size.width);
-    let work_top = f32::from(work.origin.y);
-    let work_bottom = work_top + f32::from(work.size.height);
-    // Keep the same gap on the left/right screen edges: with the indicator
-    // anchored at the taskbar's far left the centered popup would otherwise
-    // be clamped flush against the monitor edge (x = 0). The width passed in
-    // is already shrunk to leave room for both gaps on a narrow work area.
-    let clamp_x = |x: f32| {
-        let min = work_left + POPUP_GAP;
-        let max = (work_right - size_w - POPUP_GAP).max(min);
-        x.max(min).min(max)
-    };
-    let clamp_y = |y: f32| y.max(work_top).min((work_bottom - size_h).max(work_top));
-    let center_x = (anchor.left + anchor.right) * 0.5;
-    let center_y = (anchor.top + anchor.bottom) * 0.5;
-
-    // The bar is below/above/left/right of the work area when the indicator
-    // rect lies beyond that edge.
-    let bar_below = anchor.top >= work_bottom - 1.0 && anchor.bottom > work_bottom;
-    let bar_above = anchor.bottom <= work_top + 1.0 && anchor.top < work_top;
-    let bar_left = anchor.right <= work_left + 1.0;
-    let bar_right = anchor.left >= work_right - 1.0;
-
-    if bar_below {
-        return point(
-            px(clamp_x(center_x - size_w * 0.5)),
-            px((work_bottom - POPUP_GAP - size_h).max(work_top)),
-        );
-    }
-    if bar_above {
-        return point(
-            px(clamp_x(center_x - size_w * 0.5)),
-            px((work_top + POPUP_GAP).min((work_bottom - size_h).max(work_top))),
-        );
-    }
-    if bar_left {
-        return point(
-            px((work_left + POPUP_GAP).min(work_right - size_w)),
-            px(clamp_y(center_y - size_h * 0.5)),
-        );
-    }
-    if bar_right {
-        return point(
-            px((work_right - POPUP_GAP - size_w).max(work_left)),
-            px(clamp_y(center_y - size_h * 0.5)),
-        );
-    }
-
-    // Fallback for a free-floating indicator: prefer below, then above.
-    let below = anchor.bottom + POPUP_GAP;
-    let above = anchor.top - POPUP_GAP - size_h;
-    let y = if below + size_h <= work_bottom {
-        below
-    } else if above >= work_top {
-        above
-    } else {
-        (work_bottom - size_h).max(work_top)
-    };
-    point(px(clamp_x(center_x - size_w * 0.5)), px(y))
+    let anchor =
+        sysvitals_core::layout::Rect::new(anchor.left, anchor.top, anchor.right, anchor.bottom);
+    let (x, y) =
+        sysvitals_core::layout::anchor_origin(anchor, size_w, size_h, layout_rect(work), POPUP_GAP);
+    point(px(x), px(y))
 }
 
 // The native window handle helper (`window_hwnd`) and the hidden-window

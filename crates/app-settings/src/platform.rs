@@ -174,21 +174,26 @@ pub(crate) fn parse_anchor_monitor() -> Option<DisplayId> {
     sysvitals_core::cli::parse_anchor_monitor(&args).map(DisplayId::new)
 }
 
+const SETTINGS_MARGIN: f32 = 16.0;
+const SETTINGS_MIN_SIZE: f32 = 200.0;
+
 /// Fit the requested window size into a display's usable work area. GPUI's
 /// `check_given_bounds()` only verifies the window center, so a fixed
 /// 400x720 settings window can otherwise spill above/below a short work area
-/// on a high-DPI laptop. Keep a small breathing margin on every edge.
+/// on a high-DPI laptop. The arithmetic lives in `core::layout` so it runs
+/// in the Linux unit-test gate.
 pub(crate) fn fit_window_size(
     requested: gpui_kit::Size<Pixels>,
     work: Bounds<Pixels>,
 ) -> gpui_kit::Size<Pixels> {
-    const MARGIN: f32 = 16.0;
-    let max_w = (f32::from(work.size.width) - 2.0 * MARGIN).max(200.0);
-    let max_h = (f32::from(work.size.height) - 2.0 * MARGIN).max(200.0);
-    size(
-        px(f32::from(requested.width).min(max_w)),
-        px(f32::from(requested.height).min(max_h)),
-    )
+    let (width, height) = sysvitals_core::layout::fit_size(
+        f32::from(requested.width),
+        f32::from(requested.height),
+        layout_rect(&work),
+        SETTINGS_MARGIN,
+        SETTINGS_MIN_SIZE,
+    );
+    size(px(width), px(height))
 }
 
 pub(crate) fn centered_on_work(

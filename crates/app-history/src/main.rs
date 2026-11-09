@@ -50,8 +50,8 @@ use sysvitals_core::store::{floor_to_grid, Bucket, Store};
 #[cfg(windows)]
 use sysvitals_panel::panel_font_family;
 use sysvitals_panel::{
-    anchor_visible_bounds, backdrop_for, detect_material, log_event, observe_system_appearance,
-    spawn_accent_watch, PanelSurface, CONTROL_RADIUS,
+    anchor_visible_bounds, backdrop_for, detect_material, layout_rect, log_event,
+    observe_system_appearance, spawn_accent_watch, PanelSurface, CONTROL_RADIUS,
 };
 #[cfg(windows)]
 use sysvitals_panel::{preplace_hidden_window, set_per_monitor_dpi_aware, utf16, window_hwnd};

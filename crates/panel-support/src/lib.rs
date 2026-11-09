@@ -465,3 +465,15 @@ pub fn anchor_visible_bounds(
     };
     display.map(|d| d.visible_bounds())
 }
+
+/// Convert GPUI window bounds into the pure geometry rectangle used by
+/// `sysvitals_core::layout`. The placement math itself is unit-tested on the
+/// Linux quality gate; this is only the GPUI type adapter.
+pub fn layout_rect(bounds: &Bounds<Pixels>) -> sysvitals_core::layout::Rect {
+    sysvitals_core::layout::Rect::new(
+        f32::from(bounds.origin.x),
+        f32::from(bounds.origin.y),
+        f32::from(bounds.origin.x) + f32::from(bounds.size.width),
+        f32::from(bounds.origin.y) + f32::from(bounds.size.height),
+    )
+}

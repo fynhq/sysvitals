@@ -44,8 +44,8 @@ use sysvitals_core::config::{
 };
 use sysvitals_core::{t, Anchor, Config, Language, Theme};
 use sysvitals_panel::{
-    anchor_visible_bounds, backdrop_for, detect_material, log_event, observe_system_appearance,
-    spawn_accent_watch, PanelSurface, CONTROL_RADIUS,
+    anchor_visible_bounds, backdrop_for, detect_material, layout_rect, log_event,
+    observe_system_appearance, spawn_accent_watch, PanelSurface, CONTROL_RADIUS,
 };
 #[cfg(windows)]
 use sysvitals_panel::{panel_font_family, preplace_hidden_window, taskbar_al, utf16, window_hwnd};
