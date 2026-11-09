@@ -203,7 +203,7 @@ impl Render for SettingsView {
         }
 
         // macOS raises the three dropdowns as native menus. The trigger keeps
-        // the same 180px slot and filled-control look, so the layout below is
+        // the same 140px slot and filled-control look, so the layout below is
         // shared with Windows.
         #[cfg(target_os = "macos")]
         let mac_style = {
@@ -217,41 +217,35 @@ impl Render for SettingsView {
             }
         };
         #[cfg(windows)]
-        let spacing_control = blur_on_outside(div().w(px(180.))).child(spacing_select);
+        let spacing_control = blur_on_outside(div().w(px(140.))).child(spacing_select);
         #[cfg(windows)]
-        let margin_control = blur_on_outside(div().w(px(180.))).child(margin_select);
+        let margin_control = blur_on_outside(div().w(px(140.))).child(margin_select);
         #[cfg(windows)]
-        let anchor_control = blur_on_outside(div().w(px(180.))).child(anchor_select);
+        let anchor_control = blur_on_outside(div().w(px(140.))).child(anchor_select);
         #[cfg(target_os = "macos")]
-        let spacing_control = div().w(px(180.)).child(mac_select_trigger(
+        let spacing_control = div().w(px(140.)).child(mac_select_trigger(
             "spacing-trigger",
-            spacing_items(lang)[self.spacing_idx].clone(),
+            spacing_items()[self.spacing_idx].clone(),
             mac_style,
             cx.listener(|this, _, _, cx| {
-                mac_select_popup(
-                    cx,
-                    spacing_items(this.current_lang()),
-                    this.spacing_idx,
-                    |view, index| view.spacing_idx = index,
-                );
+                mac_select_popup(cx, spacing_items(), this.spacing_idx, |view, index| {
+                    view.spacing_idx = index
+                });
             }),
         ));
         #[cfg(target_os = "macos")]
-        let margin_control = div().w(px(180.)).child(mac_select_trigger(
+        let margin_control = div().w(px(140.)).child(mac_select_trigger(
             "margin-trigger",
-            margin_items(lang)[self.margin_idx].clone(),
+            margin_items()[self.margin_idx].clone(),
             mac_style,
             cx.listener(|this, _, _, cx| {
-                mac_select_popup(
-                    cx,
-                    margin_items(this.current_lang()),
-                    this.margin_idx,
-                    |view, index| view.margin_idx = index,
-                );
+                mac_select_popup(cx, margin_items(), this.margin_idx, |view, index| {
+                    view.margin_idx = index
+                });
             }),
         ));
         #[cfg(target_os = "macos")]
-        let anchor_control = div().w(px(180.)).child(mac_select_trigger(
+        let anchor_control = div().w(px(140.)).child(mac_select_trigger(
             "anchor-trigger",
             anchor_items(self.current_lang())[self.anchor_idx].clone(),
             mac_style,
