@@ -119,6 +119,64 @@ pub(crate) fn switch_row(
         .child(control)
 }
 
+/// A setting whose control is unavailable on this host. The title stays
+/// readable while the note explains *why* it is missing — disappearing rows
+/// make a settings page feel broken.
+pub(crate) fn disabled_row(
+    title: String,
+    icon: IconName,
+    note: String,
+    dim: Hsla,
+    faint: Hsla,
+) -> impl IntoElement {
+    v_flex()
+        .py_2()
+        .gap_1()
+        .child(
+            h_flex()
+                .items_center()
+                .gap_2()
+                .child(Icon::new(icon).text_color(faint))
+                .child(div().text_color(dim).child(title)),
+        )
+        .child(div().text_xs().text_color(faint).child(note))
+}
+
+/// Inline error surface for a failed config write. It sits in the fixed
+/// header above the scroll area (not a toast) so the message stays visible
+/// while the user edits controls further down the page.
+pub(crate) fn error_banner(title: String, hint: String, dark: bool) -> impl IntoElement {
+    let (fg, bg, border) = if dark {
+        (
+            hsla(0., 0.65, 0.62, 1.),
+            hsla(0., 0.65, 0.5, 0.12),
+            hsla(0., 0.65, 0.6, 0.30),
+        )
+    } else {
+        (
+            hsla(0., 0.70, 0.45, 1.),
+            hsla(0., 0.70, 0.5, 0.08),
+            hsla(0., 0.70, 0.5, 0.25),
+        )
+    };
+    h_flex()
+        .w_full()
+        .items_start()
+        .gap_2()
+        .p_2()
+        .rounded(px(CONTROL_RADIUS))
+        .bg(bg)
+        .border_1()
+        .border_color(border)
+        .child(Icon::new(IconName::CircleAlert).text_color(fg))
+        .child(
+            v_flex()
+                .gap_1()
+                .child(div().text_sm().text_color(fg).child(title))
+                .child(div().text_xs().text_color(fg.opacity(0.85)).child(hint)),
+        )
+}
+
 /// Version banner shown in the settings footer — see the footer for how it
 /// is produced by the build script.
 pub(crate) const SV_BUILD_ID: &str = match option_env!("SV_BUILD_ID") {
@@ -133,27 +191,49 @@ pub(crate) const REPO_URL: &str = env!("CARGO_PKG_REPOSITORY");
 
 /// One prefix cell of the settings 2x2 grid: a dim caption above a flexible
 /// text input. Takes the entity by reference so the render borrow survives
-/// the child call.
+/// the child call. The caption carries a live `n/8` counter: the stored value
+/// is truncated on commit, but the user should see the limit while typing.
 pub(crate) fn prefix_cell(
     label: String,
     icon: IconName,
     input: &Entity<InputState>,
     label_color: Hsla,
+    count_color: Hsla,
+    count: usize,
     control: Option<(Hsla, Hsla, f32)>,
 ) -> impl IntoElement {
     let mut field = Input::new(input).w_full();
     if let Some((bg, border, radius)) = control {
         field = field.bg(bg).border_color(border).rounded(px(radius));
     }
+    let over = count > MAX_PREFIX_CHARS;
+    let count_color = if over {
+        hsla(0., 0.70, 0.50, 1.0)
+    } else {
+        count_color
+    };
     v_flex()
         .flex_1()
         .gap_1()
         .child(
             h_flex()
+                .justify_between()
                 .items_center()
-                .gap_1()
-                .child(Icon::new(icon).text_color(label_color))
-                .child(div().text_xs().text_color(label_color).child(label)),
+                .child(
+                    h_flex()
+                        .items_center()
+                        .gap_1()
+                        .child(Icon::new(icon).text_color(label_color))
+                        .child(div().text_xs().text_color(label_color).child(label)),
+                )
+                .when(count > 0, |this| {
+                    this.child(
+                        div()
+                            .text_xs()
+                            .text_color(count_color)
+                            .child(format!("{count}/{MAX_PREFIX_CHARS}")),
+                    )
+                }),
         )
         .child(blur_on_outside(div().w_full()).child(field))
 }

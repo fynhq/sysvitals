@@ -2,6 +2,17 @@
 
 use super::*;
 
+use sysvitals_core::format::format_percent;
+
+fn legend_entry(color: Hsla, name: String, value: String, fg: Hsla) -> impl IntoElement {
+    h_flex()
+        .gap_1()
+        .items_center()
+        .child(div().w(px(8.)).h(px(8.)).rounded(px(4.)).bg(color))
+        .child(div().text_xs().text_color(fg.opacity(0.7)).child(name))
+        .child(div().text_xs().text_color(fg.opacity(0.9)).child(value))
+}
+
 impl Render for HistoryView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let lang = self.lang;
@@ -13,11 +24,67 @@ impl Render for HistoryView {
         let points = self.points();
         let loading = self.data_loading;
         let empty = self.buckets.is_empty();
-        let placeholder = if loading {
-            t(lang, "chart.loading").to_string()
+        let data_error = self.data_error_logged;
+        let live = self.range.auto_refresh();
+        let latest = self.buckets.last().copied();
+        let cpu_value = latest
+            .map(|bucket| format_percent(bucket.cpu))
+            .unwrap_or_else(|| "--%".to_string());
+        let mem_value = latest
+            .map(|bucket| format_percent(bucket.mem))
+            .unwrap_or_else(|| "--%".to_string());
+        // Static 1 d / 1 mo views do not follow the clock after opening; label
+        // the last stored point instead of pretending it is "now".
+        let latest_note = if live {
+            None
         } else {
-            t(lang, "chart.no_data").to_string()
+            latest.map(|bucket| format!("{} {}", t(lang, "chart.latest"), fmt_date_time(bucket.ts)))
         };
+        let status = if loading {
+            Some((t(lang, "chart.loading").to_string(), None))
+        } else if data_error && empty {
+            Some((
+                t(lang, "chart.error").to_string(),
+                Some(t(lang, "chart.error_hint").to_string()),
+            ))
+        } else if empty {
+            Some((
+                t(lang, "chart.no_data").to_string(),
+                Some(t(lang, "chart.no_data_hint").to_string()),
+            ))
+        } else {
+            None
+        };
+        // Contiguous runs of padded slots. The chart still draws a continuous
+        // line (the library has no per-point break), so a translucent band
+        // behind the plot keeps the "app was not running" intervals honest.
+        let gap_spans: Vec<(f32, f32)> = {
+            let len = points.len();
+            if len < 2 {
+                Vec::new()
+            } else {
+                let mut spans = Vec::new();
+                let mut start: Option<usize> = None;
+                for (index, point) in points.iter().enumerate() {
+                    if !point.has_data {
+                        if start.is_none() {
+                            start = Some(index);
+                        }
+                    } else if let Some(first) = start.take() {
+                        spans.push((first, index - 1));
+                    }
+                }
+                if let Some(first) = start {
+                    spans.push((first, len - 1));
+                }
+                let last = (len - 1) as f32;
+                spans
+                    .into_iter()
+                    .map(|(first, end)| (first as f32 / last, end as f32 / last))
+                    .collect()
+            }
+        };
+        let gap_color = cx.theme().foreground.opacity(0.05);
         // The chart itself paints no x labels (`x_tick_count(0)` below); this
         // panel draws them at a readable size instead. Labels are generated
         // from the time window (six evenly spaced positions), not from data
@@ -55,11 +122,22 @@ impl Render for HistoryView {
 
         // Icon-only copy button: a green check flashes for ~1.2s after a
         // successful copy, then the button returns to the copy icon. The
-        // tooltip keeps the textual hint in the current language.
+        // tooltip keeps the textual hint in the current language. A loading
+        // or empty range has nothing to export, so the command is disabled
+        // rather than failing after the click.
+        // An empty/loading *visible* range has nothing to export. Longer
+        // hand-edited CSV scopes still have a full retention window to copy,
+        // so they are not gated on the on-screen buckets.
+        let visible_copy = self.csv_scope == CsvScope::Visible;
+        let copy_disabled = visible_copy && (loading || empty);
         let copy_tip = if copied {
             t(lang, "chart.copied").to_string()
         } else if copy_failed {
             t(lang, "chart.copy_failed").to_string()
+        } else if copy_disabled && loading {
+            t(lang, "chart.loading").to_string()
+        } else if copy_disabled && empty {
+            t(lang, "chart.no_data").to_string()
         } else {
             t(lang, "chart.copy_csv").to_string()
         };
@@ -67,6 +145,7 @@ impl Render for HistoryView {
         let copy_btn = Button::new("copy-csv")
             .small()
             .rounded(px(CONTROL_RADIUS))
+            .disabled(copy_disabled)
             .tooltip(copy_tip)
             .when(copied, |b| {
                 b.icon(IconName::CircleCheck)
@@ -138,7 +217,8 @@ impl Render for HistoryView {
         // labels reproduce the library's plot geometry (the 32 px value-axis
         // gutter and the 18 px strip under the x axis) without re-deriving
         // the layout. The canvas paints before the chart, keeping a hover
-        // tooltip above the labels.
+        // tooltip above the labels. The same canvas shades padded (no-data)
+        // stretches behind the curve.
         let y_labels: Vec<String> = (0..Y_TICK_COUNT)
             .map(|k| {
                 let value =
@@ -153,6 +233,19 @@ impl Render for HistoryView {
                 let plot_left = X_AXIS_GUTTER;
                 let plot_h = (f32::from(bounds.size.height) - X_AXIS_STRIP_H).max(0.0);
                 let plot_w = (f32::from(bounds.size.width) - plot_left).max(0.0);
+                for (first, end) in &gap_spans {
+                    let left = plot_left + plot_w * *first;
+                    let right = plot_left + plot_w * *end;
+                    if right - left >= 1.0 {
+                        window.paint_quad(fill(
+                            Bounds::new(
+                                point(px(left), px(0.)),
+                                size(px(right - left), px(plot_h)),
+                            ),
+                            gap_color,
+                        ));
+                    }
+                }
                 let mut texts = Vec::with_capacity(axis_labels.len() + y_labels.len());
                 for (i, (frac, text)) in axis_labels.iter().enumerate() {
                     let first = i == 0;
@@ -194,83 +287,100 @@ impl Render for HistoryView {
         )
         .absolute()
         .size_full();
-        let empty_color = cx.theme().foreground.opacity(0.6);
-        let merged_chart = div()
-            .flex_1()
-            .relative()
-            .child(axis_overlay)
-            .child(
-                AreaChart::new(points)
-                    // The x value is only used for axis/tooltip text; the
-                    // library's ScalePoint projects by index. `points()`
-                    // makes that index correspond to a bucket slot.
-                    .x(|p: &ChartPoint| p.ts.to_string())
-                    .y(|p: &ChartPoint| p.cpu)
-                    .stroke(cpu_color())
-                    .fill(transparent_color())
-                    .name(t(lang, "chart.cpu").to_string())
-                    .y(|p: &ChartPoint| p.mem)
-                    .stroke(mem_color())
-                    .fill(transparent_color())
-                    .name(t(lang, "chart.mem").to_string())
-                    .y_domain(Y_AXIS_MIN, Y_AXIS_MAX)
-                    .y_padding(0.0, 0.0)
-                    .x_axis(true)
-                    .x_tick_count(0)
-                    .y_axis(true)
-                    .y_tick_format(|_| "")
-                    .y_tick_count(Y_TICK_COUNT)
-                    .grid(true)
-                    .appear(false)
-                    .tooltip_title(|p: &ChartPoint| format_ts_full(p.ts).into())
-                    .tooltip_value(|p: &ChartPoint, _series: usize, v: f64| {
-                        if p.has_data {
-                            format!("{v:.2}%").into()
-                        } else {
-                            "--".into()
-                        }
-                    }),
-            )
-            .when(loading || empty, move |this| {
-                this.child(
-                    h_flex()
-                        .absolute()
-                        .size_full()
-                        .items_center()
-                        .justify_center()
-                        .child(div().text_sm().text_color(empty_color).child(placeholder)),
-                )
-            });
-
-        // Shared legend: dot + label per series, aligned with the chart's
-        // own colors.
-        let legend = h_flex()
-            .gap_4()
-            .items_center()
-            .child(
+        let mut merged_chart = div().flex_1().relative().child(axis_overlay).child(
+            AreaChart::new(points)
+                // The x value is only used for axis/tooltip text; the
+                // library's ScalePoint projects by index. `points()`
+                // makes that index correspond to a bucket slot.
+                .x(|p: &ChartPoint| p.ts.to_string())
+                .y(|p: &ChartPoint| p.cpu)
+                .stroke(cpu_color())
+                .fill(transparent_color())
+                .name(t(lang, "chart.cpu").to_string())
+                .y(|p: &ChartPoint| p.mem)
+                .stroke(mem_color())
+                .fill(transparent_color())
+                .name(t(lang, "chart.mem").to_string())
+                .y_domain(Y_AXIS_MIN, Y_AXIS_MAX)
+                .y_padding(0.0, 0.0)
+                .x_axis(true)
+                .x_tick_count(0)
+                .y_axis(true)
+                .y_tick_format(|_| "")
+                .y_tick_count(Y_TICK_COUNT)
+                .grid(true)
+                .appear(false)
+                .tooltip_title(|p: &ChartPoint| format_ts_full(p.ts).into())
+                .tooltip_value(|p: &ChartPoint, _series: usize, v: f64| {
+                    if p.has_data {
+                        format!("{v:.1}%").into()
+                    } else {
+                        "--".into()
+                    }
+                }),
+        );
+        let status_color = cx.theme().foreground.opacity(0.6);
+        if let Some((title, hint)) = status {
+            let mut message = v_flex()
+                .gap_1()
+                .items_center()
+                .w_full()
+                .max_w(px(430.))
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(status_color)
+                        .text_center()
+                        .child(title),
+                );
+            if let Some(hint) = hint {
+                message = message.child(
+                    div()
+                        .text_xs()
+                        .text_color(status_color.opacity(0.8))
+                        .text_center()
+                        .child(hint),
+                );
+            }
+            merged_chart = merged_chart.child(
                 h_flex()
-                    .gap_1()
+                    .absolute()
+                    .size_full()
                     .items_center()
-                    .child(div().w(px(8.)).h(px(8.)).rounded(px(4.)).bg(cpu_color()))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().foreground.opacity(0.7))
-                            .child(t(lang, "chart.cpu").to_string()),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .gap_1()
-                    .items_center()
-                    .child(div().w(px(8.)).h(px(8.)).rounded(px(4.)).bg(mem_color()))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().foreground.opacity(0.7))
-                            .child(t(lang, "chart.mem").to_string()),
-                    ),
+                    .justify_center()
+                    .child(message),
             );
+        }
+
+        // Shared legend: dot + label + latest value per series, aligned with
+        // the chart's own colors. Static ranges add the timestamp of the last
+        // stored point so the number is not mistaken for a live reading.
+        let fg = cx.theme().foreground;
+        let mut legend = h_flex()
+            .w_full()
+            .justify_between()
+            .items_center()
+            .flex_wrap()
+            .child(
+                h_flex()
+                    .gap_4()
+                    .items_center()
+                    .child(legend_entry(
+                        cpu_color(),
+                        t(lang, "chart.cpu").to_string(),
+                        cpu_value,
+                        fg,
+                    ))
+                    .child(legend_entry(
+                        mem_color(),
+                        t(lang, "chart.mem").to_string(),
+                        mem_value,
+                        fg,
+                    )),
+            );
+        if let Some(note) = latest_note {
+            legend = legend.child(div().text_xs().text_color(fg.opacity(0.55)).child(note));
+        }
 
         v_flex()
             .size_full()

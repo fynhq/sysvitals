@@ -9,11 +9,52 @@ use sysvitals_panel::restore_window_size_after_move;
 // Dropdown item builders
 // ---------------------------------------------------------------------------
 
-/// Pixel-choice items carry their unit so the dropdown does not read as a
-/// bare count. "px" is a unit symbol shared by both locales, so the list never
-/// needs a language refresh.
-pub(crate) fn px_items(values: &[u32]) -> Vec<String> {
-    values.iter().map(|v| format!("{v} px")).collect()
+/// A preset dropdown item: a human label plus the exact pixel value, so the
+/// list reads like a system setting instead of a raw pixel count. "px" is a
+/// unit symbol shared by both locales.
+fn preset_item(label: &str, px: u32) -> String {
+    if label.is_empty() {
+        format!("{px} px")
+    } else {
+        format!("{label} ({px} px)")
+    }
+}
+
+/// Item-spacing presets. The labels are translated, so the list is rebuilt
+/// whenever the UI language changes (see `refresh_localized_items`).
+pub(crate) fn spacing_items(lang: Language) -> Vec<String> {
+    ALLOWED_ITEM_SPACING_PX
+        .iter()
+        .map(|&px| {
+            let label = match px {
+                4 => t(lang, "spacing.4"),
+                8 => t(lang, "spacing.8"),
+                16 => t(lang, "spacing.16"),
+                32 => t(lang, "spacing.32"),
+                _ => "",
+            };
+            preset_item(label, px)
+        })
+        .collect()
+}
+
+/// Margin presets, translated like [`spacing_items`].
+pub(crate) fn margin_items(lang: Language) -> Vec<String> {
+    ALLOWED_LEFT_MARGIN_PX
+        .iter()
+        .map(|&px| {
+            let label = match px {
+                8 => t(lang, "margin.8"),
+                16 => t(lang, "margin.16"),
+                32 => t(lang, "margin.32"),
+                64 => t(lang, "margin.64"),
+                128 => t(lang, "margin.128"),
+                256 => t(lang, "margin.256"),
+                _ => "",
+            };
+            preset_item(label, px)
+        })
+        .collect()
 }
 
 /// Anchor items are translated text (the choice labels), rebuilt whenever the
@@ -26,9 +67,9 @@ pub(crate) fn anchor_items(lang: Language) -> Vec<String> {
     ]
 }
 
-/// Every dropdown here is a single-choice list of strings (pixel values
-/// rendered as decimal text, or translated anchor labels). macOS uses native
-/// menus instead, so this state exists only on Windows.
+/// Every dropdown here is a single-choice list of strings (translated preset
+/// labels carrying their pixel value, or translated anchor labels). macOS
+/// uses native menus instead, so this state exists only on Windows.
 #[cfg(windows)]
 pub(crate) type StringSelectState = SelectState<SearchableVec<String>>;
 
@@ -138,6 +179,20 @@ impl SettingsView {
         let prefix_down =
             cx.new(|cx| InputState::new(window, cx).default_value(&cfg.display.prefix.down));
 
+        // Empty prefix fields read as broken; show the conventional fallback
+        // as a hint without changing the stored value. The arrows are plain
+        // Unicode, not emoji.
+        for (state, placeholder) in [
+            (&prefix_cpu, "CPU"),
+            (&prefix_mem, "MEM"),
+            (&prefix_up, "↑"),
+            (&prefix_down, "↓"),
+        ] {
+            state.update(cx, |state, cx| {
+                state.set_placeholder(placeholder, window, cx);
+            });
+        }
+
         let lang_idx = Language::ALL
             .iter()
             .position(|l| *l == cfg.display.language)
@@ -170,7 +225,7 @@ impl SettingsView {
         #[cfg(windows)]
         let spacing_select = cx.new(|cx| {
             SelectState::new(
-                SearchableVec::new(px_items(&ALLOWED_ITEM_SPACING_PX)),
+                SearchableVec::new(spacing_items(lang)),
                 Some(IndexPath::new(spacing_idx)),
                 window,
                 cx,
@@ -179,7 +234,7 @@ impl SettingsView {
         #[cfg(windows)]
         let margin_select = cx.new(|cx| {
             SelectState::new(
-                SearchableVec::new(px_items(&ALLOWED_LEFT_MARGIN_PX)),
+                SearchableVec::new(margin_items(lang)),
                 Some(IndexPath::new(margin_idx)),
                 window,
                 cx,
@@ -202,7 +257,7 @@ impl SettingsView {
         {
             _subscriptions.push(cx.subscribe(&spacing_select, |this: &mut Self, _, ev, cx| {
                 if let SelectEvent::Confirm(Some(value)) = ev {
-                    let items = px_items(&ALLOWED_ITEM_SPACING_PX);
+                    let items = spacing_items(this.current_lang());
                     if let Some(i) = items.iter().position(|s| s == value) {
                         this.spacing_idx = i;
                         this.save(cx);
@@ -212,7 +267,7 @@ impl SettingsView {
             }));
             _subscriptions.push(cx.subscribe(&margin_select, |this: &mut Self, _, ev, cx| {
                 if let SelectEvent::Confirm(Some(value)) = ev {
-                    let items = px_items(&ALLOWED_LEFT_MARGIN_PX);
+                    let items = margin_items(this.current_lang());
                     if let Some(i) = items.iter().position(|s| s == value) {
                         this.margin_idx = i;
                         this.save(cx);
@@ -253,6 +308,11 @@ impl SettingsView {
                             }
                             this.save(cx);
                         }
+                        // Repaint the live indicator preview on every edit.
+                        // The value is only *read* here; truncation still
+                        // happens on commit so an active IME composition is
+                        // never rewritten mid-keystroke.
+                        InputEvent::Change => cx.notify(),
                         _ => {}
                     }
                 },
@@ -352,21 +412,16 @@ impl SettingsView {
         Language::ALL[self.lang_idx]
     }
 
-    /// Enforce "at least one indicator group stays on": when the user turns
-    /// off the last remaining group, re-enable the other one instead, so the
-    /// indicator is never left with nothing to show.
+    /// Apply a display-group choice. The UI disables the switch for the last
+    /// visible group, so this never needs to flip the other switch behind the
+    /// user's back; `sanitize` still guarantees a valid config if a caller
+    /// bypasses the UI.
     pub(crate) fn set_resources(&mut self, checked: bool) {
         self.show_resources = checked;
-        if !self.show_resources && !self.show_network {
-            self.show_network = true;
-        }
     }
 
     pub(crate) fn set_network(&mut self, checked: bool) {
         self.show_network = checked;
-        if !self.show_network && !self.show_resources {
-            self.show_resources = true;
-        }
     }
 
     pub(crate) fn collect_config(&self, cx: &App) -> Config {
@@ -475,13 +530,30 @@ impl SettingsView {
         self.save_failed.set(result.is_err());
     }
 
-    /// Rebuild the language-dependent anchor dropdown after a language flip,
-    /// keeping the current selection. The dropdown entity and its
-    /// subscription stay in place; only the items are swapped.
-    pub(crate) fn refresh_anchor_items(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Rebuild the translated dropdown lists (spacing, margin and anchor)
+    /// after a language flip, keeping the current selections. The dropdown
+    /// entities and their subscriptions stay in place; only the items and
+    /// selected indexes are swapped.
+    pub(crate) fn refresh_localized_items(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         #[cfg(windows)]
         {
-            let items = anchor_items(self.current_lang());
+            let lang = self.current_lang();
+
+            let items = spacing_items(lang);
+            let idx = self.spacing_idx;
+            self.spacing_select.update(cx, |state, cx| {
+                state.set_items(SearchableVec::new(items), window, cx);
+                state.set_selected_index(Some(IndexPath::new(idx)), window, cx);
+            });
+
+            let items = margin_items(lang);
+            let idx = self.margin_idx;
+            self.margin_select.update(cx, |state, cx| {
+                state.set_items(SearchableVec::new(items), window, cx);
+                state.set_selected_index(Some(IndexPath::new(idx)), window, cx);
+            });
+
+            let items = anchor_items(lang);
             let idx = self.anchor_idx;
             self.anchor_select.update(cx, |state, cx| {
                 state.set_items(SearchableVec::new(items), window, cx);
@@ -490,7 +562,7 @@ impl SettingsView {
         }
         #[cfg(not(windows))]
         {
-            // macOS builds the native menu from `anchor_items` on every
+            // macOS builds the native menu from the localized lists on every
             // click, so there is no persistent list to refresh here.
             let _ = (window, cx);
         }

@@ -2,6 +2,9 @@
 
 use super::*;
 
+use sysvitals_core::format::{format_frame, format_frame_vertical, MB};
+use sysvitals_core::Snapshot;
+
 impl Render for SettingsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Re-probe the taskbar shape at most once a second: the user can move
@@ -82,10 +85,11 @@ impl Render for SettingsView {
                               window: &mut Window,
                               cx: &mut Context<Self>| {
                             this.lang_idx = i;
-                            // The anchor choices are translated text: rebuild
-                            // them so the dropdown repaints in the new
-                            // language, then persist immediately.
-                            this.refresh_anchor_items(window, cx);
+                            // The dropdown items and the anchor choices are
+                            // translated text: rebuild them so the page
+                            // repaints in the new language, then persist
+                            // immediately.
+                            this.refresh_localized_items(window, cx);
                             // The custom titlebar repaints from `lang`, but the
                             // platform title (taskbar / Mission Control /
                             // accessibility) needs an explicit update.
@@ -216,34 +220,34 @@ impl Render for SettingsView {
             }
         };
         #[cfg(windows)]
-        let spacing_control = blur_on_outside(div().w(px(160.))).child(spacing_select);
+        let spacing_control = blur_on_outside(div().w(px(180.))).child(spacing_select);
         #[cfg(windows)]
-        let margin_control = blur_on_outside(div().w(px(160.))).child(margin_select);
+        let margin_control = blur_on_outside(div().w(px(180.))).child(margin_select);
         #[cfg(windows)]
         let anchor_control = blur_on_outside(div().w(px(160.))).child(anchor_select);
         #[cfg(target_os = "macos")]
-        let spacing_control = div().w(px(160.)).child(mac_select_trigger(
+        let spacing_control = div().w(px(180.)).child(mac_select_trigger(
             "spacing-trigger",
-            px_items(&ALLOWED_ITEM_SPACING_PX)[self.spacing_idx].clone(),
+            spacing_items(lang)[self.spacing_idx].clone(),
             mac_style,
             cx.listener(|this, _, _, cx| {
                 mac_select_popup(
                     cx,
-                    px_items(&ALLOWED_ITEM_SPACING_PX),
+                    spacing_items(this.current_lang()),
                     this.spacing_idx,
                     |view, index| view.spacing_idx = index,
                 );
             }),
         ));
         #[cfg(target_os = "macos")]
-        let margin_control = div().w(px(160.)).child(mac_select_trigger(
+        let margin_control = div().w(px(180.)).child(mac_select_trigger(
             "margin-trigger",
-            px_items(&ALLOWED_LEFT_MARGIN_PX)[self.margin_idx].clone(),
+            margin_items(lang)[self.margin_idx].clone(),
             mac_style,
             cx.listener(|this, _, _, cx| {
                 mac_select_popup(
                     cx,
-                    px_items(&ALLOWED_LEFT_MARGIN_PX),
+                    margin_items(this.current_lang()),
                     this.margin_idx,
                     |view, index| view.margin_idx = index,
                 );
@@ -265,6 +269,166 @@ impl Render for SettingsView {
         ));
 
         let dark = cx.theme().mode.is_dark();
+
+        // Live indicator preview: render the same frame the status bar would
+        // for a representative sample, using the current (unsaved) UI state.
+        // This is the settings page's cause-and-effect surface — prefixes,
+        // dual-row, item spacing, orientation and the indicator theme are all
+        // visible before the user looks at the actual taskbar / menu bar.
+        let preview_cfg = self.collect_config(cx);
+        let preview_snapshot = Snapshot {
+            ts: 0,
+            cpu_pct: 12.4,
+            mem_pct: 43.1,
+            up_bps: 1.2 * MB,
+            down_bps: 3.4 * MB,
+        };
+        let preview = if self.vertical_taskbar {
+            format_frame_vertical(&preview_snapshot, &preview_cfg)
+        } else {
+            format_frame(&preview_snapshot, &preview_cfg)
+        };
+        // macOS has no indicator-color entry; its menu-bar title is drawn by
+        // AppKit and follows the system appearance. On Windows the user's
+        // indicator theme drives the preview, so switching it is visible here
+        // even though this window itself never restyles.
+        let preview_dark = if cfg!(target_os = "macos") {
+            dark
+        } else {
+            match preview_cfg.display.theme {
+                sysvitals_core::Theme::Dark => true,
+                sysvitals_core::Theme::Light => false,
+                sysvitals_core::Theme::Auto => dark,
+            }
+        };
+        let preview_fg = if preview_dark {
+            hsla(0., 0., 1., 0.92)
+        } else {
+            hsla(0., 0., 0., 0.86)
+        };
+        let preview_bg = if preview_dark {
+            hsla(0., 0., 0.10, 1.)
+        } else {
+            hsla(0., 0., 0.96, 1.)
+        };
+        let preview_border = if preview_dark {
+            hsla(0., 0., 0.22, 1.)
+        } else {
+            hsla(0., 0., 0.88, 1.)
+        };
+        // Dual-row and vertical indicators use a smaller optical size on the
+        // real display; mirror that here without pretending to match the
+        // platform font metrics pixel for pixel.
+        let preview_text_size = if preview_cfg.display.dual_row || self.vertical_taskbar {
+            11.0
+        } else {
+            12.0
+        };
+        let preview_spacing = preview_cfg.display.item_spacing as f32;
+        let preview_text = |text: String| {
+            div()
+                .text_size(px(preview_text_size))
+                .text_color(preview_fg)
+                .child(text)
+        };
+        let preview_content = if self.vertical_taskbar {
+            // A vertical taskbar stacks each metric's label over its value.
+            // Rendering all eleven formatter lines would need a 180px column,
+            // so show the blocks side by side: each block keeps the stacked
+            // label/value reading order without turning the fixed header into
+            // a second page.
+            let mut blocks: Vec<Vec<String>> = Vec::new();
+            let mut current: Vec<String> = Vec::new();
+            for line in &preview.lines {
+                let text = line.render();
+                if text.trim().is_empty() {
+                    if !current.is_empty() {
+                        blocks.push(std::mem::take(&mut current));
+                    }
+                } else {
+                    current.push(text);
+                }
+            }
+            if !current.is_empty() {
+                blocks.push(current);
+            }
+            let mut row = h_flex().gap(px(preview_spacing)).items_end();
+            for block in blocks {
+                let mut column = v_flex().items_end();
+                for text in block {
+                    column = column.child(preview_text(text));
+                }
+                row = row.child(column);
+            }
+            row.into_any_element()
+        } else if preview_cfg.display.dual_row {
+            let mut rows = v_flex().gap(px(2.)).items_end();
+            for line in &preview.lines {
+                let mut row = h_flex().gap(px(preview_spacing)).items_center();
+                row = row.child(preview_text(line.left.clone()));
+                if !line.right.is_empty() {
+                    row = row.child(preview_text(line.right.clone()));
+                }
+                rows = rows.child(row);
+            }
+            rows.into_any_element()
+        } else if !preview.items.is_empty() {
+            let mut row = h_flex().gap(px(preview_spacing)).items_center();
+            for item in &preview.items {
+                row = row.child(preview_text(item.clone()));
+            }
+            row.into_any_element()
+        } else {
+            let text = preview
+                .lines
+                .first()
+                .map(|line| line.render())
+                .unwrap_or_default();
+            h_flex().child(preview_text(text)).into_any_element()
+        };
+        // A Windows indicator anchored far left sits at the left edge; the
+        // default (and every macOS status item) sits at the right end.
+        let preview_start = cfg!(windows)
+            && !self.vertical_taskbar
+            && preview_cfg.windows.anchor == sysvitals_core::Anchor::Left;
+        let preview_height = if self.vertical_taskbar || preview_cfg.display.dual_row {
+            52.
+        } else {
+            44.
+        };
+        let preview_strip = h_flex()
+            .w_full()
+            .h(px(preview_height))
+            .flex_shrink_0()
+            .overflow_hidden()
+            .rounded(px(CONTROL_RADIUS))
+            .bg(preview_bg)
+            .border_1()
+            .border_color(preview_border)
+            .px_3()
+            .py_2()
+            .items_center()
+            .child(preview_content);
+        let preview_strip = if preview_start {
+            preview_strip.justify_start()
+        } else {
+            preview_strip.justify_end()
+        };
+        let preview_section = v_flex()
+            .gap_1()
+            .child(section_label(
+                t(lang, "settings.preview").to_string(),
+                IconName::Eye,
+                dim,
+            ))
+            .child(preview_strip)
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(faint)
+                    .child(t(lang, "settings.preview_hint").to_string()),
+            );
+
         // Native separators are hairlines: one device pixel. GPUI lays out in
         // logical pixels, so divide by the display scale to land on one
         // physical pixel on Retina instead of drawing a two-pixel line.
@@ -346,21 +510,51 @@ impl Render for SettingsView {
                         cx.notify();
                     })),
                 dim,
-            ))
-            .when(cfg!(not(target_os = "macos")), |this| {
-                // Offered only where the choice is actually honored. On
-                // macOS the indicator title is drawn by AppKit, which picks
-                // its own color from the menu-bar appearance.
-                this.child(card_divider(dark, scale_factor))
-                    .child(labeled_row(
-                        t(lang, "settings.theme").to_string(),
-                        IconName::Palette,
-                        theme_row,
-                        dim,
-                    ))
-            });
+            ));
 
-        let display_card = settings_card(card_bg, card_border)
+        // The last visible group cannot be switched off. Disable that switch
+        // instead of silently re-enabling the other one behind the user's
+        // back (the old guard flipped it without telling anyone).
+        let resources_last = self.show_resources && !self.show_network;
+        let network_last = self.show_network && !self.show_resources;
+        let mut resources_switch = Switch::new("show-res").checked(self.show_resources);
+        if resources_last {
+            resources_switch = resources_switch
+                .disabled(true)
+                .tooltip(t(lang, "settings.keep_one_hint").to_string());
+        }
+        let resources_switch =
+            resources_switch.on_click(cx.listener(|this, checked: &bool, _, cx| {
+                this.set_resources(*checked);
+                this.save(cx);
+                cx.notify();
+            }));
+        let mut network_switch = Switch::new("show-net").checked(self.show_network);
+        if network_last {
+            network_switch = network_switch
+                .disabled(true)
+                .tooltip(t(lang, "settings.keep_one_hint").to_string());
+        }
+        let network_switch = network_switch.on_click(cx.listener(|this, checked: &bool, _, cx| {
+            this.set_network(*checked);
+            this.save(cx);
+            cx.notify();
+        }));
+
+        // Theme belongs with the other appearance controls, not General.
+        // macOS hides it because AppKit picks the menu-bar title color.
+        let mut display_card = settings_card(card_bg, card_border);
+        if cfg!(not(target_os = "macos")) {
+            display_card = display_card
+                .child(labeled_row(
+                    t(lang, "settings.theme").to_string(),
+                    IconName::Palette,
+                    theme_row,
+                    dim,
+                ))
+                .child(card_divider(dark, scale_factor));
+        }
+        display_card = display_card
             .child(switch_row(
                 t(lang, "settings.dual_row").to_string(),
                 IconName::GalleryVerticalEnd,
@@ -375,75 +569,81 @@ impl Render for SettingsView {
             ))
             .child(card_divider(dark, scale_factor))
             .child(switch_row(
-                t(lang, "settings.group_resources").to_string(),
+                t(lang, "settings.show_resources").to_string(),
                 IconName::Cpu,
-                Switch::new("show-res")
-                    .checked(self.show_resources)
-                    .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                        this.set_resources(*checked);
-                        this.save(cx);
-                        cx.notify();
-                    })),
+                resources_switch,
                 dim,
             ))
             .child(card_divider(dark, scale_factor))
             .child(switch_row(
-                t(lang, "settings.group_network").to_string(),
+                t(lang, "settings.show_network").to_string(),
                 IconName::Network,
-                Switch::new("show-net")
-                    .checked(self.show_network)
-                    .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                        this.set_network(*checked);
-                        this.save(cx);
-                        cx.notify();
-                    })),
+                network_switch,
                 dim,
             ))
-            .child(card_divider(dark, scale_factor))
-            .child(labeled_row(
-                t(lang, "settings.item_spacing").to_string(),
-                IconName::Frame,
-                spacing_control,
-                dim,
-            ));
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(faint)
+                    .pt_1()
+                    .child(t(lang, "settings.keep_one_hint").to_string()),
+            );
 
-        // One layout card holds the anchor and margin rows together; either
-        // row may be hidden by the platform/taskbar shape, but they read as a
-        // single group when both apply.
-        let mut layout_card = settings_card(card_bg, card_border);
-        let mut show_layout = false;
+        // Layout always carries item spacing, so the section never vanishes;
+        // the anchor row either renders its control, shows why it is
+        // unavailable (Windows with left-aligned taskbar icons), or is
+        // omitted where the platform has no anchor choice (macOS).
+        let mut layout_card = settings_card(card_bg, card_border).child(labeled_row(
+            t(lang, "settings.item_spacing").to_string(),
+            IconName::Frame,
+            spacing_control,
+            dim,
+        ));
         if self.layout_available && !self.vertical_taskbar {
-            layout_card = layout_card.child(labeled_row(
-                t(lang, "settings.anchor").to_string(),
-                IconName::PanelLeft,
-                anchor_control,
-                dim,
-            ));
-            show_layout = true;
+            layout_card = layout_card
+                .child(card_divider(dark, scale_factor))
+                .child(labeled_row(
+                    t(lang, "settings.anchor").to_string(),
+                    IconName::PanelLeft,
+                    anchor_control,
+                    dim,
+                ));
+        } else if cfg!(windows) && !self.vertical_taskbar {
+            layout_card = layout_card
+                .child(card_divider(dark, scale_factor))
+                .child(disabled_row(
+                    t(lang, "settings.anchor").to_string(),
+                    IconName::PanelLeft,
+                    t(lang, "settings.anchor_requires_centered").to_string(),
+                    dim,
+                    faint,
+                ));
         }
         let show_margin = (self.layout_available && self.anchor_idx == 1 && !self.vertical_taskbar)
             || self.vertical_taskbar;
         if show_margin {
-            if show_layout {
-                layout_card = layout_card.child(card_divider(dark, scale_factor));
-            }
-            layout_card = layout_card.child(labeled_row(
-                if self.vertical_taskbar {
-                    t(lang, "settings.top_margin").to_string()
-                } else {
-                    t(lang, "settings.left_margin").to_string()
-                },
-                if self.vertical_taskbar {
-                    IconName::ArrowUp
-                } else {
-                    IconName::ArrowLeft
-                },
-                margin_control,
-                dim,
-            ));
-            show_layout = true;
+            layout_card = layout_card
+                .child(card_divider(dark, scale_factor))
+                .child(labeled_row(
+                    if self.vertical_taskbar {
+                        t(lang, "settings.top_margin").to_string()
+                    } else {
+                        t(lang, "settings.left_margin").to_string()
+                    },
+                    if self.vertical_taskbar {
+                        IconName::ArrowUp
+                    } else {
+                        IconName::ArrowLeft
+                    },
+                    margin_control,
+                    dim,
+                ));
         }
 
+        let prefix_cpu_count = self.prefix_cpu.read(cx).value().chars().count();
+        let prefix_mem_count = self.prefix_mem.read(cx).value().chars().count();
+        let prefix_up_count = self.prefix_up.read(cx).value().chars().count();
+        let prefix_down_count = self.prefix_down.read(cx).value().chars().count();
         let prefix_card = settings_card(card_bg, card_border)
             .child(
                 // The 2x2 prefix grid uses spacing rather than a divider
@@ -459,6 +659,8 @@ impl Render for SettingsView {
                                 IconName::Cpu,
                                 &self.prefix_cpu,
                                 dim,
+                                faint,
+                                prefix_cpu_count,
                                 control,
                             ))
                             .child(prefix_cell(
@@ -466,6 +668,8 @@ impl Render for SettingsView {
                                 IconName::MemoryStick,
                                 &self.prefix_mem,
                                 dim,
+                                faint,
+                                prefix_mem_count,
                                 control,
                             )),
                     )
@@ -477,6 +681,8 @@ impl Render for SettingsView {
                                 IconName::ArrowUp,
                                 &self.prefix_up,
                                 dim,
+                                faint,
+                                prefix_up_count,
                                 control,
                             ))
                             .child(prefix_cell(
@@ -484,6 +690,8 @@ impl Render for SettingsView {
                                 IconName::ArrowDown,
                                 &self.prefix_down,
                                 dim,
+                                faint,
+                                prefix_down_count,
                                 control,
                             )),
                     ),
@@ -495,6 +703,19 @@ impl Render for SettingsView {
                     .pt_2()
                     .child(t(lang, "settings.prefix_hint").to_string()),
             );
+
+        // The preview and a failed-save banner stay outside the scroll area:
+        // they must remain visible while the user edits controls further down
+        // the page (prefixes are at the bottom).
+        let mut header_extra = v_flex().w_full().flex_shrink_0().px_4().pt_4().gap_3();
+        if self.save_failed.get() {
+            header_extra = header_extra.child(error_banner(
+                t(lang, "settings.save_failed").to_string(),
+                t(lang, "settings.save_failed_hint").to_string(),
+                dark,
+            ));
+        }
+        header_extra = header_extra.child(preview_section);
 
         let body = v_flex()
             .size_full()
@@ -514,29 +735,18 @@ impl Render for SettingsView {
                 display_card,
                 dim,
             ))
-            .when(show_layout, |this| {
-                this.child(settings_section(
-                    t(lang, "settings.layout").to_string(),
-                    IconName::PanelBottom,
-                    layout_card,
-                    dim,
-                ))
-            })
+            .child(settings_section(
+                t(lang, "settings.layout").to_string(),
+                IconName::PanelBottom,
+                layout_card,
+                dim,
+            ))
             .child(settings_section(
                 t(lang, "settings.prefixes").to_string(),
                 IconName::CaseSensitive,
                 prefix_card,
                 dim,
             ))
-            .when(self.save_failed.get(), |this| {
-                this.child(
-                    div()
-                        .text_xs()
-                        .text_color(faint)
-                        .text_center()
-                        .child(t(lang, "settings.save_failed").to_string()),
-                )
-            })
             // Version footer: pinned to the bottom of the scrollable column
             // and built from the product name plus `SV_BUILD_ID` (see the
             // const below). The whole stamp doubles as a single link to the
@@ -587,6 +797,7 @@ impl Render for SettingsView {
                                 .child(title),
                         ),
                 )
+                .child(header_extra)
                 .child(div().flex_1().overflow_hidden().child(body))
         }
         #[cfg(windows)]
@@ -608,11 +819,12 @@ impl Render for SettingsView {
                                 .child(title),
                         ),
                 )
+                .child(header_extra)
                 .child(div().flex_1().overflow_hidden().child(body))
         }
         #[cfg(not(any(windows, target_os = "macos")))]
         {
-            body
+            v_flex().size_full().child(header_extra).child(body)
         }
     }
 }
