@@ -191,8 +191,9 @@ pub(crate) const REPO_URL: &str = env!("CARGO_PKG_REPOSITORY");
 
 /// One prefix cell of the settings 2x2 grid: a dim caption above a flexible
 /// text input. Takes the entity by reference so the render borrow survives
-/// the child call. The caption carries a live `n/8` counter: the stored value
-/// is truncated on commit, but the user should see the limit while typing.
+/// the child call. The input carries a live `n/8` counter at its right edge:
+/// the stored value is truncated on commit, but the user should see the limit
+/// while typing.
 pub(crate) fn prefix_cell(
     label: String,
     icon: IconName,
@@ -202,38 +203,30 @@ pub(crate) fn prefix_cell(
     count: usize,
     control: Option<(Hsla, Hsla, f32)>,
 ) -> impl IntoElement {
-    let mut field = Input::new(input).w_full();
-    if let Some((bg, border, radius)) = control {
-        field = field.bg(bg).border_color(border).rounded(px(radius));
-    }
     let over = count > MAX_PREFIX_CHARS;
     let count_color = if over {
         hsla(0., 0.70, 0.50, 1.0)
     } else {
         count_color
     };
+    let mut field = Input::new(input).w_full().suffix(
+        div()
+            .text_xs()
+            .text_color(count_color)
+            .child(format!("{count}/{MAX_PREFIX_CHARS}")),
+    );
+    if let Some((bg, border, radius)) = control {
+        field = field.bg(bg).border_color(border).rounded(px(radius));
+    }
     v_flex()
         .flex_1()
         .gap_1()
         .child(
             h_flex()
-                .justify_between()
                 .items_center()
-                .child(
-                    h_flex()
-                        .items_center()
-                        .gap_1()
-                        .child(Icon::new(icon).text_color(label_color))
-                        .child(div().text_xs().text_color(label_color).child(label)),
-                )
-                .when(count > 0, |this| {
-                    this.child(
-                        div()
-                            .text_xs()
-                            .text_color(count_color)
-                            .child(format!("{count}/{MAX_PREFIX_CHARS}")),
-                    )
-                }),
+                .gap_1()
+                .child(Icon::new(icon).text_color(label_color))
+                .child(div().text_xs().text_color(label_color).child(label)),
         )
         .child(blur_on_outside(div().w_full()).child(field))
 }
