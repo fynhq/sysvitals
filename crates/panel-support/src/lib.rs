@@ -25,7 +25,7 @@ use sysvitals_core::backdrop::{
 // Process plumbing shared by every panel (and, directly, by the platform
 // indicators): daily-file logging, the crash hook and the Windows probes.
 #[cfg(windows)]
-pub use sysvitals_support::{hkcu_dword, os_build_number, taskbar_al, utf16};
+pub use sysvitals_support::{hkcu_dword, os_build_number, taskbar_al, utf16, ParentProcess};
 pub use sysvitals_support::{install_panic_hook, log_event, log_sanitize_issues};
 
 /// Which panel is asking for the material tint. The history popup sits

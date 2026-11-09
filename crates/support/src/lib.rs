@@ -172,6 +172,47 @@ pub fn taskbar_al() -> Option<u32> {
     )
 }
 
+/// A Windows parent process handle watched by a child panel. The handle is
+/// stored as `isize` so the struct can move into a GPUI foreground task;
+/// dropping it closes the handle.
+#[cfg(windows)]
+pub struct ParentProcess {
+    handle: isize,
+}
+
+#[cfg(windows)]
+impl ParentProcess {
+    /// Open `pid` with `PROCESS_SYNCHRONIZE`. The error string is the Windows
+    /// error text so callers can keep their existing diagnostic line.
+    pub fn open(pid: u32) -> Result<Self, String> {
+        use windows::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE};
+        match unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, pid) } {
+            Ok(handle) => Ok(Self {
+                handle: handle.0 as isize,
+            }),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    /// Whether the parent has exited. A failed wait is treated as exited, the
+    /// same conservative rule the panels used before this helper existed.
+    pub fn exited(&self) -> bool {
+        use windows::Win32::Foundation::{HANDLE, WAIT_TIMEOUT};
+        use windows::Win32::System::Threading::WaitForSingleObject;
+        unsafe {
+            WaitForSingleObject(HANDLE(self.handle as *mut std::ffi::c_void), 0) != WAIT_TIMEOUT
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ParentProcess {
+    fn drop(&mut self) {
+        use windows::Win32::Foundation::{CloseHandle, HANDLE};
+        let _ = unsafe { CloseHandle(HANDLE(self.handle as *mut std::ffi::c_void)) };
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

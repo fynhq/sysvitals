@@ -24,16 +24,13 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(windows)]
-use windows::Win32::Foundation::{CloseHandle, WAIT_TIMEOUT};
+use windows::Win32::Foundation::CloseHandle;
 #[cfg(windows)]
 use windows::Win32::System::Memory::{
     MapViewOfFile, OpenFileMappingW, UnmapViewOfFile, FILE_MAP_READ, FILE_MAP_WRITE,
 };
 #[cfg(windows)]
-use windows::Win32::System::Threading::{
-    GetCurrentProcess, OpenProcess, SetProcessWorkingSetSize, WaitForSingleObject,
-    PROCESS_SYNCHRONIZE,
-};
+use windows::Win32::System::Threading::{GetCurrentProcess, SetProcessWorkingSetSize};
 
 use gpui_kit::base::plot::label::{PlotLabel, Text as PlotText};
 use gpui_kit::component::button::*;

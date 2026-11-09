@@ -124,17 +124,25 @@ pub(crate) fn run_resident(cx: &mut App) {
         return;
     };
     let parent_pid = parse_parent_pid();
-    let parent =
-        parent_pid.and_then(|pid| unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, pid).ok() });
-    if parent.is_none() {
-        log_event(
-            "WARN",
-            "history: resident parent process unavailable; exiting",
-        );
-        cx.quit();
-        return;
-    }
-    let parent = parent.expect("checked above");
+    let parent = match parent_pid.map(sysvitals_panel::ParentProcess::open) {
+        Some(Ok(parent)) => parent,
+        Some(Err(error)) => {
+            log_event(
+                "WARN",
+                &format!("history: resident parent process unavailable: {error}; exiting"),
+            );
+            cx.quit();
+            return;
+        }
+        None => {
+            log_event(
+                "WARN",
+                "history: resident parent process unavailable; exiting",
+            );
+            cx.quit();
+            return;
+        }
+    };
     let shared = Arc::new(HistoryShared { state });
     log_event(
         "INFO",
@@ -171,8 +179,7 @@ pub(crate) fn run_resident(cx: &mut App) {
                 .await;
 
             let snapshot = cx.update(|_app| shared.snapshot());
-            let parent_dead = unsafe { WaitForSingleObject(parent, 0) != WAIT_TIMEOUT };
-            if parent_dead {
+            if parent.exited() {
                 log_event("INFO", "history: parent process gone; exiting");
                 cx.update(|app| app.quit());
                 break;
@@ -429,7 +436,6 @@ pub(crate) fn run_resident(cx: &mut App) {
             }
         }
 
-        let _ = unsafe { CloseHandle(parent) };
     })
     .detach();
 }

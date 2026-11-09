@@ -242,39 +242,30 @@ pub(crate) fn settings_window_bounds(
 /// before the job was configured and mirrors the mac behavior.
 #[cfg(windows)]
 pub(crate) fn watch_parent(cx: &mut App) {
-    use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_TIMEOUT};
-    use windows::Win32::System::Threading::{
-        OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
-    };
     let Some(pid) = parse_parent_pid() else {
         return;
     };
-    let raw = match unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, pid) } {
-        Ok(handle) => handle.0 as isize,
-        Err(e) => {
+    let parent = match sysvitals_panel::ParentProcess::open(pid) {
+        Ok(parent) => parent,
+        Err(error) => {
             log_event(
                 "WARN",
-                &format!("settings: parent process unavailable: {e}; exiting"),
+                &format!("settings: parent process unavailable: {error}; exiting"),
             );
             cx.quit();
             return;
         }
     };
     log_event("INFO", &format!("settings: watching parent pid {pid}"));
-    cx.spawn(async move |cx| {
-        loop {
-            cx.background_executor()
-                .timer(std::time::Duration::from_secs(1))
-                .await;
-            let exited = unsafe { WaitForSingleObject(HANDLE(raw as *mut std::ffi::c_void), 0) }
-                != WAIT_TIMEOUT;
-            if exited {
-                log_event("INFO", "settings: parent process gone; exiting");
-                cx.update(|app| app.quit());
-                break;
-            }
+    cx.spawn(async move |cx| loop {
+        cx.background_executor()
+            .timer(std::time::Duration::from_secs(1))
+            .await;
+        if parent.exited() {
+            log_event("INFO", "settings: parent process gone; exiting");
+            cx.update(|app| app.quit());
+            break;
         }
-        let _ = unsafe { CloseHandle(HANDLE(raw as *mut std::ffi::c_void)) };
     })
     .detach();
 }
