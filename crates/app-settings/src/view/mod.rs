@@ -366,7 +366,7 @@ impl SettingsView {
     ///
     /// The window is created on the OS's default monitor and then moved to
     /// the anchor's display. A cross-DPI move makes Windows derive the
-    /// suggested rectangle from the *previous* DPI, so a 400x720 panel
+    /// suggested rectangle from the *previous* DPI, so a 400x740 panel
     /// opened from a 125% primary on a 100% secondary came out 318x575.
     /// GPUI applies that suggestion; restore the intended size once, after
     /// the move (shared cross-DPI correction in `sysvitals_panel`).

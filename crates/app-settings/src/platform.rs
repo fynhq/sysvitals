@@ -179,7 +179,7 @@ const SETTINGS_MIN_SIZE: f32 = 200.0;
 
 /// Fit the requested window size into a display's usable work area. GPUI's
 /// `check_given_bounds()` only verifies the window center, so a fixed
-/// 400x720 settings window can otherwise spill above/below a short work area
+/// 400x740 settings window can otherwise spill above/below a short work area
 /// on a high-DPI laptop. The arithmetic lives in `core::layout` so it runs
 /// in the Linux unit-test gate.
 pub(crate) fn fit_window_size(

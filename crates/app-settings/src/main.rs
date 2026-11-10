@@ -187,9 +187,9 @@ fn main() {
         let window_bounds = settings_window_bounds(
             anchor.as_ref(),
             monitor,
-            // 400x720: leave room for the launch-at-login switch added to
+            // 400x740: leave room for the launch-at-login switch added to
             // the General card; 680px did not account for the extra row.
-            size(px(400.), px(720.)),
+            size(px(400.), px(740.)),
             cx,
         );
         // Logical size after fitting the work area; the view restores it
