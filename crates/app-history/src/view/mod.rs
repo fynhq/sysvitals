@@ -113,7 +113,7 @@ impl HistoryView {
             fixed_size,
             #[cfg(windows)]
             size_fixed: false,
-            range: TimeRange::Hour1,
+            range: TimeRange::Min5,
             buckets: Vec::new(),
             data_loading: false,
             query: None,

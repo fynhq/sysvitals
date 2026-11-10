@@ -10,8 +10,8 @@ use std::time::Duration;
 use gpui_kit::{hsla, Hsla};
 
 pub(crate) use sysvitals_core::chart::{
-    axis_labels, build_csv, fmt_date_time, format_ts_full, local_offset_at, points, query_buckets,
-    trim_leading_gap, ChartPoint, TimeRange, VisibleQuery,
+    axis_labels, build_csv, data_runs, fmt_date_time, format_ts_full, local_offset_at, points,
+    query_buckets, trim_leading_gap, ChartPoint, TimeRange, VisibleQuery,
 };
 
 /// How often a visible history window reloads the stored samples. The

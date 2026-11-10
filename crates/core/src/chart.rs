@@ -157,6 +157,28 @@ pub fn points(query: VisibleQuery, buckets: &[Bucket]) -> Vec<ChartPoint> {
     points
 }
 
+/// Index ranges of contiguous slots that carry real samples, i.e. the
+/// complement of the padded slots emitted by [`points`]. A renderer paints
+/// one path per run so an interval with no samples reads as a break instead
+/// of a flat carried-forward line.
+pub fn data_runs(points: &[ChartPoint]) -> Vec<std::ops::Range<usize>> {
+    let mut runs = Vec::new();
+    let mut start: Option<usize> = None;
+    for (index, point) in points.iter().enumerate() {
+        if point.has_data {
+            if start.is_none() {
+                start = Some(index);
+            }
+        } else if let Some(first) = start.take() {
+            runs.push(first..index);
+        }
+    }
+    if let Some(first) = start {
+        runs.push(first..points.len());
+    }
+    runs
+}
+
 /// If the requested window begins before the first stored sample, start the
 /// visible time window at that sample instead of filling the leading slots
 /// with the first future value. The alternative (a flat line drawn backwards
@@ -401,6 +423,19 @@ mod tests {
             bucket: 10,
         };
         assert!(points(query, &[]).is_empty());
+    }
+
+    #[test]
+    fn data_runs_split_at_padded_slots() {
+        let query = VisibleQuery {
+            from: 0,
+            to: 40,
+            bucket: 10,
+        };
+        let points = points(query, &[bucket(10, 10.0, 20.0), bucket(30, 30.0, 40.0)]);
+        assert_eq!(data_runs(&points), vec![1..2, 3..4]);
+        assert!(data_runs(&[]).is_empty());
+        assert!(data_runs(&points[..1]).is_empty());
     }
 
     #[test]

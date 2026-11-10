@@ -13,6 +13,32 @@ fn legend_entry(color: Hsla, name: String, value: String, fg: Hsla) -> impl Into
         .child(div().text_xs().text_color(fg.opacity(0.9)).child(value))
 }
 
+/// A cubic path following the chart library's natural (Catmull-Rom to
+/// Bezier) interpolation for one contiguous series run. The points are
+/// already in local canvas pixels.
+fn natural_path(points: &[(f32, f32)]) -> Option<Path<Pixels>> {
+    let (first, _) = points.split_first()?;
+    let mut path = PathBuilder::stroke(px(1.));
+    path.move_to(point(px(first.0), px(first.1)));
+    let last = points.len() - 1;
+    for i in 0..last {
+        let p0 = if i == 0 { points[0] } else { points[i - 1] };
+        let p1 = points[i];
+        let p2 = points[i + 1];
+        let p3 = points[(i + 2).min(last)];
+        let c1 = point(
+            px(p1.0 + (p2.0 - p0.0) / 6.0),
+            px(p1.1 + (p2.1 - p0.1) / 6.0),
+        );
+        let c2 = point(
+            px(p2.0 - (p3.0 - p1.0) / 6.0),
+            px(p2.1 - (p3.1 - p1.1) / 6.0),
+        );
+        path.cubic_bezier_to(point(px(p2.0), px(p2.1)), c1, c2);
+    }
+    path.build().ok()
+}
+
 impl Render for HistoryView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let lang = self.lang;
@@ -55,36 +81,32 @@ impl Render for HistoryView {
         } else {
             None
         };
-        // Contiguous runs of padded slots. The chart still draws a continuous
-        // line (the library has no per-point break), so a translucent band
-        // behind the plot keeps the "app was not running" intervals honest.
-        let gap_spans: Vec<(f32, f32)> = {
-            let len = points.len();
-            if len < 2 {
-                Vec::new()
-            } else {
-                let mut spans = Vec::new();
-                let mut start: Option<usize> = None;
-                for (index, point) in points.iter().enumerate() {
-                    if !point.has_data {
-                        if start.is_none() {
-                            start = Some(index);
-                        }
-                    } else if let Some(first) = start.take() {
-                        spans.push((first, index - 1));
-                    }
-                }
-                if let Some(first) = start {
-                    spans.push((first, len - 1));
-                }
-                let last = (len - 1) as f32;
-                spans
-                    .into_iter()
-                    .map(|(first, end)| (first as f32 / last, end as f32 / last))
+        // Contiguous runs of real samples. The chart library draws one path
+        // across every datum and has no per-point break, so the series are
+        // painted per run by the overlay below: a padded (no-data) slot ends
+        // the previous run and starts a new one, leaving the gap blank
+        // instead of drawing a flat carried-forward line or a background
+        // band.
+        let series_segments: Vec<Vec<(f32, f32, f32)>> = if points.len() < 2 {
+            Vec::new()
+        } else {
+            let last = (points.len() - 1) as f32;
+            data_runs(&points)
+                .into_iter()
+                .map(|run| {
+                    run.map(|index| {
+                        let point = &points[index];
+                        let x = index as f32 / last;
+                        let cpu = ((point.cpu - Y_AXIS_MIN) / (Y_AXIS_MAX - Y_AXIS_MIN))
+                            .clamp(0.0, 1.0) as f32;
+                        let mem = ((point.mem - Y_AXIS_MIN) / (Y_AXIS_MAX - Y_AXIS_MIN))
+                            .clamp(0.0, 1.0) as f32;
+                        (x, 1.0 - cpu, 1.0 - mem)
+                    })
                     .collect()
-            }
+                })
+                .collect()
         };
-        let gap_color = cx.theme().foreground.opacity(0.05);
         // The chart itself paints no x labels (`x_tick_count(0)` below); this
         // panel draws them at a readable size instead. Labels are generated
         // from the time window (six evenly spaced positions), not from data
@@ -216,8 +238,8 @@ impl Render for HistoryView {
         // labels reproduce the library's plot geometry (the 32 px value-axis
         // gutter and the 18 px strip under the x axis) without re-deriving
         // the layout. The canvas paints before the chart, keeping a hover
-        // tooltip above the labels. The same canvas shades padded (no-data)
-        // stretches behind the curve.
+        // tooltip above the labels. Series are painted by `series_overlay`
+        // after the chart, so they sit above its grid; gaps stay blank.
         let y_labels: Vec<String> = (0..Y_TICK_COUNT)
             .map(|k| {
                 let value =
@@ -232,19 +254,6 @@ impl Render for HistoryView {
                 let plot_left = X_AXIS_GUTTER;
                 let plot_h = (f32::from(bounds.size.height) - X_AXIS_STRIP_H).max(0.0);
                 let plot_w = (f32::from(bounds.size.width) - plot_left).max(0.0);
-                for (first, end) in &gap_spans {
-                    let left = plot_left + plot_w * *first;
-                    let right = plot_left + plot_w * *end;
-                    if right - left >= 1.0 {
-                        window.paint_quad(fill(
-                            Bounds::new(
-                                point(px(left), px(0.)),
-                                size(px(right - left), px(plot_h)),
-                            ),
-                            gap_color,
-                        ));
-                    }
-                }
                 let mut texts = Vec::with_capacity(axis_labels.len() + y_labels.len());
                 for (i, (frac, text)) in axis_labels.iter().enumerate() {
                     let first = i == 0;
@@ -286,38 +295,91 @@ impl Render for HistoryView {
         )
         .absolute()
         .size_full();
-        let mut merged_chart = div().flex_1().relative().child(axis_overlay).child(
-            AreaChart::new(points)
-                // The x value is only used for axis/tooltip text; the
-                // library's ScalePoint projects by index. `points()`
-                // makes that index correspond to a bucket slot.
-                .x(|p: &ChartPoint| p.ts.to_string())
-                .y(|p: &ChartPoint| p.cpu)
-                .stroke(cpu_color())
-                .fill(transparent_color())
-                .name(t(lang, "chart.cpu").to_string())
-                .y(|p: &ChartPoint| p.mem)
-                .stroke(mem_color())
-                .fill(transparent_color())
-                .name(t(lang, "chart.mem").to_string())
-                .y_domain(Y_AXIS_MIN, Y_AXIS_MAX)
-                .y_padding(0.0, 0.0)
-                .x_axis(true)
-                .x_tick_count(0)
-                .y_axis(true)
-                .y_tick_format(|_| "")
-                .y_tick_count(Y_TICK_COUNT)
-                .grid(true)
-                .appear(false)
-                .tooltip_title(|p: &ChartPoint| format_ts_full(p.ts).into())
-                .tooltip_value(|p: &ChartPoint, _series: usize, v: f64| {
-                    if p.has_data {
-                        format!("{v:.1}%").into()
-                    } else {
-                        "--".into()
+        // Segmented series overlay: one cubic path per contiguous run. It is
+        // painted after the chart so the lines sit above the grid; the
+        // deferred tooltip box still paints above this overlay. The chart's
+        // own series are disabled by the degenerate `y_domain` below (the
+        // library cannot break a path at padded slots), while its axes,
+        // hover crosshair and tooltip text keep working.
+        let series_overlay = canvas(
+            move |bounds, _window, _cx| {
+                let plot_left = X_AXIS_GUTTER;
+                let plot_h = (f32::from(bounds.size.height) - X_AXIS_STRIP_H).max(0.0);
+                let plot_w = (f32::from(bounds.size.width) - plot_left).max(0.0);
+                let build = |series: usize| {
+                    let mut paths = Vec::new();
+                    for segment in &series_segments {
+                        if segment.len() < 2 {
+                            continue;
+                        }
+                        let points: Vec<(f32, f32)> = segment
+                            .iter()
+                            .map(|(x, cpu, mem)| {
+                                let y = if series == 0 { *cpu } else { *mem };
+                                (plot_left + plot_w * x, plot_h * y)
+                            })
+                            .collect();
+                        if let Some(path) = natural_path(&points) {
+                            paths.push(path);
+                        }
                     }
-                }),
-        );
+                    paths
+                };
+                (build(0), build(1))
+            },
+            move |_bounds, (cpu_paths, mem_paths), window, _cx| {
+                for path in cpu_paths {
+                    window.paint_path(path, cpu_color());
+                }
+                for path in mem_paths {
+                    window.paint_path(path, mem_color());
+                }
+            },
+        )
+        .absolute()
+        .size_full();
+        let mut merged_chart = div()
+            .flex_1()
+            .relative()
+            .child(axis_overlay)
+            .child(
+                AreaChart::new(points)
+                    // The x value is only used for axis/tooltip text; the
+                    // library's ScalePoint projects by index. `points()`
+                    // makes that index correspond to a bucket slot.
+                    .x(|p: &ChartPoint| p.ts.to_string())
+                    .y(|p: &ChartPoint| p.cpu)
+                    .stroke(cpu_color())
+                    .fill(transparent_color())
+                    .name(t(lang, "chart.cpu").to_string())
+                    .y(|p: &ChartPoint| p.mem)
+                    .stroke(mem_color())
+                    .fill(transparent_color())
+                    .name(t(lang, "chart.mem").to_string())
+                    // A degenerate domain disables the library's own series
+                    // (the library draws one unbroken path and cannot skip a
+                    // padded slot). The chart is kept for its axes, hover
+                    // crosshair and tooltip; the visible lines are painted per
+                    // contiguous run by `series_overlay` below.
+                    .y_domain(0.0, 0.0)
+                    .y_padding(0.0, 0.0)
+                    .x_axis(true)
+                    .x_tick_count(0)
+                    .y_axis(true)
+                    .y_tick_format(|_| "")
+                    .y_tick_count(Y_TICK_COUNT)
+                    .grid(true)
+                    .appear(false)
+                    .tooltip_title(|p: &ChartPoint| format_ts_full(p.ts).into())
+                    .tooltip_value(|p: &ChartPoint, _series: usize, v: f64| {
+                        if p.has_data {
+                            format!("{v:.1}%").into()
+                        } else {
+                            "--".into()
+                        }
+                    }),
+            )
+            .child(series_overlay);
         let status_color = cx.theme().foreground.opacity(0.6);
         if let Some((title, hint)) = status {
             let mut message = v_flex()
