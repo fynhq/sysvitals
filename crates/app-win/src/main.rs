@@ -42,7 +42,7 @@
 //! drawn at 2x supersampled resolution and box-filtered down for smooth edges
 //! without ClearType (which corrupts per-pixel-alpha compositing).
 
-#![cfg_attr(windows, windows_subsystem = "windows")]
+#![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
 
 #[cfg(windows)]
 mod win;

@@ -237,6 +237,29 @@ thread_local! {
     static FIRST_FRAME_LOGGED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+/// A Cocoa screen rectangle in points (bottom-left origin). Kept as plain
+/// numbers so the coordinate conversion runs in unit tests without AppKit.
+#[derive(Clone, Copy)]
+struct CocoaRect {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+}
+
+/// Convert a Cocoa screen rectangle into the hosting screen's local
+/// top-left space. Pure math; the AppKit calls stay in `anchor_rect`.
+fn local_anchor_rect(rect: CocoaRect, screen: CocoaRect) -> (i64, i64, i64, i64) {
+    let left = rect.x - screen.x;
+    let top = screen.height - (rect.y - screen.y) - rect.height;
+    (
+        left.round() as i64,
+        top.round() as i64,
+        (left + rect.width).round() as i64,
+        (top + rect.height).round() as i64,
+    )
+}
+
 /// Screen rectangle (left, top, right, bottom) in the hosting display's
 /// **local** GPUI logical space, plus that display's native ID. GPUI's macOS
 /// backend reports `Display::bounds()` relative to each screen's own origin
@@ -253,13 +276,20 @@ fn anchor_rect() -> Option<(i64, i64, i64, i64, u64)> {
         let rect = window.convertRectToScreen(button.convertRect_toView(button.bounds(), None));
         let screen = window.screen().or_else(|| NSScreen::mainScreen(mtm))?;
         let screen_frame = screen.frame();
-        // Cocoa origin is bottom-left with y growing upward. Convert into
-        // the hosting screen's local top-left space.
-        let left = rect.origin.x - screen_frame.origin.x;
-        let top =
-            screen_frame.size.height - (rect.origin.y - screen_frame.origin.y) - rect.size.height;
-        let right = left + rect.size.width;
-        let bottom = top + rect.size.height;
+        let (left, top, right, bottom) = local_anchor_rect(
+            CocoaRect {
+                x: rect.origin.x,
+                y: rect.origin.y,
+                width: rect.size.width,
+                height: rect.size.height,
+            },
+            CocoaRect {
+                x: screen_frame.origin.x,
+                y: screen_frame.origin.y,
+                width: screen_frame.size.width,
+                height: screen_frame.size.height,
+            },
+        );
         let display_id = unsafe {
             screen
                 .deviceDescription()
@@ -269,13 +299,7 @@ fn anchor_rect() -> Option<(i64, i64, i64, i64, u64)> {
                     raw
                 })
         };
-        Some((
-            left.round() as i64,
-            top.round() as i64,
-            right.round() as i64,
-            bottom.round() as i64,
-            u64::from(display_id),
-        ))
+        Some((left, top, right, bottom, u64::from(display_id)))
     })
 }
 
@@ -535,4 +559,50 @@ pub(crate) fn run() {
     // loop ended without a quit, which is otherwise invisible.
     app.run();
     log_event("WARN", "run loop returned unexpectedly");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{local_anchor_rect, CocoaRect};
+
+    fn rect(x: f64, y: f64, width: f64, height: f64) -> CocoaRect {
+        CocoaRect {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    #[test]
+    fn anchor_is_local_to_the_hosting_screen() {
+        let screen = rect(0.0, 0.0, 2880.0, 1800.0);
+        let button = rect(2760.0, 1750.0, 120.0, 24.0);
+
+        assert_eq!(local_anchor_rect(button, screen), (2760, 26, 2880, 50));
+    }
+
+    #[test]
+    fn anchor_subtracts_a_secondary_screen_origin() {
+        let screen = rect(1920.0, 1080.0, 1920.0, 1080.0);
+        let button = rect(3700.0, 2120.0, 140.0, 25.0);
+
+        assert_eq!(local_anchor_rect(button, screen), (1780, 15, 1920, 40));
+    }
+
+    #[test]
+    fn anchor_handles_a_screen_left_of_the_primary() {
+        let screen = rect(-1920.0, 0.0, 1920.0, 1080.0);
+        let button = rect(-1860.0, 1040.0, 140.0, 25.0);
+
+        assert_eq!(local_anchor_rect(button, screen), (60, 15, 200, 40));
+    }
+
+    #[test]
+    fn anchor_rounds_fractional_points() {
+        let screen = rect(0.0, 0.0, 100.0, 50.0);
+        let button = rect(10.4, 20.4, 20.2, 10.2);
+
+        assert_eq!(local_anchor_rect(button, screen), (10, 19, 31, 30));
+    }
 }

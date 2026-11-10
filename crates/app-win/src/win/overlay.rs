@@ -768,6 +768,86 @@ pub(crate) unsafe fn apply_position(hwnd: HWND) {
     apply_position_with_info(hwnd, info);
 }
 
+/// Geometry inputs for one placement pass. Kept as plain numbers so the
+/// taskbar/monitor math is unit-tested without Win32 calls.
+struct PlacementInput {
+    bar: RECT,
+    monitor: RECT,
+    vertical: bool,
+    left_edge: bool,
+    left_anchored: bool,
+    tray_left: i32,
+    left_margin_px: u32,
+    width: i32,
+    height: i32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Placement {
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    on_screen: bool,
+}
+
+/// Position an overlay inside its taskbar/monitor. The caller drops
+/// overlays that have not been measured yet.
+fn placement(input: PlacementInput) -> Placement {
+    let (x, y) = if input.vertical {
+        // Vertical taskbar: horizontally centered within the bar thickness.
+        // When the stacked column is wider than the bar's thickness,
+        // centering would push the window past the screen edge it is
+        // docked to and clip it. Clamp so the overflow goes into the
+        // desktop instead: keep the left edge on-screen for a left-docked
+        // bar, the right edge on-screen for a right-docked bar.
+        let center_x = input.bar.left + (input.bar.right - input.bar.left - input.width) / 2;
+        let x = if input.left_edge {
+            center_x.max(input.monitor.left)
+        } else {
+            center_x
+                .min(input.monitor.right - input.width)
+                .max(input.monitor.left)
+        };
+        // On a vertical bar `left_margin_px` measures from the bar's TOP
+        // edge. The far-left anchor concept does not exist here, so the
+        // value is honored unconditionally.
+        let y = input.bar.top + input.left_margin_px as i32;
+        (x, y)
+    } else {
+        // Horizontal taskbar (bottom or top).
+        let x = if input.left_anchored {
+            input.bar.left + input.left_margin_px as i32
+        } else {
+            // Anchor to this bar's own notification area (or its
+            // show-desktop button when the bar has no tray icons).
+            input.tray_left - input.width
+        };
+        let y = input.bar.top + (input.bar.bottom - input.bar.top - input.height) / 2;
+        (x, y)
+    };
+
+    let on_screen = if input.vertical {
+        y >= input.bar.top && y + input.height <= input.bar.bottom
+    } else {
+        // Negative virtual coordinates are legitimate on a monitor placed
+        // left of/above the primary one; clamp to that monitor instead of
+        // treating every negative number as off-screen.
+        x >= input.monitor.left
+            && y >= input.monitor.top
+            && x + input.width <= input.monitor.right
+            && y + input.height <= input.monitor.bottom
+    };
+
+    Placement {
+        x,
+        y,
+        width: input.width,
+        height: input.height,
+        on_screen,
+    }
+}
+
 pub(crate) unsafe fn apply_position_with_info(hwnd: HWND, info: TaskbarInfo) {
     // Taskbar is on screen: keep the indicator in the topmost band (it can
     // be re-banded below shell flyouts between ticks; see maintain_topmost).
@@ -783,55 +863,30 @@ pub(crate) unsafe fn apply_position_with_info(hwnd: HWND, info: TaskbarInfo) {
         return; // not measured yet
     }
 
-    let (x, y) = if info.vertical {
-        // Vertical taskbar: horizontally centered within the bar thickness.
-        // When the stacked column is wider than the bar's thickness,
-        // centering would push the window past the screen edge it is
-        // docked to and clip it. Clamp so the overflow goes into the
-        // desktop instead: keep the left edge on-screen for a left-docked
-        // bar, the right edge on-screen for a right-docked bar.
-        let center_x = bar.left + (bar.right - bar.left - w) / 2;
-        let monitor = taskbar_monitor_rect_for(ov.taskbar);
-        let x = if info.left_edge {
-            center_x.max(monitor.left)
-        } else {
-            center_x.min(monitor.right - w).max(monitor.left)
-        };
-        // On a vertical bar `left_margin_px` measures from the bar's TOP
-        // edge. The far-left anchor concept does not exist here, so the
-        // value is honored unconditionally.
-        let y = bar.top + cfg.windows.left_margin_px as i32;
-        (x, y)
+    let left_anchored = !info.vertical
+        && cfg.windows.anchor == sysvitals_core::Anchor::Left
+        && win11_centered_taskbar();
+    let tray_left = if info.vertical || left_anchored {
+        0
     } else {
-        // Horizontal taskbar (bottom or top).
-        let left_anchor =
-            cfg.windows.anchor == sysvitals_core::Anchor::Left && win11_centered_taskbar();
-        let x = if left_anchor {
-            bar.left + cfg.windows.left_margin_px as i32
-        } else {
-            // Anchor to this bar's own notification area (or its
-            // show-desktop button when the bar has no tray icons).
-            taskbar_anchor_left(ov.taskbar) - w
-        };
-        let y = bar.top + (bar.bottom - bar.top - h) / 2;
-        (x, y)
+        taskbar_anchor_left(ov.taskbar)
     };
-
-    if info.vertical {
-        if y < bar.top || y + h > bar.bottom {
-            warn_placement_skipped(x, y, w, h);
-            return;
-        }
-    } else {
-        // Negative virtual coordinates are legitimate on a monitor placed
-        // left of/above the primary one; clamp to that monitor instead of
-        // treating every negative number as off-screen.
-        let monitor = taskbar_monitor_rect_for(ov.taskbar);
-        if x < monitor.left || y < monitor.top || x + w > monitor.right || y + h > monitor.bottom {
-            warn_placement_skipped(x, y, w, h);
-            return; // would leave the monitor; keep last position
-        }
+    let placed = placement(PlacementInput {
+        bar,
+        monitor: taskbar_monitor_rect_for(ov.taskbar),
+        vertical: info.vertical,
+        left_edge: info.left_edge,
+        left_anchored,
+        tray_left,
+        left_margin_px: cfg.windows.left_margin_px,
+        width: w,
+        height: h,
+    });
+    if !placed.on_screen {
+        warn_placement_skipped(placed.x, placed.y, placed.width, placed.height);
+        return; // would leave the taskbar/monitor; keep last position
     }
+    let (x, y) = (placed.x, placed.y);
     let rect = (x, y, w, h);
     let already_placed = OVERLAYS.with(|slot| {
         slot.borrow()
@@ -1014,5 +1069,113 @@ pub(crate) fn reposition_all() {
     let hwnds: Vec<HWND> = OVERLAYS.with(|slot| slot.borrow().iter().map(|o| o.hwnd).collect());
     for hwnd in hwnds {
         unsafe { reposition_overlay(hwnd) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rect(left: i32, top: i32, right: i32, bottom: i32) -> RECT {
+        RECT {
+            left,
+            top,
+            right,
+            bottom,
+        }
+    }
+
+    fn input(bar: RECT, monitor: RECT, width: i32, height: i32) -> PlacementInput {
+        PlacementInput {
+            bar,
+            monitor,
+            vertical: false,
+            left_edge: false,
+            left_anchored: false,
+            tray_left: 0,
+            left_margin_px: 8,
+            width,
+            height,
+        }
+    }
+
+    fn placed(x: i32, y: i32, width: i32, height: i32, on_screen: bool) -> Placement {
+        Placement {
+            x,
+            y,
+            width,
+            height,
+            on_screen,
+        }
+    }
+
+    #[test]
+    fn horizontal_bar_anchors_left_of_the_tray() {
+        let mut sample = input(rect(0, 1032, 1920, 1080), rect(0, 0, 1920, 1080), 120, 40);
+        sample.tray_left = 1800;
+
+        assert_eq!(placement(sample), placed(1680, 1036, 120, 40, true));
+    }
+
+    #[test]
+    fn horizontal_bar_centers_on_a_top_taskbar() {
+        let mut sample = input(rect(0, 0, 1920, 48), rect(0, 0, 1920, 1080), 120, 40);
+        sample.tray_left = 1800;
+
+        assert_eq!(placement(sample), placed(1680, 4, 120, 40, true));
+    }
+
+    #[test]
+    fn horizontal_left_anchor_uses_the_config_margin() {
+        let mut sample = input(rect(0, 1032, 1920, 1080), rect(0, 0, 1920, 1080), 120, 40);
+        sample.left_anchored = true;
+        sample.tray_left = 1800;
+
+        assert_eq!(placement(sample), placed(8, 1036, 120, 40, true));
+    }
+
+    #[test]
+    fn horizontal_placement_that_leaves_the_monitor_is_rejected() {
+        let mut sample = input(rect(0, 1032, 1920, 1080), rect(0, 0, 1920, 1080), 120, 40);
+        sample.tray_left = 100;
+
+        assert_eq!(placement(sample), placed(-20, 1036, 120, 40, false));
+    }
+
+    #[test]
+    fn negative_virtual_coordinates_stay_on_a_left_monitor() {
+        let mut sample = input(rect(-1920, 1032, 0, 1080), rect(-1920, 0, 0, 1080), 120, 40);
+        sample.tray_left = -100;
+
+        assert_eq!(placement(sample), placed(-220, 1036, 120, 40, true));
+    }
+
+    #[test]
+    fn vertical_left_bar_keeps_the_left_edge_on_screen() {
+        let mut sample = input(rect(0, 0, 48, 1080), rect(0, 0, 1920, 1080), 100, 40);
+        sample.vertical = true;
+        sample.left_edge = true;
+        sample.left_margin_px = 20;
+
+        assert_eq!(placement(sample), placed(0, 20, 100, 40, true));
+    }
+
+    #[test]
+    fn vertical_right_bar_keeps_the_right_edge_on_screen() {
+        let mut sample = input(rect(1872, 0, 1920, 1080), rect(0, 0, 1920, 1080), 100, 40);
+        sample.vertical = true;
+        sample.left_margin_px = 20;
+
+        assert_eq!(placement(sample), placed(1820, 20, 100, 40, true));
+    }
+
+    #[test]
+    fn vertical_placement_below_the_bar_is_rejected() {
+        let mut sample = input(rect(0, 100, 48, 500), rect(0, 0, 1920, 1080), 100, 40);
+        sample.vertical = true;
+        sample.left_edge = true;
+        sample.left_margin_px = 500;
+
+        assert_eq!(placement(sample), placed(0, 600, 100, 40, false));
     }
 }

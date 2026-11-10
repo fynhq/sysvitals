@@ -555,3 +555,42 @@ pub(crate) fn disable_button_highlight(button: &NSStatusBarButton) {
     cell.setHighlightsBy(NSCellStyleMask::NoCellMask);
     cell.setShowsStateBy(NSCellStyleMask::NoCellMask);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::split_cell;
+
+    #[test]
+    fn split_cell_keeps_the_configured_prefix_separate() {
+        assert_eq!(
+            split_cell("CPU 42%", "CPU"),
+            ("CPU".to_owned(), "42%".to_owned())
+        );
+    }
+
+    #[test]
+    fn split_cell_trims_spacing_around_the_value() {
+        assert_eq!(
+            split_cell("CPU   42%  ", "CPU"),
+            ("CPU".to_owned(), "42%".to_owned())
+        );
+    }
+
+    #[test]
+    fn split_cell_without_a_prefix_returns_the_whole_value() {
+        assert_eq!(split_cell("42%", ""), (String::new(), "42%".to_owned()));
+    }
+
+    #[test]
+    fn split_cell_with_only_the_prefix_has_an_empty_value() {
+        assert_eq!(split_cell("CPU", "CPU"), ("CPU".to_owned(), String::new()));
+    }
+
+    #[test]
+    fn split_cell_prefix_mismatch_keeps_the_text_whole() {
+        assert_eq!(
+            split_cell("NET 1.2 MB/s", "CPU"),
+            (String::new(), "NET 1.2 MB/s".to_owned())
+        );
+    }
+}
