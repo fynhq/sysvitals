@@ -41,6 +41,21 @@ jobs:
             echo "tag $GITHUB_REF_NAME does not match workspace version v$version" >&2
             exit 1
           fi
+      - name: Verify tag is annotated and on main
+        if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$(git cat-file -t "refs/tags/$GITHUB_REF_NAME")" != "tag" ]; then
+            echo "release tag $GITHUB_REF_NAME must be annotated" >&2
+            exit 1
+          fi
+          git fetch --no-tags origin main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main; then
+            echo "release tag $GITHUB_REF_NAME is not on main" >&2
+            exit 1
+          fi
+          echo "release tag verified: annotated, on main"
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           toolchain: stable
@@ -93,7 +108,44 @@ jobs:
           # never compiles; clippy's own lints are denied by the trailing
           # `-D warnings`.
           RUSTFLAGS: "-D warnings"
-        run: cargo clippy --locked --all-targets ${{ matrix.packages }} -- -D warnings
+        # The JSON stream feeds the failure step below, which turns platform
+        # diagnostics into check-run annotations; tee still prints the log.
+        run: |
+          set -o pipefail
+          cargo clippy --locked --all-targets ${{ matrix.packages }} \
+            --message-format=json -- -D warnings 2>&1 | tee clippy.json
+      - name: Report clippy diagnostics
+        if: failure()
+        shell: bash
+        # Earlier steps can fail before clippy runs, so the log may not exist.
+        run: |
+          test -f clippy.json || exit 0
+          python3 - <<'PY'
+          import json
+          import re
+
+          ansi = re.compile(r"\x1b\[[0-9;]*m")
+          for raw in open("clippy.json", encoding="utf-8"):
+              try:
+                  entry = json.loads(ansi.sub("", raw))
+              except json.JSONDecodeError:
+                  continue
+              if entry.get("reason") != "compiler-message":
+                  continue
+              message = entry.get("message") or {}
+              if message.get("level") not in {"error", "warning"}:
+                  continue
+              spans = message.get("spans") or []
+              span = spans[0] if spans else {}
+              file = span.get("file_name")
+              line = span.get("line_start")
+              col = span.get("column_start")
+              text = message.get("message", "")
+              if file and line:
+                  print(f"::error file={file},line={line},col={col}::{text}")
+              else:
+                  print(f"::error::{text}")
+          PY
 
   # ---------------------------------------------------------------------------
   # Public-surface guard: reject private-document references, local environment
