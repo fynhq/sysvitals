@@ -474,8 +474,14 @@ impl Render for SettingsView {
             Collapsible::new()
                 .motion_id("margin-row")
                 .open(show_margin)
+                .w_full()
                 .content(
+                    // The reveal measures its content as a root, which sizes a
+                    // flex column to its content. Width is explicit so the row
+                    // keeps the card's full width and its control stays at the
+                    // right edge like the other rows.
                     v_flex()
+                        .w_full()
                         .child(card_divider(dark, scale_factor))
                         .child(margin_row),
                 ),
