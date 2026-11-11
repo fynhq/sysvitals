@@ -89,6 +89,50 @@ pub(crate) struct HistoryView {
     /// Shared command/status block in resident mode; `None` for the one-shot
     /// launch used on macOS and for the fallback path.
     pub(crate) shared: Option<Arc<HistoryShared>>,
+    /// A draw-in is owed to the next visible frame with data. Set on open and
+    /// on every range click; a pre-warmed hidden window must not consume it
+    /// before it is actually shown.
+    pub(crate) pending_draw: bool,
+    /// Series motion currently playing, consumed by the render pass. Only one
+    /// of the draw-in and live-refresh channels runs at a time.
+    pub(crate) series_fx: Option<SeriesFx>,
+    /// Generation woven into the animation state id. A fresh value makes the
+    /// next sequence start from zero instead of inheriting a finished one.
+    pub(crate) series_gen: u64,
+    /// Data from the last settled load. A live refresh animates from this
+    /// curve; range switches and empty windows clear it.
+    pub(crate) last_series: Option<SeriesSnapshot>,
+}
+
+/// One settled chart window: the start it was queried for and the y values of
+/// every dense slot in order. Only the values are kept; the timestamps are
+/// implied by the query start and bucket width.
+#[derive(Clone)]
+pub(crate) struct SeriesSnapshot {
+    pub(crate) from: i64,
+    pub(crate) ys: Arc<Vec<(f64, f64)>>,
+}
+
+/// Series motion currently playing.
+#[derive(Clone)]
+pub(crate) enum SeriesFx {
+    /// Reveal both lines from the left edge of the plot.
+    Draw,
+    /// Expand the index axis from the previous slot count to the current one
+    /// and ease changed values from the previous snapshot.
+    Refresh {
+        prev_len: usize,
+        prev_y: Arc<Vec<(f64, f64)>>,
+    },
+}
+
+impl SeriesFx {
+    pub(crate) fn duration(&self) -> Duration {
+        match self {
+            Self::Draw => SERIES_DRAW,
+            Self::Refresh { .. } => SERIES_REFRESH,
+        }
+    }
 }
 
 /// Open the history database for a query without running the writer's
@@ -132,11 +176,114 @@ impl HistoryView {
             last_accent: None,
             first_load,
             shared,
+            pending_draw: true,
+            series_fx: None,
+            series_gen: 0,
+            last_series: None,
         };
         view.start_refresh_loop(cx);
         view.start_shortcut_observer(cx);
         view.start_accent_watch(cx);
         view
+    }
+
+    /// Draw both series in on the next visible frame with data. The initial
+    /// open starts with the flag already armed; every range click re-arms it
+    /// so a manual switch reads as a fresh chart rather than a silent swap.
+    pub(crate) fn begin_series_draw(&mut self) {
+        self.pending_draw = true;
+        self.series_fx = None;
+        self.last_series = None;
+    }
+
+    /// Start the pending draw once its three gates are open: data loaded, the
+    /// pre-warmed resident window has been activated (so the draw is not
+    /// played while hidden), and at least one line segment exists. Reduced
+    /// motion drops the effect instead of playing it.
+    pub(crate) fn start_pending_draw(&mut self, reduce_motion: bool) {
+        if !self.pending_draw {
+            return;
+        }
+        if reduce_motion {
+            self.pending_draw = false;
+            return;
+        }
+        if self.data_loading || self.query.is_none() || self.buckets.is_empty() {
+            return;
+        }
+        // A resident pre-warm window is hidden until its first activation.
+        // The activation edge is the only reliable signal that the user can
+        // see the sweep; without it the draw would play offscreen. The rare
+        // show-without-activation fallback keeps a static chart instead.
+        if self.hidden_start && !self.ever_active {
+            return;
+        }
+        if self.points().len() < 2 {
+            return;
+        }
+        self.pending_draw = false;
+        self.series_fx = Some(SeriesFx::Draw);
+        self.series_gen = self.series_gen.wrapping_add(1);
+    }
+
+    /// Record the window that just loaded and decide what moves next.
+    ///
+    /// A pending draw owns the next visible frame. A draw that is already
+    /// playing is not restarted or cancelled by data that lands meanwhile.
+    /// A live append or value update starts a refresh from the previous
+    /// curve; every other case (range switch, empty data, a window-start
+    /// jump) settles statically and becomes the baseline for the next load.
+    pub(crate) fn note_series_data(&mut self) {
+        let Some(query) = self.query else {
+            self.last_series = None;
+            self.series_fx = None;
+            return;
+        };
+        if self.buckets.is_empty() {
+            self.last_series = None;
+            self.series_fx = None;
+            return;
+        }
+        let points = self.points();
+        let ys: Vec<(f64, f64)> = points.iter().map(|point| (point.cpu, point.mem)).collect();
+        let current = SeriesSnapshot {
+            from: query.from,
+            ys: Arc::new(ys),
+        };
+        if self.pending_draw {
+            self.last_series = Some(current);
+            return;
+        }
+        if matches!(self.series_fx.as_ref(), Some(SeriesFx::Draw)) {
+            self.last_series = Some(current);
+            return;
+        }
+        let next_len = points.len();
+        let prev = self.last_series.replace(current);
+        let Some(prev) = prev else {
+            return;
+        };
+        if !self.range.auto_refresh() {
+            self.series_fx = None;
+            return;
+        }
+        let prev_len = prev.ys.len();
+        // Values are compared exactly: an unchanged bucket produces the same
+        // aggregate from the same raw rows, so any difference is real.
+        let values_changed = next_len == prev_len
+            && points
+                .iter()
+                .zip(prev.ys.iter())
+                .any(|(point, values)| point.cpu != values.0 || point.mem != values.1);
+        if should_animate_live_refresh(prev.from, prev_len, query.from, next_len, values_changed) {
+            self.series_fx = Some(SeriesFx::Refresh {
+                prev_len,
+                prev_y: prev.ys,
+            });
+            self.series_gen = self.series_gen.wrapping_add(1);
+        } else {
+            self.series_fx = None;
+        }
     }
 
     /// Tell the resident indicator that this popup is gone. Called before
@@ -266,11 +413,14 @@ impl HistoryView {
         // accessory app's window with its own key-window lifecycle,
         // unverified at runtime, and the bug was only ever reproduced on
         // Windows.
-        let subscription = cx.observe_window_activation(window, |view, window, _cx| {
+        let subscription = cx.observe_window_activation(window, |view, window, cx| {
             if window.is_window_active() {
                 view.ever_active = true;
                 #[cfg(windows)]
                 view.restore_popup_size(window);
+                // A pending draw waits for this edge on a pre-warmed hidden
+                // window; make sure a frame runs to start it.
+                cx.notify();
             } else if view.ever_active {
                 // Clicked away: dismiss the popup like a native menu.
                 view.mark_hidden();

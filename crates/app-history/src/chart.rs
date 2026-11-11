@@ -11,13 +11,25 @@ use gpui_kit::{hsla, Hsla};
 
 pub(crate) use sysvitals_core::chart::{
     axis_labels, build_csv, data_runs, fmt_date_time, format_ts_full, local_offset_at, points,
-    query_buckets, trim_leading_gap, ChartPoint, TimeRange, VisibleQuery,
+    query_buckets, should_animate_live_refresh, trim_leading_gap, ChartPoint, TimeRange,
+    VisibleQuery,
 };
 
 /// How often a visible history window reloads the stored samples. The
 /// indicator writes samples every sample interval, so redrawing every few
 /// seconds makes the chart follow the indicator in near real time.
 pub(crate) const REFRESH_INTERVAL: Duration = Duration::from_secs(3);
+
+/// How long both series take to draw in when the popup opens or the range
+/// changes. Deliberately much shorter than the chart library's fixed 1 s
+/// appear: the popup is readable at once and the sweep only confirms the load.
+/// The motion is painted by the app's own series overlay, not by AreaChart.
+pub(crate) const SERIES_DRAW: Duration = Duration::from_millis(360);
+
+/// How long a live refresh takes to expand the index axis and ease changed
+/// values. The window reloads every 3 s, so this settles well before the next
+/// one; an unchanged reload paints no animation.
+pub(crate) const SERIES_REFRESH: Duration = Duration::from_millis(280);
 
 /// Bucket width at or above which a query runs off the UI thread. The 1 d
 /// view (bucket 120 s) and 1 mo view (3600 s) scan the whole retention

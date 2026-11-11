@@ -179,6 +179,27 @@ pub fn data_runs(points: &[ChartPoint]) -> Vec<std::ops::Range<usize>> {
     runs
 }
 
+/// Whether a live history refresh should animate from the previous load to
+/// the next.
+///
+/// The popup animates by expanding the index axis in place, so the motion
+/// only reads as intended when the window start is unchanged: a start move
+/// re-slices the whole curve and is painted as-is. The window must still
+/// carry a line (two or more slots), must not shrink, and something visible
+/// must change — a new slot or an updated bucket value.
+pub fn should_animate_live_refresh(
+    prev_from: i64,
+    prev_len: usize,
+    next_from: i64,
+    next_len: usize,
+    values_changed: bool,
+) -> bool {
+    prev_len >= 2
+        && next_len >= prev_len
+        && prev_from == next_from
+        && (next_len > prev_len || values_changed)
+}
+
 /// If the requested window begins before the first stored sample, start the
 /// visible time window at that sample instead of filling the leading slots
 /// with the first future value. The alternative (a flat line drawn backwards
@@ -436,6 +457,19 @@ mod tests {
         assert_eq!(data_runs(&points), vec![1..2, 3..4]);
         assert!(data_runs(&[]).is_empty());
         assert!(data_runs(&points[..1]).is_empty());
+    }
+
+    #[test]
+    fn live_refresh_animation_requires_a_stable_growing_window() {
+        // A new slot or an updated value animates while the window start holds.
+        assert!(should_animate_live_refresh(0, 150, 0, 151, false));
+        assert!(should_animate_live_refresh(0, 150, 0, 150, true));
+        // Nothing visible changed, or the window was re-sliced: paint as-is.
+        assert!(!should_animate_live_refresh(0, 150, 0, 150, false));
+        assert!(!should_animate_live_refresh(0, 150, 60, 151, false));
+        assert!(!should_animate_live_refresh(0, 150, 0, 149, true));
+        // A single slot is not a line yet.
+        assert!(!should_animate_live_refresh(0, 1, 0, 2, true));
     }
 
     #[test]

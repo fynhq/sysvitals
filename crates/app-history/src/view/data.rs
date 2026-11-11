@@ -101,6 +101,9 @@ impl HistoryView {
           // under the new axis.
         self.buckets = Vec::new();
         self.data_loading = true;
+        // Drop any curve from the previous range before the background query
+        // starts; the pending draw (if any) re-arms once new data lands.
+        self.note_series_data();
         let seq = self.load_seq;
         let executor = cx.background_executor().clone();
         cx.spawn(async move |this, cx| {
@@ -124,6 +127,7 @@ impl HistoryView {
                     }
                     Err(e) => view.log_data_error(format!("history: query failed: {e}")),
                 }
+                view.note_series_data();
                 cx.notify();
             });
         })
@@ -157,6 +161,7 @@ impl HistoryView {
         }
         self.buckets = buckets;
         self.trim_leading_gap();
+        self.note_series_data();
     }
 
     /// Trim the visible window to the first stored sample. The math lives in

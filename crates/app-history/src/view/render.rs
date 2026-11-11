@@ -2,7 +2,16 @@
 
 use super::*;
 
+use gpui_kit::base::{Sequence, Transition};
 use sysvitals_core::format::format_percent;
+
+/// The curve both series motions use. A cubic ease-out moves most of the way
+/// early and still visibly settles, which keeps the 360 ms draw from reading
+/// as a flash and the 280 ms refresh from reading as a step.
+fn ease_out_cubic(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    1.0 - (1.0 - t).powi(3)
+}
 
 fn legend_entry(color: Hsla, name: String, value: String, fg: Hsla) -> impl IntoElement {
     h_flex()
@@ -81,6 +90,51 @@ impl Render for HistoryView {
         } else {
             None
         };
+        // Register the blur-close and appearance observers before the draw
+        // gate below: the activation pass seeds `ever_active`, which tells a
+        // pre-warmed window whether it is shown already. Both calls are
+        // idempotent and must run from render (not `new`) because there is no
+        // window before the first one; neither uses a paint-phase API, so the
+        // empty-dispatch-tree root-view trap that killed the original Esc
+        // handler does not apply.
+        self.observe_activation(window, cx);
+        self.observe_appearance(window, cx);
+
+        // One series motion at a time. The sequence owns the wall clock and
+        // reduced-motion handling; this pass only reads its eased progress.
+        // `fx_now` keeps the snapshot alive for this frame after the state is
+        // cleared on the last frame. Starting a draw here (rather than when
+        // the data loads) is what keeps a pre-warmed hidden window from
+        // playing the motion before it is actually shown.
+        let reduce_motion = cx.reduce_motion();
+        self.start_pending_draw(reduce_motion);
+        let fx_now = self.series_fx.clone();
+        let mut series_progress = 1.0_f32;
+        if let Some(fx) = &fx_now {
+            let sequence = Sequence::new(format!("series-fx-{}", self.series_gen), 0.0_f32)
+                .with_step(1.0, Transition::new(fx.duration()).ease(ease_out_cubic));
+            let sample = sequence.sample(window, cx);
+            let finished = sample.is_finished();
+            series_progress = sample.into_value();
+            if finished {
+                self.series_fx = None;
+            }
+        }
+
+        // A live refresh expands the index axis from the previous slot count
+        // to the current one while easing changed values from the previous
+        // snapshot. New slots start outside the right edge and slide in as
+        // the denominator grows, which is what makes the update read as a
+        // scroll instead of a step. A draw only constrains the paint mask;
+        // the geometry is already final. Both series share one progress.
+        let refresh = match &fx_now {
+            Some(SeriesFx::Refresh { prev_len, prev_y }) => {
+                Some((*prev_len, prev_y, series_progress))
+            }
+            _ => None,
+        };
+        let draw_progress =
+            matches!(fx_now.as_ref(), Some(SeriesFx::Draw)).then_some(series_progress);
         // Contiguous runs of real samples. The chart library draws one path
         // across every datum and has no per-point break, so the series are
         // painted per run by the overlay below: a padded (no-data) slot ends
@@ -90,17 +144,34 @@ impl Render for HistoryView {
         let series_segments: Vec<Vec<(f32, f32, f32)>> = if points.len() < 2 {
             Vec::new()
         } else {
-            let last = (points.len() - 1) as f32;
+            let virtual_len = match refresh {
+                Some((prev_len, _, progress)) => {
+                    let prev = prev_len as f32;
+                    let next = points.len() as f32;
+                    prev + (next - prev) * progress
+                }
+                None => points.len() as f32,
+            };
+            let denom = (virtual_len - 1.0).max(1.0);
             data_runs(&points)
                 .into_iter()
                 .map(|run| {
                     run.map(|index| {
                         let point = &points[index];
-                        let x = index as f32 / last;
-                        let cpu = ((point.cpu - Y_AXIS_MIN) / (Y_AXIS_MAX - Y_AXIS_MIN))
-                            .clamp(0.0, 1.0) as f32;
-                        let mem = ((point.mem - Y_AXIS_MIN) / (Y_AXIS_MAX - Y_AXIS_MIN))
-                            .clamp(0.0, 1.0) as f32;
+                        let (mut cpu, mut mem) = (point.cpu, point.mem);
+                        if let Some((prev_len, prev_y, progress)) = refresh {
+                            if index < prev_len {
+                                if let Some((prev_cpu, prev_mem)) = prev_y.get(index).copied() {
+                                    cpu = prev_cpu + (cpu - prev_cpu) * progress as f64;
+                                    mem = prev_mem + (mem - prev_mem) * progress as f64;
+                                }
+                            }
+                        }
+                        let x = index as f32 / denom;
+                        let cpu =
+                            ((cpu - Y_AXIS_MIN) / (Y_AXIS_MAX - Y_AXIS_MIN)).clamp(0.0, 1.0) as f32;
+                        let mem =
+                            ((mem - Y_AXIS_MIN) / (Y_AXIS_MAX - Y_AXIS_MIN)).clamp(0.0, 1.0) as f32;
                         (x, 1.0 - cpu, 1.0 - mem)
                     })
                     .collect()
@@ -116,14 +187,6 @@ impl Render for HistoryView {
         let copy_failed = self.copy_failed;
         let current_range = self.range;
 
-        // Register the blur-close observer and the live appearance observer
-        // exactly once. Both are registered here (not from `new`) because
-        // neither is available before the window exists; and neither uses a
-        // paint-phase API, so the empty-dispatch-tree root-view trap that
-        // killed the original Esc handler does not apply.
-        self.observe_activation(window, cx);
-        self.observe_appearance(window, cx);
-
         // Build range buttons individually to avoid borrow issues with cx.listener.
         let mut range_buttons = h_flex().gap_1();
         for r in TimeRange::ALL {
@@ -136,6 +199,7 @@ impl Render for HistoryView {
                 .label(label)
                 .on_click(cx.listener(move |this: &mut Self, _: &ClickEvent, _, cx| {
                     this.range = r;
+                    this.begin_series_draw();
                     this.load_data(cx);
                     cx.notify();
                 }));
@@ -303,6 +367,10 @@ impl Render for HistoryView {
         // own series are disabled by the degenerate `y_domain` below (the
         // library cannot break a path at padded slots), while its axes,
         // hover crosshair and tooltip text keep working.
+        //
+        // The paint is masked to the plot. The mask is what draws the lines
+        // in from the left, and it also clips the new slots a live refresh
+        // holds outside the right edge until the axis finish expanding.
         let series_overlay = canvas(
             move |bounds, _window, _cx| {
                 let plot_left = X_AXIS_GUTTER;
@@ -333,13 +401,32 @@ impl Render for HistoryView {
                 };
                 (build(0), build(1))
             },
-            move |_bounds, (cpu_paths, mem_paths), window, _cx| {
-                for path in cpu_paths {
-                    window.paint_path(path, cpu_color());
-                }
-                for path in mem_paths {
-                    window.paint_path(path, mem_color());
-                }
+            move |bounds, (cpu_paths, mem_paths), window, _cx| {
+                let pad = 1.0;
+                let plot_left = X_AXIS_GUTTER;
+                let plot_w = (f32::from(bounds.size.width) - plot_left).max(0.0);
+                let plot_h = (f32::from(bounds.size.height) - X_AXIS_STRIP_H).max(0.0);
+                let origin_x = f32::from(bounds.origin.x);
+                let origin_y = f32::from(bounds.origin.y);
+                let reveal = draw_progress.unwrap_or(1.0).clamp(0.0, 1.0);
+                let bleed = if reveal >= 1.0 { pad } else { 0.0 };
+                let mask = ContentMask {
+                    bounds: Bounds::from_corners(
+                        point(px(origin_x + plot_left - bleed), px(origin_y - pad)),
+                        point(
+                            px(origin_x + plot_left + plot_w * reveal + bleed),
+                            px(origin_y + plot_h + pad),
+                        ),
+                    ),
+                };
+                window.with_content_mask(Some(mask), |window| {
+                    for path in cpu_paths {
+                        window.paint_path(path, cpu_color());
+                    }
+                    for path in mem_paths {
+                        window.paint_path(path, mem_color());
+                    }
+                });
             },
         )
         .absolute()
