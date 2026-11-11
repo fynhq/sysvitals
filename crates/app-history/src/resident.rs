@@ -556,7 +556,9 @@ pub(crate) fn run_resident(cx: &mut App) {
                         // is relaunched instead of dropped.
                         shared.mark_idle_exit(snapshot.generation);
                         if gpu_attached {
-                            gpu_attached = set_gpu_windowed(cx, false).await;
+                            // The process is about to exit, so the returned
+                            // state would be dead on arrival.
+                            set_gpu_windowed(cx, false).await;
                         }
                         trim_working_set();
                         cx.update(|app| app.quit());
