@@ -447,8 +447,15 @@ jobs:
             Set-ItemProperty -Path $uninstallKey -Name DisplayVersion -Value $realVersion
           }
           Write-Host "[smoke] downgrade guard verified"
-          # Simulate the app's launch-at-login value; the uninstaller may remove
-          # it only when it points at this installation.
+          # Simulate the app's launch-at-login state: a Startup-folder shortcut
+          # plus a legacy Run value. The uninstaller may remove each only when
+          # it points at this installation.
+          $startupDir = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\Startup"
+          $startupLink = Join-Path $startupDir "SysVitals.lnk"
+          $wsh = New-Object -ComObject WScript.Shell
+          $link = $wsh.CreateShortcut($startupLink)
+          $link.TargetPath = Join-Path $installDir "SysVitals.exe"
+          $link.Save()
           $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
           if (!(Test-Path $runKey)) { New-Item -Path $runKey -Force | Out-Null }
           $runValue = '"' + (Join-Path $installDir "SysVitals.exe") + '"'
@@ -464,6 +471,9 @@ jobs:
             if (Test-Path (Join-Path $installDir $f)) {
               throw "uninstall left $f behind"
             }
+          }
+          if (Test-Path $startupLink) {
+            throw "uninstaller left the Startup shortcut behind"
           }
           if (Get-ItemProperty -Path $runKey -Name "SysVitals" -ErrorAction SilentlyContinue) {
             throw "uninstaller left the Run value behind"

@@ -49,6 +49,7 @@ use sysvitals_core::{
 // lives in `sysvitals-support` so the overlay and the GPUI panels cannot
 // drift apart.
 use sysvitals_support::{hkcu_dword, log_event, os_build_number, taskbar_al, utf16};
+use windows::core::{Interface, PCWSTR};
 use windows::Win32::Foundation::{
     CloseHandle, ERROR_FILE_NOT_FOUND, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
@@ -64,7 +65,8 @@ use windows::Win32::Graphics::Gdi::{
     OUT_DEFAULT_PRECIS, TRANSPARENT,
 };
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
+    CoCreateInstance, CoInitializeEx, CoTaskMemFree, IPersistFile, CLSCTX_INPROC_SERVER,
+    COINIT_APARTMENTTHREADED, STGM_READ,
 };
 use windows::Win32::System::Diagnostics::Debug::{SetUnhandledExceptionFilter, EXCEPTION_POINTERS};
 use windows::Win32::System::JobObjects::{
@@ -79,10 +81,7 @@ use windows::Win32::System::LibraryLoader::{
 use windows::Win32::System::Memory::{
     CreateFileMappingW, MapViewOfFile, FILE_MAP_ALL_ACCESS, PAGE_READWRITE,
 };
-use windows::Win32::System::Registry::{
-    RegCloseKey, RegDeleteKeyValueW, RegOpenKeyExW, RegQueryValueExW, RegSetKeyValueW, HKEY,
-    HKEY_CURRENT_USER, KEY_READ, REG_SZ,
-};
+use windows::Win32::System::Registry::{RegDeleteKeyValueW, HKEY_CURRENT_USER};
 use windows::Win32::System::Threading::{
     CreateMutexW, CreateProcessW, GetCurrentProcessId, GetExitCodeProcess, TerminateProcess,
     WaitForSingleObject, PROCESS_INFORMATION, STARTUPINFOW,
@@ -93,8 +92,9 @@ use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
 use windows::Win32::UI::Shell::{
-    IVirtualDesktopManager, SHAppBarMessage, ShellExecuteW, VirtualDesktopManager, ABM_GETSTATE,
-    ABS_AUTOHIDE, APPBARDATA,
+    FOLDERID_Startup, IShellLinkW, IVirtualDesktopManager, SHAppBarMessage, SHGetKnownFolderPath,
+    ShellExecuteW, ShellLink, VirtualDesktopManager, ABM_GETSTATE, ABS_AUTOHIDE, APPBARDATA,
+    KF_FLAG_DEFAULT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
@@ -174,10 +174,13 @@ const VERTICAL_PAD_PX: i32 = 3;
 const VERTICAL_WIDTH_SLACK_PX: i32 = 4;
 const THEME_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize";
 const THEME_VALUE: &str = "SystemUsesLightTheme";
-/// Per-user login-startup list. The value is our executable path; the
-/// default-off `[startup] auto_start` setting is applied here.
-const RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
-const RUN_VALUE: &str = "SysVitals";
+/// Per-user Startup-folder shortcut. The link target is our executable path;
+/// the default-off `[startup] auto_start` setting is applied here.
+const STARTUP_LINK_NAME: &str = "SysVitals.lnk";
+/// Launch-at-login entry written by builds before the Startup-folder
+/// shortcut; cleaned up on every apply so an upgrade cannot double-launch.
+const LEGACY_RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+const LEGACY_RUN_VALUE: &str = "SysVitals";
 
 const IDM_SETTINGS: usize = 901;
 const IDM_QUIT: usize = 902;

@@ -1,6 +1,7 @@
 //! config: split out of `win` (see `win` for the module map).
 
 use super::*;
+use std::path::{Path, PathBuf};
 
 // ------------------------------------------------------------ config access
 
@@ -61,90 +62,129 @@ pub(crate) fn log_config_issues(issues: &[sysvitals_core::config::SanitizeIssue]
 
 // ------------------------------------------------------------------ helpers
 
-/// Read a REG_SZ value from HKCU; `None` when absent or unreadable. Used
-/// only to avoid rewriting/logging an unchanged Run entry.
-pub(crate) unsafe fn hkcu_string(key: &str, value: &str) -> Option<String> {
-    let key = utf16(key);
-    let value = utf16(value);
-    let mut hkey = HKEY::default();
-    if RegOpenKeyExW(
-        HKEY_CURRENT_USER,
-        windows::core::PCWSTR(key.as_ptr()),
-        None,
-        KEY_READ,
-        &mut hkey,
-    )
-    .is_err()
-    {
-        return None;
-    }
-    let mut data = [0u16; 2048];
-    let mut size = (data.len() * 2) as u32;
-    let queried = RegQueryValueExW(
-        hkey,
-        windows::core::PCWSTR(value.as_ptr()),
-        None,
-        None,
-        Some(data.as_mut_ptr().cast()),
-        Some(&mut size),
-    );
-    let _ = RegCloseKey(hkey);
-    if queried.is_err() || size < 2 {
-        return None;
-    }
-    let wide = &data[..(size as usize / 2)];
-    let text = String::from_utf16_lossy(wide);
-    Some(text.trim_end_matches('\0').to_string())
+/// Resolve the per-user Startup folder through the shell so redirected
+/// profiles (roaming or OneDrive AppData) land where Explorer reads it.
+fn startup_dir() -> Result<PathBuf, String> {
+    let raw = unsafe { SHGetKnownFolderPath(&FOLDERID_Startup, KF_FLAG_DEFAULT, None) }
+        .map_err(|e| format!("startup folder lookup failed: {e}"))?;
+    let text = unsafe { raw.to_string() };
+    unsafe { CoTaskMemFree(Some(raw.0 as *const std::ffi::c_void)) };
+    let text = text.map_err(|e| format!("startup folder path invalid: {e}"))?;
+    Ok(PathBuf::from(text))
 }
 
-/// Write or remove the per-user Run entry. Returns whether the registry
-/// actually changed. The value is the quoted path to this executable, so
-/// moving the folder and launching from the new copy repairs the entry on
+fn startup_link_path() -> Result<PathBuf, String> {
+    Ok(startup_dir()?.join(STARTUP_LINK_NAME))
+}
+
+fn same_path(a: &Path, b: &Path) -> bool {
+    a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase()
+}
+
+/// Read the target of an existing shortcut so an unchanged entry is not
+/// rewritten on every launch. Missing, foreign, or unreadable links yield
+/// `None` and are simply recreated.
+unsafe fn shortcut_target(link_path: &Path) -> Option<PathBuf> {
+    let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).ok()?;
+    let persist: IPersistFile = link.cast().ok()?;
+    let link_w = utf16(&link_path.to_string_lossy());
+    persist.Load(&PCWSTR(link_w.as_ptr()), STGM_READ).ok()?;
+    let mut buf = [0u16; 1024];
+    link.GetPath(&mut buf, std::ptr::null_mut(), 0).ok()?;
+    let len = buf.iter().position(|&c| c == 0)?;
+    if len == 0 {
+        return None;
+    }
+    Some(PathBuf::from(String::from_utf16_lossy(&buf[..len])))
+}
+
+/// Write `SysVitals.lnk` in the Startup folder pointing at this executable.
+unsafe fn write_startup_shortcut(link_path: &Path, exe: &Path) -> Result<(), String> {
+    let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)
+        .map_err(|e| format!("shortcut COM unavailable: {e}"))?;
+    let exe_w = utf16(&exe.to_string_lossy());
+    link.SetPath(PCWSTR(exe_w.as_ptr()))
+        .map_err(|e| format!("shortcut target rejected: {e}"))?;
+    if let Some(dir) = exe.parent() {
+        let dir_w = utf16(&dir.to_string_lossy());
+        // Best effort: the working directory does not affect startup.
+        let _ = link.SetWorkingDirectory(PCWSTR(dir_w.as_ptr()));
+    }
+    let title = utf16("SysVitals");
+    let _ = link.SetDescription(PCWSTR(title.as_ptr()));
+    let _ = link.SetIconLocation(PCWSTR(exe_w.as_ptr()), 0);
+    let persist: IPersistFile = link
+        .cast()
+        .map_err(|e| format!("shortcut persist interface unavailable: {e}"))?;
+    let link_w = utf16(&link_path.to_string_lossy());
+    persist
+        .Save(&PCWSTR(link_w.as_ptr()), true)
+        .map_err(|e| format!("shortcut save failed ({}): {e}", link_path.display()))
+}
+
+/// Remove a Run value written by builds that used the registry. The shortcut
+/// is authoritative now; a leftover value would launch a second copy at
+/// login, so cleanup failure is logged but never masks the shortcut result.
+unsafe fn remove_legacy_run_value() -> bool {
+    let key = utf16(LEGACY_RUN_KEY);
+    let value = utf16(LEGACY_RUN_VALUE);
+    let result = RegDeleteKeyValueW(
+        HKEY_CURRENT_USER,
+        PCWSTR(key.as_ptr()),
+        PCWSTR(value.as_ptr()),
+    );
+    if result.is_ok() {
+        log_event("INFO", "auto-start: removed legacy Run entry");
+        true
+    } else if result != ERROR_FILE_NOT_FOUND {
+        log_event(
+            "WARN",
+            &format!(
+                "auto-start: legacy Run cleanup failed (registry error {})",
+                result.0
+            ),
+        );
+        false
+    } else {
+        false
+    }
+}
+
+/// Create or remove the per-user Startup-folder shortcut. Returns whether the
+/// system state actually changed. The link carries the current executable
+/// path, so moving the folder and launching the new copy repairs the entry on
 /// the next start.
 pub(crate) unsafe fn set_auto_start(enabled: bool) -> Result<bool, String> {
-    let key = utf16(RUN_KEY);
-    let value = utf16(RUN_VALUE);
-    if enabled {
+    let link_path = startup_link_path()?;
+    let mut changed = if enabled {
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-        let command = format!("\"{}\"", exe.display());
-        if hkcu_string(RUN_KEY, RUN_VALUE).as_deref() == Some(command.as_str()) {
-            return Ok(false);
-        }
-        let data: Vec<u16> = command.encode_utf16().chain(std::iter::once(0)).collect();
-        let result = RegSetKeyValueW(
-            HKEY_CURRENT_USER,
-            windows::core::PCWSTR(key.as_ptr()),
-            windows::core::PCWSTR(value.as_ptr()),
-            REG_SZ.0,
-            Some(data.as_ptr().cast()),
-            (data.len() * 2) as u32,
-        );
-        if result.is_ok() {
-            Ok(true)
+        if shortcut_target(&link_path).is_some_and(|target| same_path(&target, &exe)) {
+            false
         } else {
-            Err(format!("registry write error {}", result.0))
+            write_startup_shortcut(&link_path, &exe)?;
+            true
         }
     } else {
-        if hkcu_string(RUN_KEY, RUN_VALUE).is_none() {
-            return Ok(false);
+        match std::fs::remove_file(&link_path) {
+            Ok(()) => true,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+            Err(e) => {
+                return Err(format!(
+                    "shortcut remove failed ({}): {e}",
+                    link_path.display()
+                ))
+            }
         }
-        let result = RegDeleteKeyValueW(
-            HKEY_CURRENT_USER,
-            windows::core::PCWSTR(key.as_ptr()),
-            windows::core::PCWSTR(value.as_ptr()),
-        );
-        // No value is the desired end state, not a failure.
-        if result.is_ok() || result == ERROR_FILE_NOT_FOUND {
-            Ok(true)
-        } else {
-            Err(format!("registry delete error {}", result.0))
-        }
+    };
+    if remove_legacy_run_value() {
+        changed = true;
     }
+    Ok(changed)
 }
 
 /// A failed auto-start apply is retried without waiting for the user to touch
-/// the setting again. The cooldown keeps a permanently locked registry from
-/// producing one WARN per config poll.
+/// the setting again. The cooldown keeps a permanently unavailable shell
+/// folder or COM shortcut from producing one WARN per config poll.
 const AUTO_START_RETRY_COOLDOWN: Duration = Duration::from_secs(300);
 
 thread_local! {
@@ -152,7 +192,7 @@ thread_local! {
 }
 
 /// Apply the login-startup preference once per value change. The settings
-/// window writes the config; this process owns the registry side effect.
+/// window writes the config; this process owns the Startup-folder side effect.
 pub(crate) fn apply_auto_start(cfg: &Config) {
     // A `false` that merely came from the default (or a config re-created
     // after a corrupt file was backed up) is not an explicit user choice,

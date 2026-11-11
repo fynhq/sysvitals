@@ -254,6 +254,30 @@ begin
   Result := not WasRunning;
 end;
 
+procedure RemoveAutoStartShortcut;
+var
+  LinkPath: String;
+  TargetPath: String;
+  Shell: Variant;
+  Link: Variant;
+begin
+  LinkPath := ExpandConstant('{userstartup}\SysVitals.lnk');
+  if not FileExists(LinkPath) then
+    Exit;
+  { Check the target so uninstalling one installation never removes a
+    shortcut owned by a portable copy. If the automation object is
+    unavailable, leave the link alone rather than guess. }
+  try
+    Shell := CreateOleObject('WScript.Shell');
+    Link := Shell.CreateShortcut(LinkPath);
+    TargetPath := Link.TargetPath;
+  except
+    Exit;
+  end;
+  if CompareText(TargetPath, ExpandConstant('{app}\SysVitals.exe')) = 0 then
+    DeleteFile(LinkPath);
+end;
+
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
   RunValue: String;
@@ -263,6 +287,10 @@ begin
   if CurUninstallStep <> usUninstall then
     Exit;
 
+  RemoveAutoStartShortcut;
+
+  { Older builds used the Run key; remove it only when it points at this
+    installation. }
   if not RegQueryStringValue(HKCU,
     'Software\Microsoft\Windows\CurrentVersion\Run',
     'SysVitals', RunValue) then
