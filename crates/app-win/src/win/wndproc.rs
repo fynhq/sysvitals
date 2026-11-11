@@ -351,8 +351,10 @@ pub(crate) fn run() {
         if LAST_SNAPSHOT.with(|s| s.borrow().is_none()) {
             sample_tick();
         }
-        // The resident History framework is independent of any overlay.
-        ensure_history_resident();
+        // The resident History framework is deliberately NOT started here.
+        // It owns the DirectX device and the GPUI heap, so it is launched by
+        // the first chart click and exits after a long idle period; a user
+        // who never opens the chart never pays for it.
 
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).0 > 0 {

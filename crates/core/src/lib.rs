@@ -32,14 +32,14 @@ pub const HISTORY_STATE_MAP: &str = "Local\\SysVitalsHistoryState";
 /// Layout marker written by the indicator before the history process starts.
 pub const HISTORY_STATE_MAGIC: u32 = 0x5348_5653;
 /// Bumped whenever [`HistoryState`] changes shape.
-pub const HISTORY_STATE_VERSION: u32 = 2;
+pub const HISTORY_STATE_VERSION: u32 = 3;
 
 /// Command/status block mapped by the indicator and the resident history
 /// process.
 ///
 /// Ownership:
 /// - the indicator owns `desired_open`, `anchor`, `monitor` and `generation`;
-/// - the history process owns `visible`.
+/// - the history process owns `visible` and `closed_generation`.
 ///
 /// `generation` is both the request sequence and a seqlock: the indicator
 /// writes it odd, updates `desired_open`/`anchor`, then writes it even.
@@ -48,6 +48,11 @@ pub const HISTORY_STATE_VERSION: u32 = 2;
 /// Because the history process never writes `desired_open`, a self-dismissed
 /// popup cannot swallow a click that arrived while it was closing; the
 /// `visible` flag is the actual state the indicator toggles on.
+///
+/// `closed_generation` is written once by the resident process immediately
+/// before it exits from idleness. The indicator compares it with `generation`:
+/// when they differ, a click arrived while the process was shutting down and
+/// the fresh request must be relaunched instead of dropped.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct HistoryState {
@@ -60,6 +65,10 @@ pub struct HistoryState {
     pub visible: u32,
     /// Indicator-owned request sequence; also the anchor seqlock.
     pub generation: u32,
+    /// Request generation the resident process consumed before it exited
+    /// from idleness (history-process-owned). Zero until an idle exit records
+    /// it; cleared together with the rest of the block.
+    pub closed_generation: u32,
     pub _reserved: u32,
     /// Indicator rect in GPUI global logical pixels (left, top, right,
     /// bottom), the same space the history window is placed in.
@@ -85,6 +94,7 @@ impl HistoryState {
             desired_open: 0,
             visible: 0,
             generation: 0,
+            closed_generation: 0,
             _reserved: 0,
             anchor: [0.0; 4],
             monitor: 0,
@@ -99,6 +109,22 @@ impl HistoryState {
             && self.anchor.iter().all(|n| n.is_finite())
             && self.anchor[2] > self.anchor[0]
             && self.anchor[3] > self.anchor[1]
+    }
+
+    /// Whether a pending click raced the resident's clean idle exit and must
+    /// be relaunched instead of dropped.
+    ///
+    /// `desired_open` legitimately stays 1 after a popup dismissed itself,
+    /// so the pending flag alone is not enough. A clean idle exit records the
+    /// generation it consumed in `closed_generation`; only a newer
+    /// `generation` means the click arrived while the process was already
+    /// shutting down. Zero means no idle-exit handshake happened (a startup
+    /// failure or a crash), which must not trigger a relaunch loop.
+    pub fn click_raced_idle_exit(&self, clean_exit: bool) -> bool {
+        self.desired_open != 0
+            && clean_exit
+            && self.closed_generation != 0
+            && self.generation != self.closed_generation
     }
 
     /// Read a consistent snapshot from a mapped block.
@@ -137,6 +163,7 @@ impl HistoryState {
                 desired_open: read(addr_of!((*ptr).desired_open)),
                 visible: read(addr_of!((*ptr).visible)),
                 generation: g1,
+                closed_generation: read(addr_of!((*ptr).closed_generation)),
                 _reserved: 0,
                 anchor: [
                     read_volatile(addr_of!((*ptr).anchor[0])),
@@ -161,6 +188,7 @@ impl HistoryState {
             desired_open: read(addr_of!((*ptr).desired_open)),
             visible: read(addr_of!((*ptr).visible)),
             generation: read(addr_of!((*ptr).generation)),
+            closed_generation: read(addr_of!((*ptr).closed_generation)),
             _reserved: 0,
             anchor: [
                 read_volatile(addr_of!((*ptr).anchor[0])),
@@ -213,6 +241,20 @@ impl HistoryState {
         write_volatile(addr_of_mut!((*ptr).visible), u32::from(visible));
     }
 
+    /// Record the request generation the history process has finished
+    /// consuming before it exits from idleness. The indicator uses this to
+    /// tell a request that raced the exit apart from a popup that closed
+    /// itself earlier (its `desired_open` legitimately stays 1).
+    ///
+    /// # Safety
+    /// `ptr` must point to a live, properly aligned `HistoryState` mapping
+    /// shared with the other process, and only the history process may call
+    /// this.
+    pub unsafe fn write_closed_generation(ptr: *mut HistoryState, generation: u32) {
+        use std::ptr::{addr_of_mut, write_volatile};
+        write_volatile(addr_of_mut!((*ptr).closed_generation), generation);
+    }
+
     /// Clear both flags after the history process died: a stale `visible`
     /// would otherwise make the next click a no-op toggle-close.
     ///
@@ -222,6 +264,7 @@ impl HistoryState {
         unsafe {
             Self::write_request(ptr, false, None, 0);
             Self::write_visible(ptr, false);
+            Self::write_closed_generation(ptr, 0);
         }
     }
 }
@@ -265,6 +308,38 @@ mod tests {
     }
 
     #[test]
+    fn only_a_newer_click_after_a_clean_idle_exit_is_relaunched() {
+        let mut state = HistoryState::new();
+        state.desired_open = 1;
+        state.generation = 10;
+        state.closed_generation = 8;
+        assert!(state.click_raced_idle_exit(true));
+        assert!(
+            !state.click_raced_idle_exit(false),
+            "a crash must not relaunch"
+        );
+
+        state.closed_generation = 10;
+        assert!(
+            !state.click_raced_idle_exit(true),
+            "the consumed request is not a race"
+        );
+
+        state.closed_generation = 0;
+        assert!(
+            !state.click_raced_idle_exit(true),
+            "no idle-exit handshake means no relaunch"
+        );
+
+        state.closed_generation = 8;
+        state.desired_open = 0;
+        assert!(
+            !state.click_raced_idle_exit(true),
+            "there is no pending click to preserve"
+        );
+    }
+
+    #[test]
     fn history_state_request_roundtrip_uses_the_seqlock() {
         let mut state = HistoryState::new();
         let ptr = &mut state as *mut HistoryState;
@@ -289,11 +364,22 @@ mod tests {
             assert_eq!(read.monitor, 0, "a close request drops the display hint");
             assert_eq!(read.visible, 1, "a close request leaves visibility alone");
 
+            HistoryState::write_closed_generation(ptr, read.generation);
+            let read = HistoryState::read_consistent(ptr);
+            assert_eq!(
+                read.closed_generation, read.generation,
+                "an idle exit records the request it consumed"
+            );
+
             HistoryState::clear(ptr);
             let read = HistoryState::read_consistent(ptr);
             assert_eq!(read.desired_open, 0);
             assert_eq!(read.visible, 0);
             assert_eq!(read.monitor, 0);
+            assert_eq!(
+                read.closed_generation, 0,
+                "clearing a dead resident resets the handshake"
+            );
         }
     }
 }

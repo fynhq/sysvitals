@@ -88,7 +88,8 @@ pub(crate) fn terminate_settings(wait_for_exit: bool) -> bool {
 
 /// Terminate the resident history process. Called only on restart/quit:
 /// a normal popup close is a shared-state request that only removes the
-/// window, leaving the framework warm.
+/// window and releases the GPU; the framework stays warm for ten minutes,
+/// then exits by itself.
 pub(crate) fn history_terminate() -> bool {
     let mut slot = HISTORY_PROCESS.lock().unwrap_or_else(|e| e.into_inner());
     let Some(raw) = slot.take() else {
@@ -337,6 +338,15 @@ pub(crate) fn history_busy() -> bool {
     history_child_alive() || HISTORY_LAUNCHING.load(Ordering::SeqCst)
 }
 
+/// Exit code of the last reaped resident, or `u32::MAX` before the first
+/// reap. A clean (zero) exit is the idle shutdown handshake; a nonzero code
+/// is a crash and must not trigger a pending-request relaunch.
+static HISTORY_LAST_EXIT_CODE: AtomicU32 = AtomicU32::new(u32::MAX);
+/// Request generation already relaunched after an idle exit. Prevents a
+/// failed relaunch from spawning a new process on every 250 ms sync tick; a
+/// fresh click advances the generation and retries.
+static HISTORY_RELAUNCHED_GENERATION: AtomicU32 = AtomicU32::new(0);
+
 /// Reap the resident history process if it exited (crash, manual kill).
 pub(crate) fn history_child_alive() -> bool {
     let mut slot = HISTORY_PROCESS.lock().unwrap_or_else(|e| e.into_inner());
@@ -351,13 +361,23 @@ pub(crate) fn history_child_alive() -> bool {
     match unsafe { WaitForSingleObject(handle, 0) } {
         WAIT_TIMEOUT => true,
         WAIT_OBJECT_0 => {
+            let mut code = u32::MAX;
+            let _ = unsafe { GetExitCodeProcess(handle, &mut code) };
+            HISTORY_LAST_EXIT_CODE.store(code, Ordering::Relaxed);
             if !QUITTING.load(Ordering::Relaxed) {
-                let mut code = 0u32;
-                let _ = unsafe { GetExitCodeProcess(handle, &mut code) };
-                log_event(
-                    "WARN",
-                    &format!("history resident exited unexpectedly (exit code {code})"),
-                );
+                if code == 0 {
+                    // The resident exits cleanly after a long idle period to
+                    // release its GPU/heap. It is relaunched on demand.
+                    log_event(
+                        "INFO",
+                        "history resident exited after idling; it will be relaunched on demand",
+                    );
+                } else {
+                    log_event(
+                        "WARN",
+                        &format!("history resident exited unexpectedly (exit code {code})"),
+                    );
+                }
             }
             let _ = unsafe { CloseHandle(handle) };
             *slot = None;
@@ -563,11 +583,25 @@ pub(crate) fn history_open_request(hwnd: HWND) -> bool {
     true
 }
 
+/// Start the resident history framework for a fresh click, clearing any
+/// request a previous instance left behind (for example a self-dismissed
+/// popup whose `desired_open` stays 1 by design). The click publishes a new
+/// request immediately after this call.
+pub(crate) fn ensure_history_resident() {
+    start_history_resident(true);
+}
+
 /// Start the resident history framework on a worker thread. `CreateProcessW`
 /// has been measured at 190 ms – 5.4 s on loaded hosts; doing it here keeps
-/// the indicator's message loop responsive. The child has no window until
-/// the user opens the chart, so this only pays the GPUI/DirectX warm-up.
-pub(crate) fn ensure_history_resident() {
+/// the indicator's message loop responsive. The framework is launched on the
+/// first chart click and after an idle exit, never at indicator startup: its
+/// GPUI/DirectX baseline is the largest memory block in the product, so a
+/// user who does not open the chart never pays for it.
+///
+/// `clear_request` is false only when the caller must preserve a pending
+/// click that raced the previous process's idle exit; the fresh child then
+/// opens that request as soon as it starts.
+fn start_history_resident(clear_request: bool) {
     if history_busy() {
         return;
     }
@@ -575,12 +609,9 @@ pub(crate) fn ensure_history_resident() {
         log_event("WARN", "history resident unavailable: state mapping failed");
         return;
     }
-    // A fresh resident starts with no window. Clear any request left by a
-    // previous child (for example a self-dismissed popup whose
-    // `desired_open` stays 1 by design) so merely starting the framework
-    // never opens a chart no click asked for. A click immediately
-    // publishes a new request after this call.
-    history_mark_stopped();
+    if clear_request {
+        history_mark_stopped();
+    }
     let Some(dir) = current_exe_dir() else {
         log_event("WARN", "history launch: cannot determine exe directory");
         return;
@@ -644,18 +675,47 @@ pub(crate) fn ensure_history_resident() {
     }
 }
 
-/// Reap a dead resident process and clear a request it left behind, so the
-/// next click is not mistaken for a toggle-close of a popup that is gone.
+/// Reap a dead resident process and reconcile the request it left behind.
+///
+/// Three cases:
+/// - a click raced a clean idle exit (`desired_open` names a generation the
+///   dead process never consumed): relaunch immediately and keep the request;
+/// - the dead process consumed the request before exiting (`desired_open` is
+///   the pre-exit request, whose popup had dismissed itself): clear it;
+/// - a crash or a stale `visible` left over: clear the block so the next click
+///   is not mistaken for a toggle-close of a popup that is gone.
+///
+/// Do not bump the generation four times a second while idle; only a state a
+/// dead child actually left behind is touched.
 pub(crate) fn sync_history_state() {
     let alive = history_child_alive();
     if alive || HISTORY_LAUNCHING.load(Ordering::SeqCst) {
         return;
     }
-    // Do not bump the generation four times a second while idle; only
-    // clear a state that a dead child actually left behind.
-    let stale =
-        history_snapshot().is_some_and(|state| state.desired_open != 0 || state.visible != 0);
-    if stale {
+    let Some(state) = history_snapshot() else {
+        return;
+    };
+    if state.desired_open != 0 {
+        // Only a clean idle exit records the generation it consumed; a clean
+        // exit before serving a click (mapping/parent unavailable) leaves it
+        // zero, and a crash leaves the previous value behind. Both must not
+        // trigger a relaunch loop (core::HistoryState has the unit-tested
+        // decision).
+        let raced_exit =
+            state.click_raced_idle_exit(HISTORY_LAST_EXIT_CODE.load(Ordering::Relaxed) == 0);
+        if raced_exit && HISTORY_RELAUNCHED_GENERATION.load(Ordering::Relaxed) != state.generation {
+            HISTORY_RELAUNCHED_GENERATION.store(state.generation, Ordering::Relaxed);
+            log_event(
+                "INFO",
+                "history: click raced the idle exit; relaunching with the pending request",
+            );
+            start_history_resident(false);
+            return;
+        }
+        history_mark_stopped();
+        return;
+    }
+    if state.visible != 0 {
         history_mark_stopped();
     }
 }
