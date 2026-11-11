@@ -48,6 +48,14 @@ const SCHEMA_VERSION: i32 = 2;
 /// `VACUUM` the file would keep its old size forever.
 const VACUUM_AFTER_ROWS: usize = 100_000;
 
+/// Per-connection page cache, in KiB (negative `PRAGMA cache_size` means
+/// KiB). The default is 2,000 KiB; the history workload is a single-row
+/// insert every sample plus a few bounded range scans, so a 512 KiB cache is
+/// ample. Two live connections exist at most (the indicator's writer and an
+/// open popup's reader), and each one otherwise keeps its default cache
+/// resident for its whole lifetime.
+const PAGE_CACHE_KIB: i64 = 512;
+
 /// One aggregated bucket for charting: the bucket's start timestamp plus the
 /// average CPU and memory over the bucket.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -117,7 +125,11 @@ impl Store {
         conn.busy_timeout(Duration::from_millis(250))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
+        conn.pragma_update(None, "cache_size", -PAGE_CACHE_KIB)?;
         let rollup_ready = Self::init_schema(&mut conn)?;
+        // Drop the pages the schema/backfill statements loaded; the steady
+        // writer only touches the current WAL frame plus a few tree pages.
+        let _ = conn.execute_batch("PRAGMA shrink_memory");
         Ok(Self {
             conn,
             rollup_ready,
@@ -135,6 +147,7 @@ impl Store {
         use rusqlite::OpenFlags;
         let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         conn.busy_timeout(Duration::from_millis(250))?;
+        conn.pragma_update(None, "cache_size", -PAGE_CACHE_KIB)?;
         let version: i32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
         if version > SCHEMA_VERSION {
             anyhow::bail!(
@@ -803,6 +816,37 @@ mod tests {
         assert!(s.buckets_offset(0, 100, 10, 0).unwrap().is_empty());
         assert!(s.buckets_offset(0, 100, 3600, 3600).unwrap().is_empty());
         assert_eq!(s.row_count(), 0);
+    }
+
+    #[test]
+    fn connections_use_the_small_page_cache() {
+        let dir = std::env::temp_dir().join(format!(
+            "sysvitals-store-cache-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("history.db");
+        let store = Store::open(&path).unwrap();
+        let cache: i64 = store
+            .conn
+            .pragma_query_value(None, "cache_size", |row| row.get(0))
+            .unwrap();
+        assert_eq!(cache, -PAGE_CACHE_KIB, "writer page cache is bounded");
+        drop(store);
+
+        let reader = Store::open_read_only(&path).unwrap();
+        let cache: i64 = reader
+            .conn
+            .pragma_query_value(None, "cache_size", |row| row.get(0))
+            .unwrap();
+        assert_eq!(cache, -PAGE_CACHE_KIB, "reader page cache is bounded");
+        drop(reader);
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
