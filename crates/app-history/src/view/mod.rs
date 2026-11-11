@@ -13,20 +13,6 @@ pub(crate) struct HistoryView {
     /// the first (offscreen) frame. The loop activates it after the first
     /// data load.
     pub(crate) hidden_start: bool,
-    /// One-shot entrance translation in logical pixels, applied at t = 0
-    /// toward the anchor side and settled to zero. `(0, 0)` for a centered
-    /// window (fade only). See `begin_intro`.
-    pub(crate) intro_dx: f32,
-    pub(crate) intro_dy: f32,
-    /// Generation key for the entrance animation. Zero until the first
-    /// visible frame (one-shot) or first activation (resident hidden window);
-    /// a new window gets a new view, so only a focus round-trip would
-    /// otherwise replay it.
-    pub(crate) intro_seq: u64,
-    /// Guard for [`Self::begin_intro`]: the pre-placed Windows window must
-    /// not run the entrance while it is still hidden (GPUI derives progress
-    /// from wall-clock time, so it would finish offscreen).
-    pub(crate) intro_played: bool,
     /// Logical size the anchored popup was laid out for. Windows creates the
     /// window on whichever monitor the OS picks and then moves it to the
     /// target display; crossing a DPI boundary makes the OS suggest a
@@ -39,10 +25,6 @@ pub(crate) struct HistoryView {
     #[cfg(windows)]
     pub(crate) size_fixed: bool,
     pub(crate) range: TimeRange,
-    /// Bumped by the range buttons only. The chart's one-shot reveal is keyed
-    /// on it so the 3 s live refresh never replays the fade, and a manual
-    /// switch to a wide range fades only after its data lands.
-    pub(crate) range_seq: u64,
     pub(crate) buckets: Vec<Bucket>,
     /// True while a wide background query is in flight; `buckets` is empty
     /// until it lands, so Copy must not export a header-only CSV.
@@ -118,7 +100,6 @@ impl HistoryView {
         lang: Language,
         hidden_start: bool,
         fixed_size: Option<gpui_kit::Size<Pixels>>,
-        intro: (f32, f32),
         first_load: Arc<AtomicBool>,
         shared: Option<Arc<HistoryShared>>,
         cx: &mut Context<Self>,
@@ -128,16 +109,11 @@ impl HistoryView {
         let mut view = Self {
             lang,
             hidden_start,
-            intro_dx: intro.0,
-            intro_dy: intro.1,
-            intro_seq: 0,
-            intro_played: false,
             #[cfg(windows)]
             fixed_size,
             #[cfg(windows)]
             size_fixed: false,
             range: TimeRange::Min5,
-            range_seq: 0,
             buckets: Vec::new(),
             data_loading: false,
             query: None,
@@ -255,24 +231,6 @@ impl HistoryView {
         restore_window_size_after_move(window, &mut self.size_fixed, target);
     }
 
-    /// Start the one-shot entrance exactly once, on the first visible frame
-    /// (one-shot launch) or first activation (resident hidden window).
-    ///
-    /// Mounting the animation wrapper while the window is still hidden is not
-    /// safe: GPUI advances a one-shot by wall-clock time, so the pre-placed
-    /// Windows window would finish the settle before the resident loop ever
-    /// shows it. The caller notifies only when this starts from an activation
-    /// edge; the first-render seed needs no extra frame because the wrapper is
-    /// built by the render pass that is already running.
-    pub(crate) fn begin_intro(&mut self) -> bool {
-        if self.intro_played {
-            return false;
-        }
-        self.intro_played = true;
-        self.intro_seq = self.intro_seq.wrapping_add(1);
-        true
-    }
-
     /// Watch the window's activation and dismiss the popup when it loses
     /// focus after having been focused once. Idempotent.
     pub(crate) fn observe_activation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -285,7 +243,6 @@ impl HistoryView {
         // state, otherwise the first click-away would not close the popup.
         if window.is_window_active() {
             self.ever_active = true;
-            self.begin_intro();
             #[cfg(windows)]
             self.restore_popup_size(window);
         }
@@ -309,12 +266,9 @@ impl HistoryView {
         // accessory app's window with its own key-window lifecycle,
         // unverified at runtime, and the bug was only ever reproduced on
         // Windows.
-        let subscription = cx.observe_window_activation(window, |view, window, cx| {
+        let subscription = cx.observe_window_activation(window, |view, window, _cx| {
             if window.is_window_active() {
                 view.ever_active = true;
-                if view.begin_intro() {
-                    cx.notify();
-                }
                 #[cfg(windows)]
                 view.restore_popup_size(window);
             } else if view.ever_active {
