@@ -88,7 +88,7 @@ unsafe fn shortcut_target(link_path: &Path) -> Option<PathBuf> {
     let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).ok()?;
     let persist: IPersistFile = link.cast().ok()?;
     let link_w = utf16(&link_path.to_string_lossy());
-    persist.Load(&PCWSTR(link_w.as_ptr()), STGM_READ).ok()?;
+    persist.Load(PCWSTR(link_w.as_ptr()), STGM_READ).ok()?;
     let mut buf = [0u16; 1024];
     link.GetPath(&mut buf, std::ptr::null_mut(), 0).ok()?;
     let len = buf.iter().position(|&c| c == 0)?;
@@ -118,7 +118,7 @@ unsafe fn write_startup_shortcut(link_path: &Path, exe: &Path) -> Result<(), Str
         .map_err(|e| format!("shortcut persist interface unavailable: {e}"))?;
     let link_w = utf16(&link_path.to_string_lossy());
     persist
-        .Save(&PCWSTR(link_w.as_ptr()), true)
+        .Save(PCWSTR(link_w.as_ptr()), true)
         .map_err(|e| format!("shortcut save failed ({}): {e}", link_path.display()))
 }
 
