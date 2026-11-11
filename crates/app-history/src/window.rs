@@ -64,7 +64,7 @@ pub(crate) fn open_history_window(
     let anchored = anchor.is_some();
     // The entrance starts on the anchor side and settles into the final
     // placement. A centered fallback window has no direction and only fades.
-    let (intro_dx, intro_dy) = anchor
+    let intro = anchor
         .as_ref()
         .map(|anchor| intro_offsets(anchor, &window_bounds))
         .unwrap_or((0.0, 0.0));
@@ -141,8 +141,7 @@ pub(crate) fn open_history_window(
                     lang,
                     hidden_start,
                     layout_size,
-                    intro_dx,
-                    intro_dy,
+                    intro,
                     first_load,
                     shared,
                     cx,
@@ -231,7 +230,9 @@ fn intro_offsets(anchor: &AnchorRect, bounds: &Bounds<Pixels>) -> (f32, f32) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::intro_offsets;
+    use gpui_kit::{point, px, size, Bounds, Pixels};
+    use sysvitals_core::cli::AnchorRect;
 
     fn bounds(left: f32, top: f32, width: f32, height: f32) -> Bounds<Pixels> {
         Bounds::new(point(px(left), px(top)), size(px(width), px(height)))

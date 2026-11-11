@@ -118,8 +118,7 @@ impl HistoryView {
         lang: Language,
         hidden_start: bool,
         fixed_size: Option<gpui_kit::Size<Pixels>>,
-        intro_dx: f32,
-        intro_dy: f32,
+        intro: (f32, f32),
         first_load: Arc<AtomicBool>,
         shared: Option<Arc<HistoryShared>>,
         cx: &mut Context<Self>,
@@ -129,8 +128,8 @@ impl HistoryView {
         let mut view = Self {
             lang,
             hidden_start,
-            intro_dx,
-            intro_dy,
+            intro_dx: intro.0,
+            intro_dy: intro.1,
             intro_seq: 0,
             intro_played: false,
             #[cfg(windows)]
