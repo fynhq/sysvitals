@@ -15,7 +15,7 @@ fn legend_entry(color: Hsla, name: String, value: String, fg: Hsla) -> impl Into
 
 /// A cubic path following the chart library's natural (Catmull-Rom to
 /// Bezier) interpolation for one contiguous series run. The points are
-/// already in local canvas pixels.
+/// already in window pixels.
 fn natural_path(points: &[(f32, f32)]) -> Option<Path<Pixels>> {
     let (first, _) = points.split_first()?;
     let mut path = PathBuilder::stroke(px(1.));
@@ -313,6 +313,10 @@ impl Render for HistoryView {
                 let plot_left = X_AXIS_GUTTER;
                 let plot_h = (f32::from(bounds.size.height) - X_AXIS_STRIP_H).max(0.0);
                 let plot_w = (f32::from(bounds.size.width) - plot_left).max(0.0);
+                // `Window::paint_path` paints in window space, so the local
+                // plot coordinates must be offset by the canvas origin.
+                let origin_x = f32::from(bounds.origin.x);
+                let origin_y = f32::from(bounds.origin.y);
                 let build = |series: usize| {
                     let mut paths = Vec::new();
                     for segment in &series_segments {
@@ -323,7 +327,7 @@ impl Render for HistoryView {
                             .iter()
                             .map(|(x, cpu, mem)| {
                                 let y = if series == 0 { *cpu } else { *mem };
-                                (plot_left + plot_w * x, plot_h * y)
+                                (origin_x + plot_left + plot_w * x, origin_y + plot_h * y)
                             })
                             .collect();
                         if let Some(path) = natural_path(&points) {
