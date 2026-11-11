@@ -2,6 +2,8 @@
 
 use super::*;
 
+use gpui_kit::component::collapsible::Collapsible;
+
 impl Render for SettingsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Re-probe the taskbar shape at most once a second: the user can move
@@ -180,10 +182,12 @@ impl Render for SettingsView {
                 None
             }
         };
+        let show_margin = (self.layout_available && self.anchor_idx == 1 && !self.vertical_taskbar)
+            || self.vertical_taskbar;
         #[cfg(windows)]
         let mut spacing_select = Select::new(&self.spacing_select);
         #[cfg(windows)]
-        let mut margin_select = Select::new(&self.margin_select);
+        let mut margin_select = Select::new(&self.margin_select).disabled(!show_margin);
         #[cfg(windows)]
         let mut anchor_select = Select::new(&self.anchor_select);
         #[cfg(windows)]
@@ -238,10 +242,12 @@ impl Render for SettingsView {
             "margin-trigger",
             margin_items()[self.margin_idx].clone(),
             mac_style,
-            cx.listener(|this, _, _, cx| {
-                mac_select_popup(cx, margin_items(), this.margin_idx, |view, index| {
-                    view.margin_idx = index
-                });
+            cx.listener(move |this, _, _, cx| {
+                if show_margin {
+                    mac_select_popup(cx, margin_items(), this.margin_idx, |view, index| {
+                        view.margin_idx = index
+                    });
+                }
             }),
         ));
         #[cfg(target_os = "macos")]
@@ -444,26 +450,36 @@ impl Render for SettingsView {
                     faint,
                 ));
         }
-        let show_margin = (self.layout_available && self.anchor_idx == 1 && !self.vertical_taskbar)
-            || self.vertical_taskbar;
-        if show_margin {
-            layout_card = layout_card
-                .child(card_divider(dark, scale_factor))
-                .child(labeled_row(
-                    if self.vertical_taskbar {
-                        t(lang, "settings.top_margin").to_string()
-                    } else {
-                        t(lang, "settings.left_margin").to_string()
-                    },
-                    if self.vertical_taskbar {
-                        IconName::ArrowUp
-                    } else {
-                        IconName::ArrowLeft
-                    },
-                    margin_control,
-                    dim,
-                ));
-        }
+        // Keep the row mounted and reveal its measured height with the
+        // theme's control spring. The first frame adopts the current state,
+        // so opening the page never animates; only an anchor/taskbar change
+        // while the window is open expands or collapses the row. The Windows
+        // select is disabled while hidden so a zero-height clipped row cannot
+        // become an invisible tab stop.
+        let margin_row = labeled_row(
+            if self.vertical_taskbar {
+                t(lang, "settings.top_margin").to_string()
+            } else {
+                t(lang, "settings.left_margin").to_string()
+            },
+            if self.vertical_taskbar {
+                IconName::ArrowUp
+            } else {
+                IconName::ArrowLeft
+            },
+            margin_control,
+            dim,
+        );
+        layout_card = layout_card.child(
+            Collapsible::new()
+                .motion_id("margin-row")
+                .open(show_margin)
+                .content(
+                    v_flex()
+                        .child(card_divider(dark, scale_factor))
+                        .child(margin_row),
+                ),
+        );
 
         let prefix_cpu_count = self.prefix_cpu.read(cx).value().chars().count();
         let prefix_mem_count = self.prefix_mem.read(cx).value().chars().count();
