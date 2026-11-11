@@ -47,6 +47,12 @@ impl Render for HistoryView {
             window.set_window_title(&title);
             self.last_title = Some(title);
         }
+        // A one-shot launch is visible from its first frame, so its entrance
+        // can start immediately. The resident Windows window is created hidden
+        // (`hidden_start`) and must wait for the first activation edge instead.
+        if !self.hidden_start {
+            self.begin_intro();
+        }
         let points = self.points();
         let loading = self.data_loading;
         let empty = self.buckets.is_empty();
@@ -136,6 +142,7 @@ impl Render for HistoryView {
                 .label(label)
                 .on_click(cx.listener(move |this: &mut Self, _: &ClickEvent, _, cx| {
                     this.range = r;
+                    this.range_seq = this.range_seq.wrapping_add(1);
                     this.load_data(cx);
                     cx.notify();
                 }));
@@ -443,13 +450,58 @@ impl Render for HistoryView {
             legend = legend.child(div().text_xs().text_color(fg.opacity(0.55)).child(note));
         }
 
-        v_flex()
+        // A manual range switch fades the new plot in once. The generation
+        // lives on the view (not `load_seq`) so the 3 s live refresh keeps
+        // the same element id and never replays it; wide ranges mount this
+        // only after their background query lands, so the fade covers the
+        // real data instead of the loading message. The library's own
+        // `appear` stays off (fixed 1 s; see the `AreaChart` call above).
+        let chart = if self.range_seq > 0 && !loading && !empty {
+            let motion = cx.theme().motion_tokens().clone();
+            let easing = motion.easing_enter.clone();
+            let seq = self.range_seq;
+            merged_chart
+                .with_animation(
+                    ("chart-enter", seq),
+                    Animation::new(motion.duration_fast).with_easing(move |t| easing.sample(t)),
+                    |el, t| el.opacity(0.55 + 0.45 * t),
+                )
+                .into_any_element()
+        } else {
+            merged_chart.into_any_element()
+        };
+
+        let content = v_flex()
             .size_full()
             .p_4()
             .gap_2()
             .child(header)
             .child(header_divider)
             .child(legend)
-            .child(merged_chart)
+            .child(chart);
+
+        // First activation (not the hidden pre-placement frame) starts a
+        // short settle from the anchor side. `begin_intro` is one-shot, so
+        // focus round-trips and live repaints keep the same element id.
+        if self.intro_played {
+            let motion = cx.theme().motion_tokens().clone();
+            let easing = motion.easing_enter.clone();
+            let dx = self.intro_dx;
+            let dy = self.intro_dy;
+            content
+                .with_animation(
+                    ("history-intro", self.intro_seq),
+                    Animation::new(motion.duration_fast).with_easing(move |t| easing.sample(t)),
+                    move |el, t| {
+                        el.opacity(0.5 + 0.5 * t)
+                            .relative()
+                            .left(px(dx * (1.0 - t)))
+                            .top(px(dy * (1.0 - t)))
+                    },
+                )
+                .into_any_element()
+        } else {
+            content.into_any_element()
+        }
     }
 }

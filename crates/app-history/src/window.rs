@@ -62,6 +62,12 @@ pub(crate) fn open_history_window(
         None => (Bounds::centered(None, popup_size, cx), None),
     };
     let anchored = anchor.is_some();
+    // The entrance starts on the anchor side and settles into the final
+    // placement. A centered fallback window has no direction and only fades.
+    let (intro_dx, intro_dy) = anchor
+        .as_ref()
+        .map(|anchor| intro_offsets(anchor, &window_bounds))
+        .unwrap_or((0.0, 0.0));
 
     // Anchored popups behave like a menu: no title bar, no shadow of
     // a normal window, cannot be dragged or resized. When no anchor
@@ -130,7 +136,18 @@ pub(crate) fn open_history_window(
         let first_load = first_load.clone();
         let shared = shared.clone();
         move |_window, cx| {
-            cx.new(|cx| HistoryView::new(lang, hidden_start, layout_size, first_load, shared, cx))
+            cx.new(|cx| {
+                HistoryView::new(
+                    lang,
+                    hidden_start,
+                    layout_size,
+                    intro_dx,
+                    intro_dy,
+                    first_load,
+                    shared,
+                    cx,
+                )
+            })
         }
     });
     let (window_handle, _view) = match opened {
@@ -181,4 +198,91 @@ pub(crate) fn open_history_window(
     }
     WINDOW_CREATED_MS.store(elapsed_ms() as u64, Ordering::Relaxed);
     Some((window_handle, first_load, layout_size))
+}
+
+/// Direction and distance of the popup's one-shot entrance, from the anchor
+/// side toward the resting position. Vertical bars (taskbar left/right) slide
+/// horizontally; the top/bottom taskbar and menu-bar cases slide vertically.
+/// The popup is clamped to the work area, so a rectangle that overlaps the
+/// anchor on both axes falls back to a fade only.
+fn intro_offsets(anchor: &AnchorRect, bounds: &Bounds<Pixels>) -> (f32, f32) {
+    const SLIDE: f32 = 6.0;
+    let left = f32::from(bounds.origin.x);
+    let top = f32::from(bounds.origin.y);
+    let right = left + f32::from(bounds.size.width);
+    let bottom = top + f32::from(bounds.size.height);
+
+    if bottom <= anchor.top {
+        // Popup above the anchor: start lower and settle upward.
+        (0.0, SLIDE)
+    } else if top >= anchor.bottom {
+        // Popup below the anchor: start higher and settle downward.
+        (0.0, -SLIDE)
+    } else if right <= anchor.left {
+        // Popup left of the anchor: start closer to it on the right.
+        (SLIDE, 0.0)
+    } else if left >= anchor.right {
+        // Popup right of the anchor: start closer to it on the left.
+        (-SLIDE, 0.0)
+    } else {
+        (0.0, 0.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bounds(left: f32, top: f32, width: f32, height: f32) -> Bounds<Pixels> {
+        Bounds::new(point(px(left), px(top)), size(px(width), px(height)))
+    }
+
+    fn anchor(left: f32, top: f32, right: f32, bottom: f32) -> AnchorRect {
+        AnchorRect {
+            left,
+            top,
+            right,
+            bottom,
+        }
+    }
+
+    #[test]
+    fn entrance_slides_from_the_anchor_side() {
+        // Bottom taskbar: the popup sits above it and starts lower.
+        let taskbar = anchor(900.0, 1040.0, 1000.0, 1080.0);
+        assert_eq!(
+            intro_offsets(&taskbar, &bounds(610.0, 642.0, 680.0, 390.0)),
+            (0.0, 6.0)
+        );
+
+        // Top menu bar: the popup sits below it and starts higher.
+        let menu_bar = anchor(900.0, 0.0, 1000.0, 40.0);
+        assert_eq!(
+            intro_offsets(&menu_bar, &bounds(610.0, 48.0, 680.0, 390.0)),
+            (0.0, -6.0)
+        );
+
+        // Vertical bar on the left: the popup sits right of it and starts left.
+        let bar_on_the_left = anchor(0.0, 400.0, 40.0, 500.0);
+        assert_eq!(
+            intro_offsets(&bar_on_the_left, &bounds(48.0, 300.0, 680.0, 390.0)),
+            (-6.0, 0.0)
+        );
+
+        // Vertical bar on the right: the popup sits left of it and starts right.
+        let bar_on_the_right = anchor(1880.0, 400.0, 1920.0, 500.0);
+        assert_eq!(
+            intro_offsets(&bar_on_the_right, &bounds(1152.0, 300.0, 680.0, 390.0)),
+            (6.0, 0.0)
+        );
+    }
+
+    #[test]
+    fn entrance_falls_back_to_a_fade_when_placement_overlaps() {
+        let anchor = anchor(150.0, 150.0, 180.0, 180.0);
+        assert_eq!(
+            intro_offsets(&anchor, &bounds(100.0, 100.0, 200.0, 200.0)),
+            (0.0, 0.0)
+        );
+    }
 }
