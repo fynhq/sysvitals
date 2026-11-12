@@ -30,6 +30,9 @@ pub(crate) unsafe fn launch_taskmgr() {
     let verb = utf16("open");
     let path_text = path.to_string_lossy();
     let target = utf16(path_text.as_ref());
+    // Task Manager can take seconds to create its window; acknowledge the
+    // menu choice with the wait cursor until that window is visible.
+    taskmgr_wait_cursor_begin();
     let result = ShellExecuteW(
         None,
         windows::core::PCWSTR(verb.as_ptr()),
@@ -39,6 +42,7 @@ pub(crate) unsafe fn launch_taskmgr() {
         SW_SHOWNORMAL,
     );
     if (result.0 as usize) < 32 {
+        wait_cursor_clear();
         log_event(
             "WARN",
             &format!("task manager launch failed (code {})", result.0 as usize),

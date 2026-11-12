@@ -189,6 +189,12 @@ pub(crate) fn spawn_process(
     });
     let si = STARTUPINFOW {
         cb: std::mem::size_of::<STARTUPINFOW>() as u32,
+        // Both children are GUI-subsystem binaries. Without this flag the
+        // system puts the cursor in feedback mode ("Working in Background")
+        // for the first seconds of the child's startup, which reads as a
+        // spinner on every cold chart click; neither launch is a foreground
+        // app switch, so the feedback is pure noise here.
+        dwFlags: STARTF_FORCEOFFFEEDBACK,
         ..Default::default()
     };
     let mut pi = PROCESS_INFORMATION::default();
@@ -274,6 +280,9 @@ pub(crate) fn launch_settings(hwnd: HWND) {
         "INFO",
         &format!("launching SysVitalsSettings.exe (replace={alive}) {args}"),
     );
+    // The panel takes seconds to appear; hold the wait cursor until its
+    // first visible window (reconciled from `sync_history_state`).
+    settings_wait_cursor_begin();
     let sentinel_raw = sentinel_hwnd().0 as isize;
     let replace = alive;
     let spawn = std::thread::Builder::new()
@@ -293,6 +302,7 @@ pub(crate) fn launch_settings(hwnd: HWND) {
                         let _ = unsafe { CloseHandle(handle) };
                         log_event("INFO", "settings launch cancelled by quit");
                     } else {
+                        unsafe { set_settings_pid(handle) };
                         *SETTINGS_PROCESS.lock().unwrap_or_else(|e| e.into_inner()) =
                             Some(handle.0 as isize);
                         // Record the monitor only after the process is
@@ -329,6 +339,7 @@ pub(crate) fn launch_settings(hwnd: HWND) {
         });
     if spawn.is_err() {
         SETTINGS_LAUNCHING.store(false, Ordering::SeqCst);
+        wait_cursor_clear();
         log_event("WARN", "launch_settings: worker thread spawn failed");
     }
 }
@@ -532,6 +543,169 @@ pub(crate) fn history_mark_stopped() {
     }
 }
 
+// ------------------------------------------------ launch wait cursor
+
+/// What the wait cursor is waiting for. Every launch the indicator starts
+/// (chart popup, settings panel, Task Manager) spends a noticeable gap
+/// before its window appears; the overlay shows the system wait cursor for
+/// that gap so the click is acknowledged immediately.
+const WAIT_NONE: u32 = 0;
+const WAIT_HISTORY: u32 = 1;
+const WAIT_SETTINGS: u32 = 2;
+const WAIT_TASKMGR: u32 = 3;
+
+static WAIT_TARGET: AtomicU32 = AtomicU32::new(WAIT_NONE);
+static WAIT_SINCE_MS: AtomicU64 = AtomicU64::new(0);
+/// PID of the settings child launched last; 0 until its launch worker
+/// stores the process handle.
+static SETTINGS_PID: AtomicU32 = AtomicU32::new(0);
+/// Hard stop so a refused or failed launch cannot leave the pointer spinning.
+const WAIT_CURSOR_TIMEOUT_MS: u64 = 10_000;
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Start the wait cursor. Called from the click/menu handler while the
+/// pointer is over the indicator, so the cursor applies immediately even
+/// when the user does not move the mouse again.
+fn wait_cursor_begin(target: u32) {
+    WAIT_SINCE_MS.store(now_ms(), Ordering::Relaxed);
+    WAIT_TARGET.store(target, Ordering::Relaxed);
+    if let Ok(cursor) = unsafe { LoadCursorW(None, IDC_WAIT) } {
+        unsafe { SetCursor(Some(cursor)) };
+    }
+}
+
+pub(crate) fn history_wait_cursor_begin() {
+    wait_cursor_begin(WAIT_HISTORY);
+}
+
+pub(crate) fn settings_wait_cursor_begin() {
+    // A replacement launch must wait for the *new* process's window, not
+    // the old instance's still-visible one.
+    SETTINGS_PID.store(0, Ordering::Relaxed);
+    wait_cursor_begin(WAIT_SETTINGS);
+}
+
+pub(crate) fn taskmgr_wait_cursor_begin() {
+    wait_cursor_begin(WAIT_TASKMGR);
+}
+
+/// Keeps `WM_SETCURSOR` on the overlay returning the wait cursor while a
+/// launch is pending.
+pub(crate) fn wait_cursor_active() -> bool {
+    WAIT_TARGET.load(Ordering::Relaxed) != WAIT_NONE
+}
+
+/// Restore the arrow only when the pointer still sits on one of our
+/// overlays; every other window repaints its own cursor from WM_SETCURSOR.
+pub(crate) fn wait_cursor_clear() {
+    if WAIT_TARGET.swap(WAIT_NONE, Ordering::Relaxed) == WAIT_NONE {
+        return;
+    }
+    let mut point = POINT::default();
+    if unsafe { GetCursorPos(&mut point) }.is_err() {
+        return;
+    }
+    let under = unsafe { WindowFromPoint(point) };
+    if overlay_by_hwnd(under).is_none() {
+        return;
+    }
+    if let Ok(cursor) = unsafe { LoadCursorW(None, IDC_ARROW) } {
+        unsafe { SetCursor(Some(cursor)) };
+    }
+}
+
+/// Reconcile a pending wait cursor once per sync tick: the launched window
+/// becoming visible ends it, and a failed launch or a window that never
+/// shows must not leave the pointer spinning.
+pub(crate) fn wait_cursor_reconcile() {
+    let target = WAIT_TARGET.load(Ordering::Relaxed);
+    if target == WAIT_NONE {
+        return;
+    }
+    if launch_window_visible(target) {
+        wait_cursor_clear();
+        return;
+    }
+    let waited_ms = now_ms().saturating_sub(WAIT_SINCE_MS.load(Ordering::Relaxed));
+    if waited_ms >= WAIT_CURSOR_TIMEOUT_MS {
+        let what = match target {
+            WAIT_HISTORY => "history popup",
+            WAIT_SETTINGS => "settings window",
+            WAIT_TASKMGR => "task manager window",
+            _ => "window",
+        };
+        log_event(
+            "WARN",
+            &format!("launch feedback: {what} never became visible; clearing the wait cursor"),
+        );
+        wait_cursor_clear();
+    }
+}
+
+fn launch_window_visible(target: u32) -> bool {
+    match target {
+        WAIT_HISTORY => {
+            let visible = history_snapshot().is_some_and(|state| state.visible != 0);
+            let failed = !history_child_alive() && !HISTORY_LAUNCHING.load(Ordering::SeqCst);
+            visible || failed
+        }
+        WAIT_SETTINGS => {
+            if SETTINGS_LAUNCHING.load(Ordering::SeqCst) {
+                return false;
+            }
+            if !settings_child_alive() {
+                return true;
+            }
+            let pid = SETTINGS_PID.load(Ordering::Relaxed);
+            pid != 0 && visible_window_of_pid(pid)
+        }
+        WAIT_TASKMGR => visible_task_manager(),
+        _ => true,
+    }
+}
+
+fn visible_window_of_pid(pid: u32) -> bool {
+    struct Search {
+        pid: u32,
+        found: bool,
+    }
+    unsafe extern "system" fn visit(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let search = &mut *(lparam.0 as *mut Search);
+        let mut owner = 0u32;
+        GetWindowThreadProcessId(hwnd, Some(&mut owner));
+        if owner == search.pid && IsWindowVisible(hwnd).as_bool() {
+            search.found = true;
+            return BOOL(0);
+        }
+        BOOL(1)
+    }
+    let mut search = Search { pid, found: false };
+    unsafe {
+        let _ = EnumWindows(Some(visit), LPARAM(&mut search as *mut Search as isize));
+    }
+    search.found
+}
+
+fn visible_task_manager() -> bool {
+    let class = utf16("TaskManagerWindow");
+    match unsafe { FindWindowW(PCWSTR(class.as_ptr()), None) } {
+        Ok(hwnd) => unsafe { IsWindowVisible(hwnd) }.as_bool(),
+        Err(_) => false,
+    }
+}
+
+/// Hand the settings child's PID to the wait-cursor reconciler as soon as
+/// the launch worker has the process handle.
+pub(crate) fn set_settings_pid(handle: HANDLE) {
+    SETTINGS_PID.store(unsafe { GetProcessId(handle) }, Ordering::Relaxed);
+}
+
 /// Native display handle (HMONITOR) hosting a window, carried as `i64`
 /// through the shared history state and the settings command line.
 /// The overlay registry is refreshed every move tick, so it is the
@@ -688,6 +862,7 @@ fn start_history_resident(clear_request: bool) {
 /// Do not bump the generation four times a second while idle; only a state a
 /// dead child actually left behind is touched.
 pub(crate) fn sync_history_state() {
+    wait_cursor_reconcile();
     let alive = history_child_alive();
     if alive || HISTORY_LAUNCHING.load(Ordering::SeqCst) {
         return;

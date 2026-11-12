@@ -20,6 +20,10 @@ pub(crate) fn handle_history_click(hwnd: HWND) {
         ensure_history_resident();
         if history_open_request(hwnd) {
             HISTORY_ANCHOR_MONITOR.store(this_monitor, Ordering::Relaxed);
+            // The popup appears only after the resident process starts and
+            // GPUI draws its first frame; hold the wait cursor over that gap
+            // and let `sync_history_state` release it once `visible` flips.
+            history_wait_cursor_begin();
         }
     } else if HISTORY_ANCHOR_MONITOR.load(Ordering::Relaxed) == this_monitor {
         history_close_request();
@@ -166,6 +170,18 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 );
             }
             LRESULT(0)
+        }
+        WM_SETCURSOR => {
+            // While a launch is pending, keep the wait cursor over the
+            // indicator even if the mouse moves; the class cursor alone
+            // would repaint the arrow on every `WM_SETCURSOR`.
+            if (lparam.0 as usize & 0xFFFF) as u32 == HTCLIENT && wait_cursor_active() {
+                if let Ok(cursor) = unsafe { LoadCursorW(None, IDC_WAIT) } {
+                    unsafe { SetCursor(Some(cursor)) };
+                    return LRESULT(1);
+                }
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
         }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
     }
@@ -411,6 +427,7 @@ unsafe extern "system" fn sentinel_wndproc(
         // Reap a child that exited immediately after launch; the worker
         // has already stored or cleared the handle.
         let _ = settings_child_alive();
+        wait_cursor_reconcile();
         return LRESULT(0);
     }
     if msg == WM_DISPLAYCHANGE {
