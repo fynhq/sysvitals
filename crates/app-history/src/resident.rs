@@ -252,15 +252,24 @@ pub(crate) fn run_resident(cx: &mut App) {
             gpu_attached = set_gpu_windowed(cx, false).await;
         }
 
+        // The click that launched this process publishes its request before
+        // CreateProcessW returns, so the first pass must not sleep: a pending
+        // open would otherwise wait up to one idle poll (250 ms) doing
+        // nothing.
+        let mut first_pass = true;
         loop {
-            let poll_ms = if window.is_some() {
-                ACTIVE_POLL_MS
+            if first_pass {
+                first_pass = false;
             } else {
-                IDLE_POLL_MS
-            };
-            cx.background_executor()
-                .timer(Duration::from_millis(poll_ms))
-                .await;
+                let poll_ms = if window.is_some() {
+                    ACTIVE_POLL_MS
+                } else {
+                    IDLE_POLL_MS
+                };
+                cx.background_executor()
+                    .timer(Duration::from_millis(poll_ms))
+                    .await;
+            }
 
             let snapshot = cx.update(|_app| shared.snapshot());
             if parent.exited() {
@@ -407,6 +416,29 @@ pub(crate) fn run_resident(cx: &mut App) {
                         }
                     }
                     continue;
+                }
+                if !activated && activation_attempts > 0 {
+                    // GPUI's `activate()` spawns the task that does the
+                    // actual SetForegroundWindow, so the check right after
+                    // the call is always false. Re-check on every active
+                    // poll (100 ms) instead of waiting for the next retry
+                    // slot, which would delay `visible` by up to 500 ms.
+                    let active_now = cx.update(|app| {
+                        handle
+                            .update(app, |_view, window, _| window.is_window_active())
+                            .unwrap_or(false)
+                    });
+                    if active_now {
+                        activated = true;
+                        shared.set_visible(true);
+                        log_event(
+                            "INFO",
+                            &format!(
+                                "history: popup shown in {}ms (activation attempts {activation_attempts})",
+                                elapsed_ms()
+                            ),
+                        );
+                    }
                 }
                 if !activated {
                     let ready = first_load
