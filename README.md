@@ -8,7 +8,7 @@
 
 SysVitals is a lightweight CPU / memory / network monitor for the Windows taskbar and macOS menu bar. It shows live percentages and transfer rates, follows system font, DPI, and light/dark appearance, and opens a CPU / memory history chart when clicked.
 
-The status bar is thin native code; settings and history run as separate GPUI processes, keeping the resident indicator small — about 9 MB on Windows 11 and 18 MB on macOS (Apple Silicon), release build with default settings. It runs on Windows 10 2004+ / 11 (x64, arm64) and macOS 13+ (Apple Silicon, Intel).
+The status bar is thin native code; settings and history run as separate GPUI processes, keeping the resident indicator small — about 2.1 MB on Windows 11, release build with default settings. It runs on Windows 10 2004+ / 11 (x64, arm64) and macOS 13+ (Apple Silicon, Intel).
 
 English | [中文](#chinese)
 
@@ -68,7 +68,7 @@ Released under the MIT License. See [LICENSE](LICENSE).
 
 SysVitals 是常驻 Windows 任务栏 / macOS 菜单栏的轻量 CPU、内存、网速监控：实时显示占用百分比与上下行速度，字号、DPI 与亮暗跟随系统，点击即可查看 CPU / 内存历史走势图。
 
-状态栏由轻量原生代码绘制，设置与走势图为独立 GPUI 进程，常驻指示器约 9 MB（Windows 11）/ 18 MB（macOS Apple Silicon）。支持 Windows 10 2004+ / 11（x64 / arm64）与 macOS 13+（Apple Silicon / Intel）。
+状态栏由轻量原生代码绘制，设置与走势图为独立 GPUI 进程，常驻指示器约 2.1 MB（Windows 11）。支持 Windows 10 2004+ / 11（x64 / arm64）与 macOS 13+（Apple Silicon / Intel）。
 
 [English](#english) | 中文
 
