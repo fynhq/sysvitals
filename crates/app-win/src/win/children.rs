@@ -302,7 +302,7 @@ pub(crate) fn launch_settings(hwnd: HWND) {
                         let _ = unsafe { CloseHandle(handle) };
                         log_event("INFO", "settings launch cancelled by quit");
                     } else {
-                        unsafe { set_settings_pid(handle) };
+                        set_settings_pid(handle);
                         *SETTINGS_PROCESS.lock().unwrap_or_else(|e| e.into_inner()) =
                             Some(handle.0 as isize);
                         // Record the monitor only after the process is

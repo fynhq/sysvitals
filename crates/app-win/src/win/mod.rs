@@ -49,13 +49,11 @@ use sysvitals_core::{
 // lives in `sysvitals-support` so the overlay and the GPUI panels cannot
 // drift apart.
 use sysvitals_support::{hkcu_dword, log_event, os_build_number, taskbar_al, utf16};
-use windows::core::{Interface, PCWSTR};
+use windows::core::{Interface, BOOL, PCWSTR};
 use windows::Win32::Foundation::{
     CloseHandle, ERROR_FILE_NOT_FOUND, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
-use windows::Win32::Foundation::{
-    BOOL, COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM,
-};
+use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
 use windows::Win32::Graphics::Gdi::{
     CreateCompatibleDC, CreateDIBSection, CreateFontW, DeleteDC, DeleteObject, DrawTextW, GetDC,
