@@ -951,6 +951,12 @@ pub(crate) fn restart_self() {
         "\"{}\" -n 3 127.0.0.1 >nul & start \"\" \"%SYSVITALS_RESTART_EXE%\"",
         ping.display()
     );
+    // `cmd /c` whose first character is a quote and whose text contains
+    // special characters (`&`, `>`) strips the leading quote and the *last*
+    // quote of the whole line, corrupting the ping token and failing before
+    // `start` ever runs (observed: exit code 1, no relaunch). One extra
+    // wrapping pair is what cmd strips instead, leaving the script intact.
+    let script = format!("\"{script}\"");
     let spawned = Command::new(cmd)
         .arg("/c")
         // cmd.exe does not use C-runtime quoting; append the script verbatim so
