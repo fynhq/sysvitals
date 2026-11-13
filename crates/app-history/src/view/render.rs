@@ -13,8 +13,20 @@ fn ease_out_cubic(t: f32) -> f32 {
     1.0 - (1.0 - t).powi(3)
 }
 
-fn legend_entry(color: Hsla, name: String, value: String, fg: Hsla) -> impl IntoElement {
+/// One legend row: colored dot + series name + latest value. Exposed as a
+/// named group so the value is reachable without reading the painted text.
+fn legend_entry(
+    id: &'static str,
+    color: Hsla,
+    name: String,
+    value: String,
+    fg: Hsla,
+) -> impl IntoElement {
+    let a11y_label = format!("{name}: {value}");
     h_flex()
+        .id(id)
+        .role(Role::Group)
+        .aria_label(a11y_label)
         .gap_1()
         .items_center()
         .child(div().w(px(8.)).h(px(8.)).rounded(px(4.)).bg(color))
@@ -188,7 +200,11 @@ impl Render for HistoryView {
         let current_range = self.range;
 
         // Build range buttons individually to avoid borrow issues with cx.listener.
-        let mut range_buttons = h_flex().gap_1();
+        let mut range_buttons = h_flex()
+            .id("range-group")
+            .role(Role::Group)
+            .aria_label(t(lang, "chart.a11y.range"))
+            .gap_1();
         for r in TimeRange::ALL {
             let is_active = r == current_range;
             let label = r.label(lang).to_string();
@@ -196,6 +212,7 @@ impl Render for HistoryView {
                 .small()
                 .rounded(px(CONTROL_RADIUS))
                 .when(is_active, |b| b.primary())
+                .toggled(is_active)
                 .label(label)
                 .on_click(cx.listener(move |this: &mut Self, _: &ClickEvent, _, cx| {
                     this.range = r;
@@ -231,7 +248,8 @@ impl Render for HistoryView {
             .small()
             .rounded(px(CONTROL_RADIUS))
             .disabled(copy_disabled)
-            .tooltip(copy_tip)
+            .tooltip(copy_tip.clone())
+            .accessibility_label(copy_tip)
             .when(copied, |b| {
                 b.icon(IconName::CircleCheck)
                     .text_color(hsla(150.0 / 360.0, 0.7, 0.45, 1.0))
@@ -247,6 +265,10 @@ impl Render for HistoryView {
             .items_center()
             .child(
                 div()
+                    .id("chart-heading")
+                    .role(Role::Heading)
+                    .aria_level(1)
+                    .aria_label(t(lang, "chart.title"))
                     .text_sm()
                     .font_semibold()
                     .child(t(lang, "chart.title").to_string()),
@@ -433,51 +455,87 @@ impl Render for HistoryView {
         .top_0()
         .left_0()
         .size_full();
-        let mut merged_chart = div()
-            .flex_1()
-            .relative()
-            .child(axis_overlay)
-            .child(
-                AreaChart::new(points)
-                    // The x value is only used for axis/tooltip text; the
-                    // library's ScalePoint projects by index. `points()`
-                    // makes that index correspond to a bucket slot.
-                    .x(|p: &ChartPoint| p.ts.to_string())
-                    .y(|p: &ChartPoint| p.cpu)
-                    .stroke(cpu_color())
-                    .fill(transparent_color())
-                    .name(t(lang, "chart.cpu").to_string())
-                    .y(|p: &ChartPoint| p.mem)
-                    .stroke(mem_color())
-                    .fill(transparent_color())
-                    .name(t(lang, "chart.mem").to_string())
-                    // A degenerate domain disables the library's own series
-                    // (the library draws one unbroken path and cannot skip a
-                    // padded slot). The chart is kept for its axes, hover
-                    // crosshair and tooltip; the visible lines are painted per
-                    // contiguous run by `series_overlay` below.
-                    .y_domain(0.0, 0.0)
-                    .y_padding(0.0, 0.0)
-                    .x_axis(true)
-                    .x_tick_count(0)
-                    .y_axis(true)
-                    .y_tick_format(|_| "")
-                    .y_tick_count(Y_TICK_COUNT)
-                    .grid(true)
-                    .appear(false)
-                    .tooltip_title(|p: &ChartPoint| format_ts_full(p.ts).into())
-                    .tooltip_value(|p: &ChartPoint, _series: usize, v: f64| {
-                        if p.has_data {
-                            format!("{v:.1}%").into()
-                        } else {
-                            "--".into()
-                        }
-                    }),
-            )
-            .child(series_overlay);
+        // The painted chart has no text nodes of its own, so the whole plot
+        // is exposed as one image with the range and the latest values in its
+        // accessible name/description. This is what lets screen readers and
+        // UI-automation based capture tools identify the chart at all.
+        let range_label = current_range.label(lang).to_string();
+        let chart_label = t(lang, "chart.a11y.chart").to_string();
+        let chart_description = match latest {
+            Some(_) => format!(
+                "{} {} · {} {} {} / {} {}",
+                t(lang, "chart.a11y.range"),
+                range_label,
+                t(lang, "chart.latest"),
+                t(lang, "chart.cpu"),
+                cpu_value,
+                t(lang, "chart.mem"),
+                mem_value
+            ),
+            None => format!("{} {}", t(lang, "chart.a11y.range"), range_label),
+        };
+        let mut merged_chart = div().flex_1().relative().child(
+            div()
+                .id("history-chart")
+                .role(Role::Image)
+                .aria_label(chart_label)
+                .aria_description(chart_description)
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .child(axis_overlay)
+                .child(
+                    AreaChart::new(points)
+                        // The x value is only used for axis/tooltip text; the
+                        // library's ScalePoint projects by index. `points()`
+                        // makes that index correspond to a bucket slot.
+                        .x(|p: &ChartPoint| p.ts.to_string())
+                        .y(|p: &ChartPoint| p.cpu)
+                        .stroke(cpu_color())
+                        .fill(transparent_color())
+                        .name(t(lang, "chart.cpu").to_string())
+                        .y(|p: &ChartPoint| p.mem)
+                        .stroke(mem_color())
+                        .fill(transparent_color())
+                        .name(t(lang, "chart.mem").to_string())
+                        // A degenerate domain disables the library's own series
+                        // (the library draws one unbroken path and cannot skip a
+                        // padded slot). The chart is kept for its axes, hover
+                        // crosshair and tooltip; the visible lines are painted per
+                        // contiguous run by `series_overlay` below.
+                        .y_domain(0.0, 0.0)
+                        .y_padding(0.0, 0.0)
+                        .x_axis(true)
+                        .x_tick_count(0)
+                        .y_axis(true)
+                        .y_tick_format(|_| "")
+                        .y_tick_count(Y_TICK_COUNT)
+                        .grid(true)
+                        .appear(false)
+                        .tooltip_title(|p: &ChartPoint| format_ts_full(p.ts).into())
+                        .tooltip_value(|p: &ChartPoint, _series: usize, v: f64| {
+                            if p.has_data {
+                                format!("{v:.1}%").into()
+                            } else {
+                                "--".into()
+                            }
+                        }),
+                )
+                .child(series_overlay),
+        );
         let status_color = cx.theme().foreground.opacity(0.6);
+        let status_is_error = !loading && data_error && empty;
         if let Some((title, hint)) = status {
             let mut message = v_flex()
+                .id("chart-status")
+                .role(if status_is_error {
+                    Role::Alert
+                } else {
+                    Role::Status
+                })
+                .aria_label(title.clone())
+                .when_some(hint.clone(), |this, hint| this.aria_description(hint))
                 .gap_1()
                 .items_center()
                 .w_full()
@@ -522,12 +580,14 @@ impl Render for HistoryView {
                     .gap_4()
                     .items_center()
                     .child(legend_entry(
+                        "legend-cpu",
                         cpu_color(),
                         t(lang, "chart.cpu").to_string(),
                         cpu_value,
                         fg,
                     ))
                     .child(legend_entry(
+                        "legend-mem",
                         mem_color(),
                         t(lang, "chart.mem").to_string(),
                         mem_value,
@@ -535,7 +595,15 @@ impl Render for HistoryView {
                     )),
             );
         if let Some(note) = latest_note {
-            legend = legend.child(div().text_xs().text_color(fg.opacity(0.55)).child(note));
+            legend = legend.child(
+                div()
+                    .id("chart-latest")
+                    .role(Role::Label)
+                    .aria_value(note.clone())
+                    .text_xs()
+                    .text_color(fg.opacity(0.55))
+                    .child(note),
+            );
         }
 
         v_flex()

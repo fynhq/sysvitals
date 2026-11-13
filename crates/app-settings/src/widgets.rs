@@ -4,13 +4,29 @@ use super::*;
 
 /// A section heading: WinUI group headers are 12px semibold and muted.
 /// A muted 16px icon anchors the left edge of each group, matching the
-/// single-color row icons below.
-pub(crate) fn section_label(text: String, icon: IconName, dim: Hsla) -> impl IntoElement {
+/// single-color row icons below. The text is a level-2 heading in the
+/// accessibility tree (level 1 is the window title).
+pub(crate) fn section_label(
+    id: String,
+    text: String,
+    icon: IconName,
+    dim: Hsla,
+) -> impl IntoElement {
     h_flex()
         .items_center()
         .gap_2()
         .child(Icon::new(icon).text_color(dim))
-        .child(div().text_xs().font_semibold().text_color(dim).child(text))
+        .child(
+            div()
+                .id(id)
+                .role(Role::Heading)
+                .aria_level(2)
+                .aria_label(text.clone())
+                .text_xs()
+                .font_semibold()
+                .text_color(dim)
+                .child(text),
+        )
 }
 
 /// A grouped option surface. Windows keeps the WinUI card (8px radius plus
@@ -54,16 +70,22 @@ pub(crate) fn card_divider(dark: bool, scale_factor: f32) -> Div {
     div().h(px(hairline)).w_full().bg(color)
 }
 
-/// A section heading paired with its card at the tight 4px label gap.
+/// A section heading paired with its card at the tight 4px label gap. The
+/// wrapper is an accessibility group so assistive technology (and UI
+/// automation based capture tools) can see the settings page as a set of
+/// named modules instead of one flat list.
 pub(crate) fn settings_section(
+    id: &'static str,
     title: String,
     icon: IconName,
     card: impl IntoElement,
     dim: Hsla,
 ) -> impl IntoElement {
     v_flex()
+        .id(id)
+        .role(Role::Group)
         .gap_1()
-        .child(section_label(title, icon, dim))
+        .child(section_label(format!("{id}-heading"), title, icon, dim))
         .child(card)
 }
 
@@ -76,14 +98,19 @@ pub(crate) fn blur_on_outside(element: Div) -> Div {
 
 /// A labelled control row: a muted single-color icon and title on the left,
 /// a wrapped tile group on the right. Centered vertically like a WinUI
-/// settings row.
+/// settings row. The title is exposed as a text node and the row as a group,
+/// so the control keeps its own accessible name while the module stays
+/// identifiable.
 pub(crate) fn labeled_row(
+    id: &'static str,
     title: String,
     icon: IconName,
     control: impl IntoElement,
     dim: Hsla,
 ) -> impl IntoElement {
     h_flex()
+        .id(id)
+        .role(Role::Group)
         .justify_between()
         .items_center()
         .gap_4()
@@ -93,19 +120,28 @@ pub(crate) fn labeled_row(
                 .items_center()
                 .gap_2()
                 .child(Icon::new(icon).text_color(dim))
-                .child(title),
+                .child(
+                    div()
+                        .id(format!("{id}-title"))
+                        .role(Role::Label)
+                        .aria_value(title.clone())
+                        .child(title),
+                ),
         )
         .child(control)
 }
 
 /// A labelled on/off row with the WinUI row height.
 pub(crate) fn switch_row(
+    id: &'static str,
     title: String,
     icon: IconName,
     control: impl IntoElement,
     dim: Hsla,
 ) -> impl IntoElement {
     h_flex()
+        .id(id)
+        .role(Role::Group)
         .justify_between()
         .items_center()
         .py_2()
@@ -114,15 +150,22 @@ pub(crate) fn switch_row(
                 .items_center()
                 .gap_2()
                 .child(Icon::new(icon).text_color(dim))
-                .child(title),
+                .child(
+                    div()
+                        .id(format!("{id}-title"))
+                        .role(Role::Label)
+                        .aria_value(title.clone())
+                        .child(title),
+                ),
         )
         .child(control)
 }
 
 /// A setting whose control is unavailable on this host. The title stays
 /// readable while the note explains *why* it is missing — disappearing rows
-/// make a settings page feel broken.
+/// make a settings page feel broken. Both texts are exposed individually.
 pub(crate) fn disabled_row(
+    id: &'static str,
     title: String,
     icon: IconName,
     note: String,
@@ -130,6 +173,8 @@ pub(crate) fn disabled_row(
     faint: Hsla,
 ) -> impl IntoElement {
     v_flex()
+        .id(id)
+        .role(Role::Group)
         .py_2()
         .gap_1()
         .child(
@@ -137,14 +182,30 @@ pub(crate) fn disabled_row(
                 .items_center()
                 .gap_2()
                 .child(Icon::new(icon).text_color(faint))
-                .child(div().text_color(dim).child(title)),
+                .child(
+                    div()
+                        .id(format!("{id}-title"))
+                        .role(Role::Label)
+                        .aria_value(title.clone())
+                        .text_color(dim)
+                        .child(title),
+                ),
         )
-        .child(div().text_xs().text_color(faint).child(note))
+        .child(
+            div()
+                .id(format!("{id}-note"))
+                .role(Role::Label)
+                .aria_value(note.clone())
+                .text_xs()
+                .text_color(faint)
+                .child(note),
+        )
 }
 
 /// Inline error surface for a failed config write. It sits in the fixed
 /// header above the scroll area (not a toast) so the message stays visible
-/// while the user edits controls further down the page.
+/// while the user edits controls further down the page. Exposed as an alert
+/// with the hint as its description.
 pub(crate) fn error_banner(title: String, hint: String, dark: bool) -> impl IntoElement {
     let (fg, bg, border) = if dark {
         (
@@ -160,6 +221,10 @@ pub(crate) fn error_banner(title: String, hint: String, dark: bool) -> impl Into
         )
     };
     h_flex()
+        .id("save-error")
+        .role(Role::Alert)
+        .aria_label(title.clone())
+        .aria_description(hint.clone())
         .w_full()
         .items_start()
         .gap_2()
@@ -193,13 +258,13 @@ pub(crate) const REPO_URL: &str = env!("CARGO_PKG_REPOSITORY");
 /// text input. Takes the entity by reference so the render borrow survives
 /// the child call. The input carries a live `n/8` counter at its right edge:
 /// the stored value is truncated on commit, but the user should see the limit
-/// while typing.
+/// while typing. The caption names the input for assistive technology.
 pub(crate) fn prefix_cell(
+    id: &'static str,
     label: String,
     icon: IconName,
     input: &Entity<InputState>,
-    label_color: Hsla,
-    count_color: Hsla,
+    (label_color, count_color): (Hsla, Hsla),
     count: usize,
     control: Option<(Hsla, Hsla, f32)>,
 ) -> impl IntoElement {
@@ -209,7 +274,7 @@ pub(crate) fn prefix_cell(
     } else {
         count_color
     };
-    let mut field = Input::new(input).w_full().suffix(
+    let mut field = Input::new(input).w_full().aria_label(label.clone()).suffix(
         div()
             .text_xs()
             .text_color(count_color)
@@ -219,6 +284,8 @@ pub(crate) fn prefix_cell(
         field = field.bg(bg).border_color(border).rounded(px(radius));
     }
     v_flex()
+        .id(id)
+        .role(Role::Group)
         .flex_1()
         .gap_1()
         .child(
@@ -226,7 +293,15 @@ pub(crate) fn prefix_cell(
                 .items_center()
                 .gap_1()
                 .child(Icon::new(icon).text_color(label_color))
-                .child(div().text_xs().text_color(label_color).child(label)),
+                .child(
+                    div()
+                        .id(format!("{id}-title"))
+                        .role(Role::Label)
+                        .aria_value(label.clone())
+                        .text_xs()
+                        .text_color(label_color)
+                        .child(label),
+                ),
         )
         .child(blur_on_outside(div().w_full()).child(field))
 }

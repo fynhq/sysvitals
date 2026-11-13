@@ -186,16 +186,22 @@ pub(crate) fn mac_select_popup(
 /// The macOS dropdown trigger: the same filled control look as the GPUI
 /// Select, but clicking it raises a native menu instead of an in-window
 /// popover. Width is owned by the caller so all three dropdowns keep their
-/// existing layout slots.
+/// existing layout slots. The trigger is a button named after its setting,
+/// with the selected value as its accessible value.
 #[cfg(target_os = "macos")]
 pub(crate) fn mac_select_trigger(
     id: &'static str,
     label: String,
+    a11y_label: String,
     style: MacSelectStyle,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     h_flex()
         .id(id)
+        .role(Role::Button)
+        .aria_label(a11y_label)
+        .aria_value(label.clone())
+        .aria_expanded(false)
         .w_full()
         .h(px(32.))
         .px(px(10.))

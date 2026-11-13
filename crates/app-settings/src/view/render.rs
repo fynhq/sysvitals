@@ -77,6 +77,8 @@ impl Render for SettingsView {
                     .small()
                     .rounded(px(CONTROL_RADIUS))
                     .when(active, |b| b.primary())
+                    .accessibility_label(Language::ALL[i].label())
+                    .toggled(active)
                     .label(Language::ALL[i].label().to_string())
                     .on_click(cx.listener(
                         move |this: &mut Self,
@@ -110,6 +112,7 @@ impl Render for SettingsView {
                     .small()
                     .rounded(px(CONTROL_RADIUS))
                     .when(active, |b| b.primary())
+                    .toggled(active)
                     .label(text)
                     .on_click(cx.listener(
                         move |this: &mut Self,
@@ -141,7 +144,11 @@ impl Render for SettingsView {
                     .rounded(px(CONTROL_RADIUS))
                     .when(active, |b| b.primary())
                     .icon(THEME_ICONS[i].clone())
-                    .tooltip(tip)
+                    .tooltip(tip.clone())
+                    // Icon-only: the tooltip is the only visible name, and
+                    // Button exposes it as the description, not the name.
+                    .accessibility_label(tip)
+                    .toggled(active)
                     .on_click(cx.listener(
                         move |this: &mut Self,
                               _: &ClickEvent,
@@ -184,12 +191,21 @@ impl Render for SettingsView {
         };
         let show_margin = (self.layout_available && self.anchor_idx == 1 && !self.vertical_taskbar)
             || self.vertical_taskbar;
+        let margin_title = if self.vertical_taskbar {
+            t(lang, "settings.top_margin").to_string()
+        } else {
+            t(lang, "settings.left_margin").to_string()
+        };
         #[cfg(windows)]
-        let mut spacing_select = Select::new(&self.spacing_select);
+        let mut spacing_select =
+            Select::new(&self.spacing_select).accessibility_label(t(lang, "settings.item_spacing"));
         #[cfg(windows)]
-        let mut margin_select = Select::new(&self.margin_select).disabled(!show_margin);
+        let mut margin_select = Select::new(&self.margin_select)
+            .disabled(!show_margin)
+            .accessibility_label(margin_title.clone());
         #[cfg(windows)]
-        let mut anchor_select = Select::new(&self.anchor_select);
+        let mut anchor_select =
+            Select::new(&self.anchor_select).accessibility_label(t(lang, "settings.anchor"));
         #[cfg(windows)]
         if let Some((bg, border, radius)) = control {
             spacing_select = spacing_select
@@ -230,6 +246,7 @@ impl Render for SettingsView {
         let spacing_control = div().w(px(140.)).child(mac_select_trigger(
             "spacing-trigger",
             spacing_items()[self.spacing_idx].clone(),
+            t(lang, "settings.item_spacing").to_string(),
             mac_style,
             cx.listener(|this, _, _, cx| {
                 mac_select_popup(cx, spacing_items(), this.spacing_idx, |view, index| {
@@ -241,6 +258,7 @@ impl Render for SettingsView {
         let margin_control = div().w(px(140.)).child(mac_select_trigger(
             "margin-trigger",
             margin_items()[self.margin_idx].clone(),
+            margin_title.clone(),
             mac_style,
             cx.listener(move |this, _, _, cx| {
                 if show_margin {
@@ -254,6 +272,7 @@ impl Render for SettingsView {
         let anchor_control = div().w(px(140.)).child(mac_select_trigger(
             "anchor-trigger",
             anchor_items(self.current_lang())[self.anchor_idx].clone(),
+            t(lang, "settings.anchor").to_string(),
             mac_style,
             cx.listener(|this, _, _, cx| {
                 mac_select_popup(
@@ -323,6 +342,7 @@ impl Render for SettingsView {
 
         let general_card = settings_card(card_bg, card_border)
             .child(labeled_row(
+                "row-language",
                 t(lang, "settings.language").to_string(),
                 IconName::Globe,
                 lang_row,
@@ -330,6 +350,7 @@ impl Render for SettingsView {
             ))
             .child(card_divider(dark, scale_factor))
             .child(labeled_row(
+                "row-interval",
                 t(lang, "settings.sample_interval").to_string(),
                 IconName::RefreshCw,
                 interval_row,
@@ -337,10 +358,12 @@ impl Render for SettingsView {
             ))
             .child(card_divider(dark, scale_factor))
             .child(switch_row(
+                "row-autostart",
                 t(lang, "settings.auto_start").to_string(),
                 IconName::Play,
                 Switch::new("auto-start")
                     .checked(self.auto_start)
+                    .accessibility_label(t(lang, "settings.auto_start").to_string())
                     .on_click(cx.listener(|this, checked: &bool, _, cx| {
                         this.auto_start = *checked;
                         this.auto_start_touched = true;
@@ -355,7 +378,22 @@ impl Render for SettingsView {
         // back (the old guard flipped it without telling anyone).
         let resources_last = self.show_resources && !self.show_network;
         let network_last = self.show_network && !self.show_resources;
-        let mut resources_switch = Switch::new("show-res").checked(self.show_resources);
+        let keep_one_hint = t(lang, "settings.keep_one_hint");
+        // A disabled switch tells the screen reader nothing about why it
+        // cannot be changed, so the reason is folded into its name.
+        let resources_label = if resources_last {
+            format!("{} — {keep_one_hint}", t(lang, "settings.show_resources"))
+        } else {
+            t(lang, "settings.show_resources").to_string()
+        };
+        let network_label = if network_last {
+            format!("{} — {keep_one_hint}", t(lang, "settings.show_network"))
+        } else {
+            t(lang, "settings.show_network").to_string()
+        };
+        let mut resources_switch = Switch::new("show-res")
+            .checked(self.show_resources)
+            .accessibility_label(resources_label);
         if resources_last {
             resources_switch = resources_switch
                 .disabled(true)
@@ -367,7 +405,9 @@ impl Render for SettingsView {
                 this.save(cx);
                 cx.notify();
             }));
-        let mut network_switch = Switch::new("show-net").checked(self.show_network);
+        let mut network_switch = Switch::new("show-net")
+            .checked(self.show_network)
+            .accessibility_label(network_label);
         if network_last {
             network_switch = network_switch
                 .disabled(true)
@@ -385,6 +425,7 @@ impl Render for SettingsView {
         if cfg!(not(target_os = "macos")) {
             display_card = display_card
                 .child(labeled_row(
+                    "row-theme",
                     t(lang, "settings.theme").to_string(),
                     IconName::Palette,
                     theme_row,
@@ -394,10 +435,12 @@ impl Render for SettingsView {
         }
         display_card = display_card
             .child(switch_row(
+                "row-dual-row",
                 t(lang, "settings.dual_row").to_string(),
                 IconName::GalleryVerticalEnd,
                 Switch::new("dual-row")
                     .checked(self.dual_row)
+                    .accessibility_label(t(lang, "settings.dual_row").to_string())
                     .on_click(cx.listener(|this, checked: &bool, _, cx| {
                         this.dual_row = *checked;
                         this.save(cx);
@@ -407,6 +450,7 @@ impl Render for SettingsView {
             ))
             .child(card_divider(dark, scale_factor))
             .child(switch_row(
+                "row-resources",
                 t(lang, "settings.show_resources").to_string(),
                 IconName::Cpu,
                 resources_switch,
@@ -414,6 +458,7 @@ impl Render for SettingsView {
             ))
             .child(card_divider(dark, scale_factor))
             .child(switch_row(
+                "row-network",
                 t(lang, "settings.show_network").to_string(),
                 IconName::Network,
                 network_switch,
@@ -425,6 +470,7 @@ impl Render for SettingsView {
         // unavailable (Windows with left-aligned taskbar icons), or is
         // omitted where the platform has no anchor choice (macOS).
         let mut layout_card = settings_card(card_bg, card_border).child(labeled_row(
+            "row-spacing",
             t(lang, "settings.item_spacing").to_string(),
             IconName::Frame,
             spacing_control,
@@ -434,6 +480,7 @@ impl Render for SettingsView {
             layout_card = layout_card
                 .child(card_divider(dark, scale_factor))
                 .child(labeled_row(
+                    "row-anchor",
                     t(lang, "settings.anchor").to_string(),
                     IconName::PanelLeft,
                     anchor_control,
@@ -443,6 +490,7 @@ impl Render for SettingsView {
             layout_card = layout_card
                 .child(card_divider(dark, scale_factor))
                 .child(disabled_row(
+                    "row-anchor",
                     t(lang, "settings.anchor").to_string(),
                     IconName::PanelLeft,
                     t(lang, "settings.anchor_requires_centered").to_string(),
@@ -457,11 +505,8 @@ impl Render for SettingsView {
         // select is disabled while hidden so a zero-height clipped row cannot
         // become an invisible tab stop.
         let margin_row = labeled_row(
-            if self.vertical_taskbar {
-                t(lang, "settings.top_margin").to_string()
-            } else {
-                t(lang, "settings.left_margin").to_string()
-            },
+            "row-margin",
+            margin_title,
             if self.vertical_taskbar {
                 IconName::ArrowUp
             } else {
@@ -501,20 +546,20 @@ impl Render for SettingsView {
                     h_flex()
                         .gap_4()
                         .child(prefix_cell(
+                            "prefix-cpu",
                             t(lang, "settings.cpu").to_string(),
                             IconName::Cpu,
                             &self.prefix_cpu,
-                            dim,
-                            faint,
+                            (dim, faint),
                             prefix_cpu_count,
                             control,
                         ))
                         .child(prefix_cell(
+                            "prefix-mem",
                             t(lang, "settings.mem").to_string(),
                             IconName::MemoryStick,
                             &self.prefix_mem,
-                            dim,
-                            faint,
+                            (dim, faint),
                             prefix_mem_count,
                             control,
                         )),
@@ -523,20 +568,20 @@ impl Render for SettingsView {
                     h_flex()
                         .gap_4()
                         .child(prefix_cell(
+                            "prefix-upload",
                             t(lang, "settings.upload").to_string(),
                             IconName::ArrowUp,
                             &self.prefix_up,
-                            dim,
-                            faint,
+                            (dim, faint),
                             prefix_up_count,
                             control,
                         ))
                         .child(prefix_cell(
+                            "prefix-download",
                             t(lang, "settings.download").to_string(),
                             IconName::ArrowDown,
                             &self.prefix_down,
-                            dim,
-                            faint,
+                            (dim, faint),
                             prefix_down_count,
                             control,
                         )),
@@ -552,24 +597,28 @@ impl Render for SettingsView {
             .text_size(px(14.))
             .overflow_y_scrollbar()
             .child(settings_section(
+                "section-general",
                 t(lang, "settings.general").to_string(),
                 IconName::Settings,
                 general_card,
                 dim,
             ))
             .child(settings_section(
+                "section-display",
                 t(lang, "settings.display").to_string(),
                 IconName::LayoutDashboard,
                 display_card,
                 dim,
             ))
             .child(settings_section(
+                "section-layout",
                 t(lang, "settings.layout").to_string(),
                 IconName::PanelBottom,
                 layout_card,
                 dim,
             ))
             .child(settings_section(
+                "section-prefixes",
                 t(lang, "settings.prefixes").to_string(),
                 IconName::CaseSensitive,
                 prefix_card,
@@ -584,6 +633,9 @@ impl Render for SettingsView {
                 h_flex().mt_auto().pt_2().justify_center().child(
                     div()
                         .id("version-link")
+                        .role(Role::Link)
+                        .aria_label(format!("SysVitals {SV_BUILD_ID}"))
+                        .aria_description(REPO_URL)
                         .text_xs()
                         .text_color(faint)
                         .cursor_pointer()
@@ -605,6 +657,11 @@ impl Render for SettingsView {
         // centered 34px header and native traffic lights; Windows renders the
         // component title bar (caption drag + window controls) with a
         // transparent background, making the caption part of the page.
+        // The visible page title doubles as the top-level heading for
+        // assistive technology; the native window title already names the
+        // window itself.
+        #[allow(unused_variables)]
+        let title_text = t(lang, "settings.title").to_string();
         #[cfg(target_os = "macos")]
         let mut root = v_flex().size_full().child(
             h_flex()
@@ -615,10 +672,14 @@ impl Render for SettingsView {
                 .justify_center()
                 .child(
                     div()
+                        .id("window-heading")
+                        .role(Role::Heading)
+                        .aria_level(1)
+                        .aria_label(title_text.clone())
                         .text_size(px(13.))
                         .font_semibold()
                         .text_color(cx.theme().foreground.opacity(0.9))
-                        .child(t(lang, "settings.title").to_string()),
+                        .child(title_text),
                 ),
         );
         #[cfg(windows)]
@@ -630,10 +691,14 @@ impl Render for SettingsView {
                 .border_color(hsla(0., 0., 0., 0.))
                 .child(
                     div()
+                        .id("window-heading")
+                        .role(Role::Heading)
+                        .aria_level(1)
+                        .aria_label(title_text.clone())
                         .text_size(px(13.))
                         .font_semibold()
                         .text_color(cx.theme().foreground.opacity(0.9))
-                        .child(t(lang, "settings.title").to_string()),
+                        .child(title_text),
                 ),
         );
         #[cfg(not(any(windows, target_os = "macos")))]
