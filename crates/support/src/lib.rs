@@ -6,6 +6,8 @@
 //! drifting copies; the GPUI theme layer (`sysvitals-panel`) re-exports
 //! these so panel call sites stay unchanged.
 
+use std::sync::{Arc, OnceLock};
+
 /// Local date (`YYYY-MM-DD`) and time (`HH:MM:SS.mmm`) for log stamps, from
 /// chrono's local clock. The display layers used to format these per
 /// platform (`GetLocalTime` on Windows, `NSDate` on macOS); one clock keeps
@@ -38,6 +40,41 @@ pub fn log_sanitize_issues(prefix: &str, issues: &[sysvitals_core::config::Sanit
             &format!("{prefix} {}: {}", issue.field, issue.message),
         );
     }
+}
+
+/// Queue one sample for the background history writer. Both platform
+/// indicators used to carry an identical copy of this closure/slot plumbing;
+/// the log sink is cached here so each sample costs only an `Arc` clone.
+pub fn record_history_sample(
+    slot: &mut sysvitals_core::HistoryWriterSlot,
+    cfg: &sysvitals_core::Config,
+    now: i64,
+    snapshot: &sysvitals_core::Snapshot,
+) {
+    static LOG: OnceLock<sysvitals_core::history_writer::LogFn> = OnceLock::new();
+    let log = LOG
+        .get_or_init(|| Arc::new(|level: &str, message: &str| log_event(level, message)))
+        .clone();
+    let _ = slot.record(
+        now,
+        snapshot.cpu_pct,
+        snapshot.mem_pct,
+        cfg.history.retention_days,
+        log,
+    );
+}
+
+/// Shared failure line for a platform login-startup apply. The platform owns
+/// the retry cooldown and the side effect; this only keeps the message and
+/// wording identical on Windows and macOS.
+pub fn log_auto_start_failure(desired: bool, error: &str) {
+    log_event(
+        "WARN",
+        &format!(
+            "auto-start {} failed: {error}",
+            if desired { "enable" } else { "disable" }
+        ),
+    );
 }
 
 /// Rust panic hook writing the panic (with location and backtrace) to the
