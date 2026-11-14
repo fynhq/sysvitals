@@ -275,7 +275,7 @@ pub(crate) fn run_resident(cx: &mut App) {
                         snapshot.anchor[3],
                     ),
                 ),
-                monitor: (snapshot.monitor != 0).then(|| snapshot.monitor as u64),
+                monitor: (snapshot.monitor != 0).then_some(snapshot.monitor as u64),
             };
 
             // Execute actions until the policy has nothing more to do right
