@@ -51,9 +51,11 @@ const VACUUM_AFTER_ROWS: usize = 100_000;
 /// Per-connection page cache, in KiB (negative `PRAGMA cache_size` means
 /// KiB). The default is 2,000 KiB; the history workload is a single-row
 /// insert every sample plus a few bounded range scans, so a 512 KiB cache is
-/// ample. Two live connections exist at most (the indicator's writer and an
-/// open popup's reader), and each one otherwise keeps its default cache
-/// resident for its whole lifetime.
+/// ample. At least two live connections exist (the indicator's writer and an
+/// open popup's long-lived reader); a wide popup query may temporarily open a
+/// third read-only connection while the long-lived one stays open, so the
+/// worst case is three 512 KiB caches, and each connection otherwise keeps
+/// its default cache resident for its whole lifetime.
 const PAGE_CACHE_KIB: i64 = 512;
 
 /// One aggregated bucket for charting: the bucket's start timestamp plus the
@@ -232,17 +234,23 @@ impl Store {
         if !needs_backfill {
             return Ok(true);
         }
-        // Aggregate raw history into the rollup. Take an immediate
+        // Aggregate raw history into the rollup. Only minutes that have no
+        // rollup row yet are inserted: an existing minute may contain samples
+        // that raw pruning already removed, so replacing it with the surviving
+        // raw rows would skew its average and sample count. Take an immediate
         // transaction (with a longer wait than the steady 250 ms) so a
         // concurrently opening process waits instead of interleaving with
-        // this rewrite; `INSERT OR REPLACE` makes a repeated run harmless.
+        // this rewrite; `INSERT OR IGNORE` makes a repeated run harmless.
         conn.busy_timeout(Duration::from_secs(10))?;
         let backfill = (|| -> anyhow::Result<()> {
             let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
             tx.execute(
-                "INSERT OR REPLACE INTO samples_1m (ts, cpu_sum, mem_sum, n)
+                "INSERT OR IGNORE INTO samples_1m (ts, cpu_sum, mem_sum, n)
                  SELECT (ts / 60) * 60, SUM(cpu), SUM(mem), COUNT(*)
-                 FROM samples
+                 FROM samples s
+                 WHERE NOT EXISTS (
+                     SELECT 1 FROM samples_1m b WHERE b.ts = (s.ts / 60) * 60
+                 )
                  GROUP BY 1",
                 [],
             )?;
@@ -383,25 +391,17 @@ impl Store {
         bucket: i64,
         offset_secs: i64,
     ) -> anyhow::Result<Vec<Bucket>> {
-        let mut stmt = self.conn.prepare(
+        self.query_buckets(
             "SELECT ((ts + ?4) / ?3) * ?3 - ?4 AS b, AVG(cpu), AVG(mem)
              FROM samples
              WHERE ts >= ?1 AND ts <= ?2
              GROUP BY b
              ORDER BY b",
-        )?;
-        let rows = stmt.query_map(params![from, to, bucket, offset_secs], |row| {
-            Ok(Bucket {
-                ts: row.get(0)?,
-                cpu: row.get(1)?,
-                mem: row.get(2)?,
-            })
-        })?;
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r?);
-        }
-        Ok(out)
+            from,
+            to,
+            bucket,
+            offset_secs,
+        )
     }
 
     /// Aggregate one-minute rollup rows with sample-count weighting. The
@@ -414,7 +414,7 @@ impl Store {
         bucket: i64,
         offset_secs: i64,
     ) -> anyhow::Result<Vec<Bucket>> {
-        let mut stmt = self.conn.prepare(
+        self.query_buckets(
             "SELECT ((ts + ?4) / ?3) * ?3 - ?4 AS b,
                     SUM(cpu_sum) / SUM(n),
                     SUM(mem_sum) / SUM(n)
@@ -422,7 +422,25 @@ impl Store {
              WHERE ts >= ?1 AND ts <= ?2
              GROUP BY b
              ORDER BY b",
-        )?;
+            from,
+            to,
+            bucket,
+            offset_secs,
+        )
+    }
+
+    /// Shared prepare/query/collect path for the raw and rollup bucket
+    /// queries. Both SQL statements use `?1=from`, `?2=to`, `?3=bucket`,
+    /// `?4=offset` and return `(bucket_start, cpu, mem)`.
+    fn query_buckets(
+        &self,
+        sql: &str,
+        from: i64,
+        to: i64,
+        bucket: i64,
+        offset_secs: i64,
+    ) -> anyhow::Result<Vec<Bucket>> {
+        let mut stmt = self.conn.prepare(sql)?;
         let rows = stmt.query_map(params![from, to, bucket, offset_secs], |row| {
             Ok(Bucket {
                 ts: row.get(0)?,
@@ -431,8 +449,8 @@ impl Store {
             })
         })?;
         let mut out = Vec::new();
-        for r in rows {
-            out.push(r?);
+        for row in rows {
+            out.push(row?);
         }
         Ok(out)
     }
@@ -781,6 +799,43 @@ mod tests {
             .query_row("SELECT SUM(n) FROM samples_1m", [], |row| row.get(0))
             .unwrap();
         assert_eq!(total, 3);
+    }
+
+    #[test]
+    fn healing_does_not_replace_an_existing_partial_rollup_minute() {
+        // A minute at the raw-retention boundary may already have a rollup
+        // row that includes samples raw pruning removed. A healing pass
+        // triggered by another missing minute must not replace that minute
+        // with the surviving raw rows.
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE samples (ts INTEGER PRIMARY KEY, cpu REAL NOT NULL, mem REAL NOT NULL);
+             CREATE TABLE samples_1m (
+                 ts INTEGER PRIMARY KEY, cpu_sum REAL NOT NULL,
+                 mem_sum REAL NOT NULL, n INTEGER NOT NULL
+             );
+             INSERT INTO samples (ts, cpu, mem) VALUES (60, 10.0, 20.0), (65, 30.0, 40.0);
+             INSERT INTO samples_1m (ts, cpu_sum, mem_sum, n) VALUES (60, 75.0, 90.0, 3);
+             INSERT INTO samples (ts, cpu, mem) VALUES (120, 5.0, 6.0);",
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION)
+            .unwrap();
+        assert!(Store::init_schema(&mut conn).unwrap());
+        let rows: Vec<(i64, f64, f64, i64)> = {
+            let mut stmt = conn
+                .prepare("SELECT ts, cpu_sum, mem_sum, n FROM samples_1m ORDER BY ts")
+                .unwrap();
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        assert_eq!(
+            rows,
+            vec![(60, 75.0, 90.0, 3), (120, 5.0, 6.0, 1)],
+            "the existing partial minute must stay authoritative"
+        );
     }
 
     #[test]
