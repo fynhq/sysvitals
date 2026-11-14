@@ -4,14 +4,6 @@ use super::*;
 
 // ------------------------------------------------------- resident mode (Windows)
 
-/// How long the resident framework may stay without a window before it exits
-/// entirely. The indicator relaunches it on the next click; staying warm
-/// across a short gap keeps repeated opens instant, exiting after ten quiet
-/// minutes releases the GPUI heap and the text system. The DirectX device is
-/// released much earlier: every closed popup drops it immediately.
-#[cfg(windows)]
-const IDLE_EXIT: Duration = Duration::from_secs(10 * 60);
-
 /// The command/status block created by the indicator. The resident process
 /// keeps a read/write view of it for its whole lifetime; the one-shot macOS
 /// path never maps it.
@@ -168,14 +160,27 @@ async fn set_gpu_windowed(cx: &mut AsyncApp, windowed: bool) -> bool {
     }
 }
 
+#[cfg(windows)]
+fn anchor_rect(rect: sysvitals_core::layout::Rect) -> AnchorRect {
+    AnchorRect {
+        left: rect.left,
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+    }
+}
+
 /// Resident loop used on Windows: keep the process warm with no window, open
 /// a window only while the indicator asks for one, and trim the working set
-/// while idle. The DirectX device is released whenever no window exists and
-/// recreated on the next open; after ten idle minutes the process exits
-/// entirely. The window is created hidden and shown after its first chart
-/// load so the first visible frame already has data.
+/// while idle. The decisions live in `sysvitals_core::resident` and run in the
+/// Linux unit-test gate; this loop only executes the returned actions.
 #[cfg(windows)]
 pub(crate) fn run_resident(cx: &mut App) {
+    use sysvitals_core::resident::{
+        Action as ResidentAction, Observation as ResidentObservation, Request as ResidentRequest,
+        Resident,
+    };
+
     let Some(state) = open_history_state() else {
         log_event(
             "WARN",
@@ -214,94 +219,28 @@ pub(crate) fn run_resident(cx: &mut App) {
     );
 
     cx.spawn(async move |cx| {
+        let started = Instant::now();
+        let now = || started.elapsed();
+        let mut machine = Resident::new(now());
         let mut window: Option<AnyWindowHandle> = None;
         let mut first_load: Option<Arc<AtomicBool>> = None;
         let mut popup_size: Option<gpui_kit::Size<Pixels>> = None;
-        let mut activated = false;
-        let mut opened_at: Option<Instant> = None;
-        let mut last_activation_attempt: Option<Instant> = None;
-        let mut activation_attempts: u32 = 0;
-        let mut idle_since: Option<Instant> = Some(Instant::now());
-        // When the next working-set trim is due. `None` means "the 2 s first
-        // trim after going idle". The idle start itself is never reset by a
-        // trim, otherwise the ten-minute exit check could never fire.
-        let mut next_trim: Option<Instant> = None;
-        // Request generation that opened the current window. A blur/Esc
-        // dismissal records it as dismissed so the same request is not
-        // reopened while a newer click still gets through.
-        let mut open_generation = 0u32;
-        let mut dismissed_generation: Option<u32> = None;
-        // The anchor/monitor the current window was created for. A request
-        // that changes them while the window is still hidden must rebuild the
-        // hidden window; GPUI windows cannot be repositioned after creation.
-        let mut open_anchor: Option<AnchorRect> = None;
-        let mut open_monitor: Option<DisplayId> = None;
-        // Open (or reopen) a hidden popup at the request in `snapshot`. The
-        // shared theme patch is re-applied before every first paint so a
-        // system accent change while the popup was closed is picked up. Keep
-        // the Arc in the closure so it does not borrow the loop's `shared`
-        // across the async task.
+
+        // Open (or reopen) a hidden popup at the requested anchor. The shared
+        // theme patch is re-applied before every first paint so a system
+        // accent change while the popup was closed is picked up. Keep the Arc
+        // in the closure so it does not borrow the loop's `shared` across the
+        // async task.
         let open_shared = shared.clone();
-        let open_at = move |cx: &mut App, snapshot: &sysvitals_core::HistoryState| {
+        let open_at = move |cx: &mut App, anchor: Option<AnchorRect>, monitor: Option<DisplayId>| {
             apply_theme_and_accent(cx);
-            let anchor = snapshot.anchor_is_valid().then_some(AnchorRect {
-                left: snapshot.anchor[0],
-                top: snapshot.anchor[1],
-                right: snapshot.anchor[2],
-                bottom: snapshot.anchor[3],
-            });
-            let monitor =
-                (snapshot.monitor != 0).then_some(DisplayId::new(snapshot.monitor as u64));
             open_history_window(cx, anchor, monitor, true, Some(open_shared.clone()))
         };
-        // The app starts windowed, so GPUI has already created the DirectX
-        // device. When this resident was started without a pending click
-        // (manual `--resident`, or a relaunch after an idle exit), release it
-        // again right away. When the indicator launched us for a click,
-        // `desired_open` is already 1 and the first loop pass opens the window
-        // without paying a detach/attach cycle.
-        let mut gpu_attached = true;
-        if shared.snapshot().desired_open == 0 {
-            gpu_attached = set_gpu_windowed(cx, false).await;
-        }
 
         // The click that launched this process publishes its request before
         // CreateProcessW returns, so the first pass must not sleep: a pending
         // open would otherwise wait up to one idle poll (250 ms) doing
         // nothing.
-        // Window lifetime fields move together on every teardown path; keep
-        // the reset in one place so a new field cannot be forgotten in one of
-        // the branches.
-        macro_rules! clear_popup_fields {
-            () => {
-                window = None;
-                first_load = None;
-                popup_size = None;
-                open_anchor = None;
-                open_monitor = None;
-                activated = false;
-                opened_at = None;
-                last_activation_attempt = None;
-                activation_attempts = 0;
-            };
-        }
-        macro_rules! arm_popup {
-            ($handle:expr, $ready:expr, $size:expr, $anchor:expr, $monitor:expr, $generation:expr) => {
-                window = Some($handle);
-                first_load = Some($ready);
-                popup_size = $size;
-                open_anchor = $anchor;
-                open_monitor = $monitor;
-                activated = false;
-                opened_at = Some(Instant::now());
-                last_activation_attempt = None;
-                activation_attempts = 0;
-                open_generation = $generation;
-                dismissed_generation = None;
-                idle_since = None;
-                next_trim = None;
-            };
-        }
         let mut first_pass = true;
         loop {
             if first_pass {
@@ -324,315 +263,245 @@ pub(crate) fn run_resident(cx: &mut App) {
                 break;
             }
 
-            let windows = cx.update(|app| app.windows());
-            if let Some(handle) = window {
+            let request = ResidentRequest {
+                desired_open: snapshot.desired_open != 0,
+                generation: snapshot.generation,
+                visible: snapshot.visible != 0,
+                anchor: snapshot.anchor_is_valid().then(|| {
+                    sysvitals_core::layout::Rect::new(
+                        snapshot.anchor[0],
+                        snapshot.anchor[1],
+                        snapshot.anchor[2],
+                        snapshot.anchor[3],
+                    )
+                }),
+                monitor: (snapshot.monitor != 0).then(|| snapshot.monitor as u64),
+            };
+
+            // Execute actions until the policy has nothing more to do right
+            // now. Only a successful GPU attach requests another pass in the
+            // same tick: the open that follows it should not wait for the
+            // poll that would otherwise add 250 ms to a cold open.
+            'pump: loop {
+                let windows = cx.update(|app| app.windows());
                 // Blur/Esc and external closes remove the window behind the
-                // loop's back; the request flag normally arrives first.
-                if !windows.contains(&handle) {
+                // loop's back. Clearing the handle first makes the next tick
+                // take the "window is gone" branch that releases the device.
+                if window.is_some_and(|handle| !windows.contains(&handle)) {
                     log_event("INFO", "history: window dismissed");
-                    dismissed_generation = Some(open_generation);
-                    clear_popup_fields!();
-                    idle_since = Some(Instant::now());
-                    // The device and the working set are released below, so
-                    // the next routine trim is one 30 s beat away.
-                    next_trim = Some(Instant::now() + Duration::from_secs(30));
-                    shared.mark_hidden();
-                    // Blur/Esc removed the window behind the loop's back, so
-                    // GPUI itself may still hold the device and its VSync
-                    // thread. Release both while the process sits idle.
-                    gpu_attached = set_gpu_windowed(cx, false).await;
-                    trim_working_set();
-                    continue;
+                    window = None;
+                    first_load = None;
+                    popup_size = None;
                 }
-                if snapshot.desired_open == 0 {
-                    // `visible == 0` after activation means the view already
-                    // dismissed itself (blur/Esc) and its removal is in
-                    // flight; calling remove_window again could double-remove
-                    // it. A visible window, or one still waiting for its first
-                    // activation, was asked to close by the indicator.
-                    dismissed_generation = Some(snapshot.generation);
-                    // Set only when this loop actually destroyed the window.
-                    // A view that is already removing itself may still be
-                    // alive for a frame; releasing the device then would
-                    // break its teardown paint.
-                    let mut removed = false;
-                    if snapshot.visible != 0 || !activated {
-                        log_event("INFO", "history: window closed by indicator");
-                        removed = cx.update(|app| {
+                let observation = ResidentObservation {
+                    window_present: window.is_some_and(|handle| windows.contains(&handle)),
+                    any_window: !windows.is_empty(),
+                    window_active: window.is_some_and(|handle| {
+                        cx.update(|app| {
                             handle
-                                .update(app, |_, window, _| window.remove_window())
-                                .is_ok()
-                        });
-                        if !removed {
-                            log_event(
-                                "WARN",
-                                "history: remove_window failed; the hidden window may linger",
-                            );
-                        }
-                    }
-                    shared.mark_hidden();
-                    clear_popup_fields!();
-                    idle_since = Some(Instant::now());
-                    next_trim = Some(Instant::now() + Duration::from_secs(30));
-                    // Only release the device once the window is really gone;
-                    // a lingering hidden window still renders through it.
-                    if removed {
-                        gpu_attached = set_gpu_windowed(cx, false).await;
-                    }
-                    trim_working_set();
-                    continue;
-                }
-                // A new open request arrived while the window exists: either
-                // the indicator was clicked on another taskbar/monitor, or a
-                // second click arrived while the hidden window was still
-                // loading. If the window is still hidden and the request
-                // carries the same anchor, only re-arm the generation.
-                // Otherwise rebuild the hidden window at the new anchor;
-                // letting it activate at the old one would show the popup on
-                // the wrong display and desynchronize the indicator's toggle
-                // state.
-                if snapshot.generation != open_generation && snapshot.anchor_is_valid() {
-                    let anchor = AnchorRect {
-                        left: snapshot.anchor[0],
-                        top: snapshot.anchor[1],
-                        right: snapshot.anchor[2],
-                        bottom: snapshot.anchor[3],
-                    };
-                    let monitor =
-                        (snapshot.monitor != 0).then_some(DisplayId::new(snapshot.monitor as u64));
-                    let anchor_changed = Some(anchor) != open_anchor || monitor != open_monitor;
-                    if !activated && !anchor_changed {
-                        open_generation = snapshot.generation;
-                        dismissed_generation = None;
-                        continue;
-                    }
-                    log_event(
-                        "INFO",
-                        if activated {
-                            "history: indicator moved; reopening at the new anchor"
-                        } else {
-                            "history: request changed the anchor while the popup was hidden; reopening"
-                        },
-                    );
-                    let removed = cx.update(|app| {
-                        handle
-                            .update(app, |_, window, _| window.remove_window())
-                            .is_ok()
-                    });
-                    if !removed {
-                        log_event(
-                            "WARN",
-                            "history: remove_window failed before the move; continuing",
-                        );
-                    }
-                    let reopened = cx.update(|app| open_at(app, &snapshot));
-                    match reopened {
-                        Some((new_handle, ready, new_size)) => {
-                            arm_popup!(
-                                new_handle,
-                                ready,
-                                new_size,
-                                Some(anchor),
-                                monitor,
-                                snapshot.generation
-                            );
-                            // `visible` is published only once the window is
-                            // actually activated (or the 3 s fallback fires);
-                            // until then it is a pending request, not an open
-                            // popup.
-                        }
-                        None => {
-                            dismissed_generation = Some(snapshot.generation);
-                            shared.mark_hidden();
-                            clear_popup_fields!();
-                            log_event("WARN", "history: reopen at the new anchor failed");
-                        }
-                    }
-                    continue;
-                }
-                if !activated && activation_attempts > 0 {
-                    // GPUI's `activate()` spawns the task that does the
-                    // actual SetForegroundWindow, so the check right after
-                    // the call is always false. Re-check on every active
-                    // poll (100 ms) instead of waiting for the next retry
-                    // slot, which would delay `visible` by up to 500 ms.
-                    let active_now = cx.update(|app| {
-                        handle
-                            .update(app, |_view, window, _| window.is_window_active())
-                            .unwrap_or(false)
-                    });
-                    if active_now {
-                        activated = true;
-                        shared.set_visible(true);
-                        log_event(
-                            "INFO",
-                            &format!(
-                                "history: popup shown in {}ms (activation attempts {activation_attempts})",
-                                elapsed_ms()
-                            ),
-                        );
-                    }
-                }
-                if !activated {
-                    let ready = first_load
-                        .as_ref()
-                        .is_none_or(|flag| flag.load(Ordering::Acquire));
-                    let timed_out = opened_at.is_none_or(|opened| {
-                        opened.elapsed() > Duration::from_millis(1500)
-                    });
-                    // GPUI's Windows activate() injects a synthetic Alt press
-                    // to satisfy the foreground lock. Retrying every ~100ms
-                    // could send dozens of Alt events into the foreground
-                    // app, so cap the attempts and space them out. The 3s
-                    // fallback below still shows the window without
-                    // activation when the lock refuses us.
-                    let retry_due = activation_attempts < 3
-                        && last_activation_attempt
-                            .is_none_or(|last| last.elapsed() > Duration::from_millis(500));
-                    if (ready || timed_out) && retry_due {
-                        activation_attempts += 1;
-                        let active = cx.update(|app| {
-                            handle
-                                .update(app, |_view, window, _| {
-                                    window.activate_window();
-                                    window.is_window_active()
-                                })
+                                .update(app, |_view, window, _| window.is_window_active())
                                 .unwrap_or(false)
-                        });
-                        last_activation_attempt = Some(Instant::now());
-                        if active {
-                            activated = true;
+                        })
+                    }),
+                    first_load_ready: first_load
+                        .as_ref()
+                        .is_none_or(|flag| flag.load(Ordering::Acquire)),
+                };
+                let mut actions = Vec::new();
+                machine.tick(now(), request, observation, &mut actions);
+                if actions.is_empty() {
+                    break 'pump;
+                }
+                let mut pump_again = false;
+                for action in actions {
+                    match action {
+                        ResidentAction::Open {
+                            anchor,
+                            monitor,
+                            generation,
+                        } => {
+                            let opened = cx.update(|app| {
+                                open_at(app, anchor.map(anchor_rect), monitor.map(DisplayId::new))
+                            });
+                            match opened {
+                                Some((handle, ready, size)) => {
+                                    let size_px =
+                                        size.map(|s| (f32::from(s.width), f32::from(s.height)));
+                                    window = Some(handle);
+                                    first_load = Some(ready);
+                                    popup_size = size;
+                                    machine.opened(now(), generation, anchor, monitor, size_px);
+                                }
+                                None => {
+                                    window = None;
+                                    first_load = None;
+                                    popup_size = None;
+                                    // Do not retry this request every poll:
+                                    // the next click advances the generation.
+                                    shared.mark_hidden();
+                                    machine.open_failed(now(), generation);
+                                    log_event("WARN", "history: resident window open failed");
+                                }
+                            }
+                        }
+                        ResidentAction::Reopen {
+                            anchor,
+                            monitor,
+                            generation,
+                        } => {
+                            let activated = machine.is_activated();
+                            if let Some(old) = window {
+                                let removed = cx.update(|app| {
+                                    old.update(app, |_, window, _| window.remove_window())
+                                        .is_ok()
+                                });
+                                if !removed {
+                                    log_event(
+                                        "WARN",
+                                        "history: remove_window failed before the move; continuing",
+                                    );
+                                }
+                            }
+                            window = None;
+                            first_load = None;
+                            popup_size = None;
+                            log_event(
+                                "INFO",
+                                if activated {
+                                    "history: indicator moved; reopening at the new anchor"
+                                } else {
+                                    "history: request changed the anchor while the popup was hidden; reopening"
+                                },
+                            );
+                            let opened = cx.update(|app| {
+                                open_at(app, anchor.map(anchor_rect), monitor.map(DisplayId::new))
+                            });
+                            match opened {
+                                Some((handle, ready, size)) => {
+                                    let size_px =
+                                        size.map(|s| (f32::from(s.width), f32::from(s.height)));
+                                    window = Some(handle);
+                                    first_load = Some(ready);
+                                    popup_size = size;
+                                    machine.opened(now(), generation, anchor, monitor, size_px);
+                                    // `visible` is published only once the
+                                    // window is actually activated (or the
+                                    // 3 s fallback fires); until then it is a
+                                    // pending request, not an open popup.
+                                }
+                                None => {
+                                    shared.mark_hidden();
+                                    machine.open_failed(now(), generation);
+                                    log_event("WARN", "history: reopen at the new anchor failed");
+                                }
+                            }
+                        }
+                        ResidentAction::RemoveWindow => {
+                            if let Some(handle) = window {
+                                let removed = cx.update(|app| {
+                                    handle
+                                        .update(app, |_, window, _| window.remove_window())
+                                        .is_ok()
+                                });
+                                if removed {
+                                    log_event("INFO", "history: window closed by indicator");
+                                    // The handle is gone; the next tick sees
+                                    // `window_present == false` and releases
+                                    // the device.
+                                    window = None;
+                                    first_load = None;
+                                    popup_size = None;
+                                } else {
+                                    log_event(
+                                        "WARN",
+                                        "history: remove_window failed; the hidden window may linger",
+                                    );
+                                }
+                            }
+                        }
+                        ResidentAction::ActivateWindow => {
+                            if let Some(handle) = window {
+                                let _ = cx.update(|app| {
+                                    handle
+                                        .update(app, |_view, window, _| window.activate_window())
+                                });
+                            }
+                        }
+                        ResidentAction::Show => {
                             shared.set_visible(true);
                             log_event(
                                 "INFO",
                                 &format!(
-                                    "history: popup shown in {}ms (activation attempts {activation_attempts})",
-                                    elapsed_ms()
+                                    "history: popup shown in {}ms (activation attempts {})",
+                                    elapsed_ms(),
+                                    machine.activation_attempts()
                                 ),
                             );
                         }
-                    }
-                    if !activated
-                        && opened_at
-                            .is_some_and(|opened| opened.elapsed() > Duration::from_secs(3))
-                    {
-                        // The foreground lock kept refusing activation. Show
-                        // anyway so the chart is usable; Esc or an indicator
-                        // click still closes it, but click-away cannot be
-                        // armed. Log once for diagnosis.
-                        activated = true;
-                        shared.set_visible(true);
-                        // No activation edge means the view's observer never
-                        // ran, so restore the pre-move size here.
-                        if let Some(size) = popup_size {
-                            let _ = cx.update(|app| {
-                                handle.update(app, |_view, window, _| window.resize(size))
-                            });
+                        ResidentAction::ShowWithoutActivation => {
+                            shared.set_visible(true);
+                            // No activation edge means the view's observer
+                            // never ran, so restore the pre-move size here.
+                            if let (Some(handle), Some(size)) = (window, popup_size) {
+                                let _ = cx.update(|app| {
+                                    handle
+                                        .update(app, |_view, window, _| window.resize(size))
+                                });
+                            }
+                            log_event(
+                                "WARN",
+                                &format!(
+                                    "history: popup shown without activation after {}ms (attempts {})",
+                                    elapsed_ms(),
+                                    machine.activation_attempts()
+                                ),
+                            );
                         }
-                        log_event(
-                            "WARN",
-                            &format!(
-                                "history: popup shown without activation after {}ms (attempts {activation_attempts})",
-                                elapsed_ms()
-                            ),
-                        );
-                    }
-                }
-                continue;
-            }
-
-            if snapshot.desired_open != 0
-                && windows.is_empty()
-                && Some(snapshot.generation) != dismissed_generation
-            {
-                // The idle resident has no DirectX device; every window needs
-                // one. Recreate it before `open_window` builds its renderer.
-                if !gpu_attached {
-                    gpu_attached = set_gpu_windowed(cx, true).await;
-                }
-                if !gpu_attached {
-                    log_event(
-                        "WARN",
-                        "history: DirectX device unavailable; not opening the popup",
-                    );
-                    dismissed_generation = Some(snapshot.generation);
-                    shared.mark_hidden();
-                    continue;
-                }
-                let anchor = snapshot.anchor_is_valid().then_some(AnchorRect {
-                    left: snapshot.anchor[0],
-                    top: snapshot.anchor[1],
-                    right: snapshot.anchor[2],
-                    bottom: snapshot.anchor[3],
-                });
-                let monitor =
-                    (snapshot.monitor != 0).then_some(DisplayId::new(snapshot.monitor as u64));
-                let opened = cx.update(|app| open_at(app, &snapshot));
-                match opened {
-                    Some((handle, ready, size)) => {
-                        arm_popup!(handle, ready, size, anchor, monitor, snapshot.generation);
-                        // Visibility is published on the activation edge (or
-                        // the 3 s fallback), not at creation: the window is
-                        // still hidden here.
-                    }
-                    None => {
-                        // Do not retry this request every poll: the next click
-                        // advances the generation and re-arms the open path.
-                        dismissed_generation = Some(snapshot.generation);
-                        shared.mark_hidden();
-                        open_anchor = None;
-                        open_monitor = None;
-                        log_event("WARN", "history: resident window open failed");
-                    }
-                }
-            } else {
-                let now = Instant::now();
-                if idle_since.is_none() {
-                    idle_since = Some(now);
-                    next_trim = None;
-                }
-                let idle_for = idle_since.map_or(Duration::ZERO, |since| since.elapsed());
-                if idle_for > IDLE_EXIT {
-                    // A view that is removing itself may still own a window
-                    // for a frame; never tear the device down underneath it.
-                    if cx.update(|app| app.windows().is_empty()) {
-                        log_event(
-                            "INFO",
-                            &format!(
-                                "history: resident idle for {}s; exiting to release its heap",
-                                idle_for.as_secs()
-                            ),
-                        );
-                        // Tell the indicator which request this exit consumed;
-                        // a click that raced us carries a newer generation and
-                        // is relaunched instead of dropped.
-                        shared.mark_idle_exit(snapshot.generation);
-                        if gpu_attached {
-                            // The process is about to exit, so the returned
-                            // state would be dead on arrival.
-                            set_gpu_windowed(cx, false).await;
+                        ResidentAction::Hide => shared.mark_hidden(),
+                        ResidentAction::AttachGpu => {
+                            let attached = set_gpu_windowed(cx, true).await;
+                            machine.gpu_result(attached);
+                            if attached {
+                                pump_again = true;
+                            } else {
+                                machine.gpu_failed(now(), request.generation);
+                                shared.mark_hidden();
+                                log_event(
+                                    "WARN",
+                                    "history: DirectX device unavailable; not opening the popup",
+                                );
+                                break 'pump;
+                            }
                         }
-                        trim_working_set();
-                        cx.update(|app| app.quit());
-                        break;
+                        ResidentAction::ReleaseGpu => {
+                            let attached = set_gpu_windowed(cx, false).await;
+                            // A failed release leaves the device in place; the
+                            // next trim retries it.
+                            machine.gpu_result(attached);
+                        }
+                        ResidentAction::TrimWorkingSet => trim_working_set(),
+                        ResidentAction::IdleExit { generation } => {
+                            log_event(
+                                "INFO",
+                                &format!(
+                                    "history: resident idle for {}s; exiting to release its heap",
+                                    machine.idle_for(now()).as_secs()
+                                ),
+                            );
+                            // Tell the indicator which request this exit
+                            // consumed; a click that raced us carries a newer
+                            // generation and is relaunched instead of dropped.
+                            shared.mark_idle_exit(generation);
+                            cx.update(|app| app.quit());
+                            return;
+                        }
                     }
                 }
-                // First trim 2 s after going idle, then every 30 s. Blur/Esc
-                // may have removed the window without this loop seeing the
-                // handle disappear, so also drop the idle DirectX device once
-                // no window remains. The idle start is not reset here: the
-                // ten-minute exit above depends on it growing monotonically.
-                let trim_due = next_trim.map_or(idle_for > Duration::from_secs(2), |at| now >= at);
-                if trim_due {
-                    if gpu_attached && cx.update(|app| app.windows().is_empty()) {
-                        gpu_attached = set_gpu_windowed(cx, false).await;
-                    }
-                    trim_working_set();
-                    next_trim = Some(now + Duration::from_secs(30));
+                if !pump_again {
+                    break 'pump;
                 }
             }
         }
-
     })
     .detach();
 }
