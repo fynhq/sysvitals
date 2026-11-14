@@ -310,7 +310,7 @@ fn main() {
                     // conclusively not visible; otherwise keep the previous
                     // best-effort behavior.
                     if hwnd.is_some() {
-                        let _ = cx.update(|app| app.quit());
+                        cx.update(|app| app.quit());
                     }
                 }
             })

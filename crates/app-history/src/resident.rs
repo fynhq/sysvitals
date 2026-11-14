@@ -393,7 +393,7 @@ pub(crate) fn run_resident(cx: &mut App) {
                     };
                     let monitor =
                         (snapshot.monitor != 0).then_some(DisplayId::new(snapshot.monitor as u64));
-                    let anchor_changed = anchor != open_anchor || monitor != open_monitor;
+                    let anchor_changed = Some(anchor) != open_anchor || monitor != open_monitor;
                     if !activated && !anchor_changed {
                         open_generation = snapshot.generation;
                         dismissed_generation = None;

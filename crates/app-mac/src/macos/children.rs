@@ -212,24 +212,6 @@ pub(crate) fn launch_history() {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn only_a_fresh_child_is_treated_as_starting() {
-        assert!(!history_starting(None));
-        assert!(history_starting(Some(Duration::ZERO)));
-        assert!(history_starting(Some(
-            HISTORY_LAUNCH_GRACE - Duration::from_millis(1)
-        )));
-        assert!(!history_starting(Some(HISTORY_LAUNCH_GRACE)));
-        assert!(!history_starting(Some(
-            HISTORY_LAUNCH_GRACE + Duration::from_secs(1)
-        )));
-    }
-}
-
 /// Close the trend popup if one is running: the click-to-toggle half of
 /// `button_clicked:`. Kills the child and reaps it (`wait`) so no zombie
 /// lingers under the long-running indicator. Returns `true` when a live
@@ -308,4 +290,22 @@ pub(crate) fn restart_self() {
     let mtm = mtm();
     let app = NSApplication::sharedApplication(mtm);
     app.terminate(None);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_fresh_child_is_treated_as_starting() {
+        assert!(!history_starting(None));
+        assert!(history_starting(Some(Duration::ZERO)));
+        assert!(history_starting(Some(
+            HISTORY_LAUNCH_GRACE - Duration::from_millis(1)
+        )));
+        assert!(!history_starting(Some(HISTORY_LAUNCH_GRACE)));
+        assert!(!history_starting(Some(
+            HISTORY_LAUNCH_GRACE + Duration::from_secs(1)
+        )));
+    }
 }
