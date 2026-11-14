@@ -23,6 +23,7 @@ pub mod i18n;
 pub mod layout;
 pub mod logger;
 pub mod model;
+pub mod resident;
 pub mod sampler;
 pub mod store;
 
