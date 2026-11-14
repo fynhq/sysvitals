@@ -545,35 +545,43 @@ fn dir_join(parent: Option<&std::path::Path>, name: &str) -> PathBuf {
     }
 }
 
-/// Where the config file lives. Windows: `%APPDATA%\SysVitals\config.toml`;
-/// macOS: `~/Library/Application Support/SysVitals/config.toml`; Linux dev
+/// Where the config file lives. Windows:
+/// `%APPDATA%\SysVitals\config\config.toml`; macOS:
+/// `~/Library/Application Support/SysVitals/config.toml` (the `directories`
+/// crate applies the platform-specific project subdirectory). Linux dev
 /// falls back to the same helper's config dir.
 pub fn config_path() -> anyhow::Result<PathBuf> {
-    use directories::ProjectDirs;
-    let dirs = ProjectDirs::from("", "", "SysVitals")
-        .ok_or_else(|| anyhow::anyhow!("could not resolve project directories"))?;
+    let dirs = project_dirs()?;
     Ok(dirs.config_dir().join("config.toml"))
 }
 
 /// Where the history database lives. Windows:
-/// `%APPDATA%\SysVitals\history.db`; macOS:
+/// `%APPDATA%\SysVitals\data\history.db`; macOS:
 /// `~/Library/Application Support/SysVitals/history.db`. SQLite is the single
 /// source of truth for historical data; CSV is export-only.
 pub fn history_path() -> anyhow::Result<PathBuf> {
-    use directories::ProjectDirs;
-    let dirs = ProjectDirs::from("", "", "SysVitals")
-        .ok_or_else(|| anyhow::anyhow!("could not resolve project directories"))?;
+    let dirs = project_dirs()?;
     Ok(dirs.data_dir().join("history.db"))
 }
 
-/// The per-user data directory (`%APPDATA%\SysVitals` on Windows,
+/// The per-user data directory (`%APPDATA%\SysVitals\data` on Windows,
 /// `~/Library/Application Support/SysVitals` on macOS). Log files live under
 /// `<data_dir>/logs/` (see [`crate::logger`]).
 pub fn data_dir() -> anyhow::Result<PathBuf> {
-    use directories::ProjectDirs;
-    let dirs = ProjectDirs::from("", "", "SysVitals")
-        .ok_or_else(|| anyhow::anyhow!("could not resolve project directories"))?;
+    let dirs = project_dirs()?;
     Ok(dirs.data_dir().to_path_buf())
+}
+
+/// Resolve the project directories once per process. Every path helper used
+/// to construct `ProjectDirs` independently; logging calls `data_dir()` for
+/// every line, so the resolution is cached.
+fn project_dirs() -> anyhow::Result<&'static directories::ProjectDirs> {
+    use std::sync::OnceLock;
+
+    static DIRS: OnceLock<Option<directories::ProjectDirs>> = OnceLock::new();
+    DIRS.get_or_init(|| directories::ProjectDirs::from("", "", "SysVitals"))
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("could not resolve project directories"))
 }
 
 #[cfg(test)]
