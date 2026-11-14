@@ -137,7 +137,9 @@ pub(crate) fn settings_window_bounds(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    // Import explicitly: a glob of the crate root would also pull in GPUI's
+    // `test` module, which makes `#[test]` expand into its own test macro.
+    use super::{centered_on_work, fit_window_size, point, px, size, Bounds, Pixels, WindowBounds};
 
     fn work(width: f32, height: f32) -> Bounds<Pixels> {
         Bounds::new(point(px(0.0), px(0.0)), size(px(width), px(height)))

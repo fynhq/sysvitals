@@ -288,7 +288,9 @@ impl HistoryView {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    // Import explicitly: a glob of the crate root would also pull in GPUI's
+    // `test` module, which makes `#[test]` expand into its own test macro.
+    use super::{open_store_for_read, Store};
     use std::path::PathBuf;
 
     fn temp_database(tag: &str) -> PathBuf {

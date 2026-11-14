@@ -537,7 +537,12 @@ mod render;
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    // Import explicitly: a glob of the crate root would also pull in GPUI's
+    // `test` module, which makes `#[test]` expand into its own test macro.
+    use super::{
+        anchor_items, margin_items, spacing_items, t, Language, ALLOWED_ITEM_SPACING_PX,
+        ALLOWED_LEFT_MARGIN_PX,
+    };
 
     #[test]
     fn pixel_presets_match_the_allowed_values() {

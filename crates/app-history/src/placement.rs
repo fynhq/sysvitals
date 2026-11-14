@@ -50,7 +50,9 @@ pub(crate) fn anchor_origin(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    // Import explicitly: a glob of the crate root would also pull in GPUI's
+    // `test` module, which makes `#[test]` expand into its own test macro.
+    use super::{anchor_origin, point, px, size, AnchorRect, Bounds, Pixels};
 
     fn work(width: f32, height: f32) -> Bounds<Pixels> {
         Bounds::new(point(px(0.0), px(0.0)), size(px(width), px(height)))

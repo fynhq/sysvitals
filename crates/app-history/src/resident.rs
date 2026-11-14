@@ -267,14 +267,14 @@ pub(crate) fn run_resident(cx: &mut App) {
                 desired_open: snapshot.desired_open != 0,
                 generation: snapshot.generation,
                 visible: snapshot.visible != 0,
-                anchor: snapshot.anchor_is_valid().then(|| {
+                anchor: snapshot.anchor_is_valid().then_some(
                     sysvitals_core::layout::Rect::new(
                         snapshot.anchor[0],
                         snapshot.anchor[1],
                         snapshot.anchor[2],
                         snapshot.anchor[3],
-                    )
-                }),
+                    ),
+                ),
                 monitor: (snapshot.monitor != 0).then(|| snapshot.monitor as u64),
             };
 

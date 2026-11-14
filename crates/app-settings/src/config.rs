@@ -103,7 +103,9 @@ pub(crate) fn load_config_with_backup() -> (Config, bool) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    // Import explicitly: a glob of the crate root would also pull in GPUI's
+    // `test` module, which makes `#[test]` expand into its own test macro.
+    use super::backup_corrupt_config;
 
     fn temp_dir(tag: &str) -> std::path::PathBuf {
         let stamp = std::time::SystemTime::now()
