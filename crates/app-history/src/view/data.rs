@@ -285,3 +285,48 @@ impl HistoryView {
         .detach();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn temp_database(tag: &str) -> PathBuf {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        std::env::temp_dir().join(format!(
+            "sysvitals-history-test-{tag}-{}-{stamp}.db",
+            std::process::id()
+        ))
+    }
+
+    fn remove_database(path: &std::path::Path) {
+        let base = path.display().to_string();
+        for suffix in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{base}{suffix}"));
+        }
+    }
+
+    #[test]
+    fn a_missing_database_is_created_for_a_manual_launch() {
+        let path = temp_database("missing");
+        let store = open_store_for_read(&path).expect("a missing file opens as a new store");
+        drop(store);
+        assert!(path.exists(), "the chart needs a database to query");
+        remove_database(&path);
+    }
+
+    #[test]
+    fn an_existing_database_opens_without_a_write_migration() {
+        let path = temp_database("existing");
+        {
+            let store = Store::open(&path).expect("create the database");
+            drop(store);
+        }
+        let store = open_store_for_read(&path).expect("an existing file opens read-only");
+        drop(store);
+        remove_database(&path);
+    }
+}

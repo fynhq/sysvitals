@@ -47,3 +47,50 @@ pub(crate) fn anchor_origin(
 // `SetWindowPos` synchronously delivers `WM_MOVE`/`WM_SIZE`, which re-enter
 // GPUI's window callbacks while the app is already borrowed, panicking with
 // "RefCell already borrowed".
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn work(width: f32, height: f32) -> Bounds<Pixels> {
+        Bounds::new(point(px(0.0), px(0.0)), size(px(width), px(height)))
+    }
+
+    fn indicator(left: f32, top: f32) -> AnchorRect {
+        AnchorRect {
+            left,
+            top,
+            right: left + 100.0,
+            bottom: top + 40.0,
+        }
+    }
+
+    #[test]
+    fn a_bottom_taskbar_anchor_places_the_popup_above_the_work_area() {
+        let origin = anchor_origin(
+            &indicator(900.0, 1040.0),
+            680.0,
+            390.0,
+            &work(1920.0, 1040.0),
+        );
+        assert_eq!((f32::from(origin.x), f32::from(origin.y)), (610.0, 642.0));
+    }
+
+    #[test]
+    fn a_narrow_work_area_keeps_the_side_gap() {
+        let origin = anchor_origin(&indicator(0.0, 1040.0), 200.0, 390.0, &work(220.0, 1040.0));
+        assert_eq!(f32::from(origin.x), 8.0);
+    }
+
+    #[test]
+    fn an_anchor_outside_the_work_area_still_returns_a_usable_origin() {
+        let origin = anchor_origin(
+            &indicator(2000.0, 500.0),
+            680.0,
+            390.0,
+            &work(1920.0, 1040.0),
+        );
+        assert!(f32::from(origin.x) + 680.0 <= 1920.0);
+        assert!(f32::from(origin.y) + 390.0 <= 1040.0);
+    }
+}
