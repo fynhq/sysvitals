@@ -100,3 +100,50 @@ pub(crate) fn load_config_with_backup() -> (Config, bool) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        std::env::temp_dir().join(format!(
+            "sysvitals-settings-test-{tag}-{}-{stamp}",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn a_corrupt_config_is_moved_aside_not_deleted() {
+        let dir = temp_dir("corrupt");
+        std::fs::create_dir_all(&dir).expect("create the temp directory");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "not = [valid").expect("write the corrupt file");
+
+        let backup = backup_corrupt_config(&path, "test").expect("the rename succeeds");
+        assert!(!path.exists(), "the original name must be gone");
+        assert_eq!(
+            std::fs::read_to_string(&backup).expect("read the backup"),
+            "not = [valid"
+        );
+        assert!(backup
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .starts_with("config.toml.corrupt-"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_file_has_nothing_to_back_up() {
+        let dir = temp_dir("missing");
+        std::fs::create_dir_all(&dir).expect("create the temp directory");
+        let path = dir.join("config.toml");
+        assert!(backup_corrupt_config(&path, "test").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

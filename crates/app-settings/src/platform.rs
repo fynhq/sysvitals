@@ -134,3 +134,30 @@ pub(crate) fn settings_window_bounds(
     };
     centered_on_work(work, requested)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn work(width: f32, height: f32) -> Bounds<Pixels> {
+        Bounds::new(point(px(0.0), px(0.0)), size(px(width), px(height)))
+    }
+
+    #[test]
+    fn a_short_work_area_shrinks_the_settings_window() {
+        let fitted = fit_window_size(size(px(400.0), px(740.0)), work(1280.0, 600.0));
+        assert_eq!(f32::from(fitted.width), 400.0);
+        assert_eq!(f32::from(fitted.height), 568.0);
+    }
+
+    #[test]
+    fn centering_keeps_the_window_inside_the_work_area() {
+        let bounds = centered_on_work(work(1280.0, 600.0), size(px(400.0), px(740.0)));
+        let WindowBounds::Windowed(bounds) = bounds else {
+            panic!("the settings window is always windowed");
+        };
+        assert_eq!(f32::from(bounds.origin.x), 440.0);
+        assert_eq!(f32::from(bounds.origin.y), 16.0);
+        assert_eq!(f32::from(bounds.size.height), 568.0);
+    }
+}

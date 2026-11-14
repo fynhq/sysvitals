@@ -534,3 +534,32 @@ impl SettingsView {
 }
 
 mod render;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pixel_presets_match_the_allowed_values() {
+        let spacing = spacing_items();
+        assert_eq!(spacing.len(), ALLOWED_ITEM_SPACING_PX.len());
+        for (item, value) in spacing.iter().zip(ALLOWED_ITEM_SPACING_PX) {
+            assert_eq!(item, &format!("{value} px"));
+        }
+
+        let margins = margin_items();
+        assert_eq!(margins.len(), ALLOWED_LEFT_MARGIN_PX.len());
+        for (item, value) in margins.iter().zip(ALLOWED_LEFT_MARGIN_PX) {
+            assert_eq!(item, &format!("{value} px"));
+        }
+    }
+
+    #[test]
+    fn anchor_labels_follow_the_selected_language() {
+        let en = anchor_items(Language::En);
+        let zh = anchor_items(Language::Zh);
+        assert_eq!(en[0], t(Language::En, "anchor.right"));
+        assert_eq!(zh[1], t(Language::Zh, "anchor.left"));
+        assert_ne!(en, zh, "the two renders must not share one translation");
+    }
+}
