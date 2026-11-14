@@ -440,14 +440,6 @@ pub(crate) fn run_resident(cx: &mut App) {
                         }
                         ResidentAction::ShowWithoutActivation => {
                             shared.set_visible(true);
-                            // No activation edge means the view's observer
-                            // never ran, so restore the pre-move size here.
-                            if let (Some(handle), Some(size)) = (window, popup_size) {
-                                let _ = cx.update(|app| {
-                                    handle
-                                        .update(app, |_view, window, _| window.resize(size))
-                                });
-                            }
                             log_event(
                                 "WARN",
                                 &format!(
@@ -456,6 +448,16 @@ pub(crate) fn run_resident(cx: &mut App) {
                                     machine.activation_attempts()
                                 ),
                             );
+                        }
+                        ResidentAction::ResizeToStored => {
+                            // No activation edge means the view's observer
+                            // never ran, so restore the pre-move size here.
+                            if let (Some(handle), Some(size)) = (window, popup_size) {
+                                let _ = cx.update(|app| {
+                                    handle
+                                        .update(app, |_view, window, _| window.resize(size))
+                                });
+                            }
                         }
                         ResidentAction::Hide => shared.mark_hidden(),
                         ResidentAction::AttachGpu => {
