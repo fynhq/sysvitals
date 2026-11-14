@@ -45,24 +45,6 @@ pub(crate) fn reschedule_if_interval_changed() {
     APPLIED_INTERVAL_MS.set(interval_ms);
 }
 
-/// Enqueue the current CPU/MEM sample for the shared background history
-/// writer. The main RunLoop never opens or writes SQLite; a slow disk, an
-/// old-database rollup backfill, or a prune/VACUUM cannot freeze the menu
-/// bar.
-pub(crate) fn record_history(cfg: &Config, now: i64, snapshot: &sysvitals_core::Snapshot) {
-    let log: sysvitals_core::history_writer::LogFn =
-        Arc::new(|level: &str, message: &str| log_event(level, message));
-    HISTORY_WRITER.with(|slot| {
-        slot.borrow_mut().record(
-            now,
-            snapshot.cpu_pct,
-            snapshot.mem_pct,
-            cfg.history.retention_days,
-            log,
-        );
-    });
-}
-
 /// Sample metrics, record the history row, and update the indicator.
 pub(crate) fn tick() {
     reload_config_if_changed();
@@ -81,7 +63,9 @@ pub(crate) fn tick() {
         sampler.sample(now)
     });
 
-    record_history(&cfg, now, &snapshot);
+    HISTORY_WRITER.with(|slot| {
+        sysvitals_support::record_history_sample(&mut slot.borrow_mut(), &cfg, now, &snapshot);
+    });
 
     let row = format_frame(&snapshot, &cfg);
     render_indicator(&row, &cfg);

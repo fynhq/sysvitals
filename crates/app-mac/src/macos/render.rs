@@ -106,7 +106,7 @@ pub(crate) fn visible_metrics(cfg: &Config) -> Vec<Metric> {
 /// field across all unit tiers (see `RATE_RESERVE`).
 pub(crate) fn metric_reserve(metric: Metric, cfg: &Config, font: &Retained<NSFont>) -> f64 {
     let value = match metric {
-        Metric::Cpu | Metric::Mem => "100%",
+        Metric::Cpu | Metric::Mem => PERCENT_RESERVE,
         Metric::Up | Metric::Down => RATE_RESERVE,
     };
     make_run(&join_prefix(metric_prefix(metric, cfg), value), font).1
@@ -194,6 +194,19 @@ pub(crate) fn render_indicator(row: &FormattedRow, cfg: &Config) {
     // below shrinks it further only when the two line boxes exceed the
     // fixed bar height.
     let base = NSFont::menuBarFontOfSize(0.0);
+    // A cheap signature avoids building fonts/attributed strings when the
+    // sampled texts and layout inputs did not change. The final signature
+    // below still guards the actual image; this only skips the measurement
+    // work on a stable idle frame.
+    let input_signature = format!(
+        "{dual}|{spacing}|{img_h:.1}|{:.2}|{row:?}",
+        base.pointSize()
+    );
+    if RENDER_INPUT_SIGNATURE.with(|sig| *sig.borrow() == input_signature)
+        && STATUS_IMAGE.with(|image| image.borrow().is_some())
+    {
+        return;
+    }
     // Never shrink below the previous 0.75x baseline: if 0.8x cannot be
     // made to fit by tightening the line step, fall back to the known-good
     // size instead of ending up smaller than before.
@@ -216,21 +229,10 @@ pub(crate) fn render_indicator(row: &FormattedRow, cfg: &Config) {
     // light/dark inversion is automatic and per-item color is not a thing
     // on the menu bar (see the theme-picker removal in app-settings).
     if dual {
-        // 2x2 quadrant mirroring the Windows overlay's `measure_frame`:
-        // left column resources, right column network. When only one
-        // group is enabled, `format_frame` puts those metrics in the left
-        // column; mirror that split here so the reserved slots match.
-        let (left_metrics, right_metrics) =
-            if cfg.display.show_resources && cfg.display.show_network {
-                (
-                    vec![Metric::Cpu, Metric::Mem],
-                    vec![Metric::Up, Metric::Down],
-                )
-            } else if cfg.display.show_resources {
-                (vec![Metric::Cpu, Metric::Mem], Vec::new())
-            } else {
-                (vec![Metric::Up, Metric::Down], Vec::new())
-            };
+        // 2x2 quadrant: the grouping comes from `core::format::column_metrics`,
+        // the same function `format_frame` uses, so the reserved slots cannot
+        // drift from the rendered lines when the toggles change.
+        let (left_metrics, right_metrics) = column_metrics(cfg);
         for line in &row.lines {
             texts.push(line.left.clone());
             texts.push(line.right.clone());
@@ -405,6 +407,7 @@ pub(crate) fn render_indicator(row: &FormattedRow, cfg: &Config) {
         texts.join("\u{1}")
     );
     if DRAW_SIGNATURE.with(|s| *s.borrow() == sig) {
+        RENDER_INPUT_SIGNATURE.with(|s| *s.borrow_mut() = input_signature.clone());
         return;
     }
 
@@ -429,6 +432,7 @@ pub(crate) fn render_indicator(row: &FormattedRow, cfg: &Config) {
         *slot.borrow_mut() = Some(StatusImage { image, width });
     });
     DRAW_SIGNATURE.with(|s| *s.borrow_mut() = sig);
+    RENDER_INPUT_SIGNATURE.with(|s| *s.borrow_mut() = input_signature);
     apply_status_image();
     if !FIRST_FRAME_LOGGED.replace(true) {
         log_event("INFO", "startup: first frame applied");
@@ -445,6 +449,7 @@ pub(crate) fn render_indicator(row: &FormattedRow, cfg: &Config) {
 /// Force the next `render_indicator` pass to rebuild and remount the image.
 fn invalidate_draw_signature() {
     DRAW_SIGNATURE.with(|s| s.borrow_mut().clear());
+    RENDER_INPUT_SIGNATURE.with(|s| s.borrow_mut().clear());
 }
 
 /// Mount the pre-rendered template image and its reserved width. Called

@@ -1,6 +1,25 @@
 //! children: split out of `macos` (see `macos/mod.rs` for the module map).
 
 use super::*;
+use std::time::{Duration, Instant};
+
+/// How long a freshly spawned History process is treated as "starting" for
+/// click-toggle purposes. Killing a process that has not created its window
+/// yet makes a fast second click/double-click look like "nothing happened";
+/// ignoring the toggle during this window keeps the first launch alive.
+const HISTORY_LAUNCH_GRACE: Duration = Duration::from_secs(3);
+
+thread_local! {
+    /// When the current History child was spawned. `None` when no child was
+    /// spawned in this process (or it has been reaped).
+    static HISTORY_LAUNCHED_AT: std::cell::Cell<Option<Instant>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Whether a live History child is still inside its launch grace period.
+fn history_starting(elapsed: Option<Duration>) -> bool {
+    elapsed.is_some_and(|elapsed| elapsed < HISTORY_LAUNCH_GRACE)
+}
 
 /// Directory containing the running executable.
 pub(crate) fn exe_dir() -> Option<std::path::PathBuf> {
@@ -66,6 +85,7 @@ pub(crate) fn reap_children() {
         if let Some(child) = borrow.as_mut() {
             if matches!(child.try_wait(), Ok(Some(_))) {
                 *borrow = None;
+                HISTORY_LAUNCHED_AT.with(|launched| launched.set(None));
             }
         }
     });
@@ -185,9 +205,28 @@ pub(crate) fn launch_history() {
     append_anchor_args(&mut cmd);
     match cmd.spawn() {
         Ok(child) => {
+            HISTORY_LAUNCHED_AT.with(|launched| launched.set(Some(Instant::now())));
             HISTORY_CHILD.with(|slot| *slot.borrow_mut() = Some(child));
         }
         Err(e) => log_event("WARN", &format!("launch_history: spawn failed: {e}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_fresh_child_is_treated_as_starting() {
+        assert!(!history_starting(None));
+        assert!(history_starting(Some(Duration::ZERO)));
+        assert!(history_starting(Some(
+            HISTORY_LAUNCH_GRACE - Duration::from_millis(1)
+        )));
+        assert!(!history_starting(Some(HISTORY_LAUNCH_GRACE)));
+        assert!(!history_starting(Some(
+            HISTORY_LAUNCH_GRACE + Duration::from_secs(1)
+        )));
     }
 }
 
@@ -197,19 +236,54 @@ pub(crate) fn launch_history() {
 /// popup was closed; `false` when nothing was running (or it had already
 /// exited, which is reaped here so the slot is free for the next open).
 pub(crate) fn close_history() -> bool {
-    HISTORY_CHILD.with(|slot| terminate_child(slot, "history popup"))
+    let closed = HISTORY_CHILD.with(|slot| terminate_child(slot, "history popup"));
+    HISTORY_LAUNCHED_AT.with(|launched| launched.set(None));
+    closed
 }
 
-/// Open Activity Monitor (macOS equivalent of Task Manager). `status()`
-/// waits for the short-lived `open` helper, so it cannot leave a zombie.
+/// Toggle the history popup for a status-item click. A child that is still
+/// inside its launch grace period is left alone: GPUI has not created its
+/// window yet, so treating a second click as "close" would kill the first
+/// launch and leave the user with no popup at all (double-click / impatient
+/// second click).
+pub(crate) fn toggle_history() {
+    if HISTORY_CHILD.with(child_alive) {
+        let elapsed = HISTORY_LAUNCHED_AT.with(|launched| launched.get().map(|at| at.elapsed()));
+        if history_starting(elapsed) {
+            log_event(
+                "INFO",
+                "history: popup is still starting; ignoring toggle until its first window appears",
+            );
+            return;
+        }
+        if close_history() {
+            return;
+        }
+        // The child exited between the liveness check and the close; fall
+        // through and launch a fresh popup.
+    }
+    launch_history();
+}
+
+/// Open Activity Monitor (macOS equivalent of Task Manager). The `open`
+/// helper is short-lived, but `status()` would still block the menu-bar main
+/// thread while LaunchServices resolves the bundle. Spawn it and reap it on a
+/// detached thread so the click returns immediately and no zombie remains.
 pub(crate) fn open_activity_monitor() {
     // Resolve the system app by bundle id rather than its localized
     // display name; `open -b` works on non-English systems too.
-    if let Err(e) = std::process::Command::new("open")
+    match std::process::Command::new("open")
         .args(["-b", "com.apple.ActivityMonitor"])
-        .status()
+        .spawn()
     {
-        log_event("WARN", &format!("open Activity Monitor failed: {e}"));
+        Ok(mut child) => {
+            let _ = std::thread::Builder::new()
+                .name("sysvitals-open-activity".to_string())
+                .spawn(move || {
+                    let _ = child.wait();
+                });
+        }
+        Err(e) => log_event("WARN", &format!("open Activity Monitor failed: {e}")),
     }
 }
 

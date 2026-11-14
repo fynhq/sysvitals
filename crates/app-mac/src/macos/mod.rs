@@ -26,7 +26,6 @@ pub(crate) use tick::*;
 use std::cell::RefCell;
 use std::os::fd::AsRawFd;
 use std::process::Child;
-use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 // Shared process plumbing (daily-file logging, panic hook) lives in
@@ -48,8 +47,9 @@ use objc2_foundation::{
     NSRunLoop, NSRunLoopCommonModes, NSSize, NSString, NSTimer,
 };
 
-use sysvitals_core::config::config_path;
-use sysvitals_core::format::{format_frame, join_prefix};
+use sysvitals_core::format::{
+    column_metrics, format_frame, join_prefix, PERCENT_RESERVE, RATE_RESERVE,
+};
 use sysvitals_core::{
     t, Config, ConfigPoll, ConfigWatcher, FormattedRow, HistoryWriterSlot, Metric, Sampler,
 };
@@ -73,11 +73,9 @@ const DUAL_ROW_FONT_FACTOR: f64 = 0.8;
 /// block two points taller than the canvas.
 const DUAL_ROW_MIN_STEP_FACTOR: f64 = 0.95;
 
-/// Conservative upper bound for one rate cell. `format_rate` keeps the
-/// numeric field at most four characters per unit tier (including the
-/// 1024 rounding), and "M" is the widest tier letter, so measuring this
-/// string reserves every possible rate value for the current font.
-const RATE_RESERVE: &str = "8888 M/s";
+// Worst-case rate cell: `format_rate` keeps the numeric field at most four
+// characters per unit tier and "M" is the widest tier letter. The reserve
+// string lives in `core::format` so it cannot drift from the formatter.
 
 // ------------------------------------------------------------- diagnostics
 
@@ -213,6 +211,10 @@ thread_local! {
     /// all texts). `tick` compares it first and skips everything when the
     /// frame is identical — no rebuild, no redraw, no bitmap churn.
     static DRAW_SIGNATURE: RefCell<String> = const { RefCell::new(String::new()) };
+    /// Cheap input signature (texts + layout + font size) checked before the
+    /// expensive attributed-string measurement. Avoids rebuilding fonts/runs
+    /// when the sampled values did not change between ticks.
+    static RENDER_INPUT_SIGNATURE: RefCell<String> = const { RefCell::new(String::new()) };
     /// Last effective dual-row size after the height fit loop, so a
     /// requested-vs-effective font shrink is logged once rather than on
     /// every sample.
@@ -336,13 +338,10 @@ define_class!(
             } else {
                 // Any plain left click toggles the trend chart: a live
                 // popup is closed, otherwise a new one opens (matching the
-                // Windows overlay). There is no double-click branch and no
-                // deferral — Activity Monitor lives in the context menu's
-                // first item, so a left click never waits for a possible
-                // second press.
-                if !close_history() {
-                    launch_history();
-                }
+                // Windows overlay). A process that is still starting is
+                // ignored by the toggle so a double-click cannot kill the
+                // first launch before its window exists.
+                toggle_history();
             }
         }
 
@@ -479,36 +478,19 @@ pub(crate) fn run() {
         // Store the status item for the tick callback.
         STATUS_ITEM.with(|si| *si.borrow_mut() = Some(status_item));
 
-        // Load initial config and seed the mtime cache with the same read.
-        // Without the seed the first tick reloads the file and logs a
-        // spurious "config reloaded" line on every normal launch.
+        // Load initial config and seed the mtime cache only on success. A
+        // failed initial read leaves the watcher unseeded so the first tick
+        // retries (and recovers if the failure was transient); the reload
+        // path throttles its own log to one line per broken mtime.
         let mut initial_config_ok = false;
-        match config_path() {
-            Ok(path) => match Config::load_with_source(&path) {
-                Ok((cfg, issues, source)) => {
-                    log_config_issues(&issues);
-                    CONFIG.with(|c| *c.borrow_mut() = cfg);
-                    CONFIG_WATCHER.with(|w| w.borrow_mut().seed_now());
-                    initial_config_ok = source == sysvitals_core::config::ConfigSource::File;
-                }
-                Err(e) => {
-                    log_event(
-                        "WARN",
-                        &format!(
-                            "config load failed ({}): {e}; using defaults",
-                            path.display()
-                        ),
-                    );
-                    // Leave CONFIG_WATCHER unseeded so the first tick retries
-                    // (and recovers if the failure was transient); the reload
-                    // path throttles its own log to one line per broken mtime.
-                }
-            },
+        match CONFIG_WATCHER.with(|w| w.borrow_mut().load_initial()) {
+            Ok((cfg, issues, source)) => {
+                log_config_issues(&issues);
+                CONFIG.with(|c| *c.borrow_mut() = cfg);
+                initial_config_ok = source == sysvitals_core::config::ConfigSource::File;
+            }
             Err(e) => {
-                log_event(
-                    "WARN",
-                    &format!("config path unavailable: {e}; using defaults"),
-                );
+                log_event("WARN", &format!("config load failed: {e}; using defaults"));
             }
         }
 

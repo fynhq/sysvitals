@@ -165,13 +165,7 @@ pub(crate) fn apply_auto_start(cfg: &Config) {
             AUTO_START_RETRY_AT.with(|slot| {
                 slot.set(Some(Instant::now() + AUTO_START_RETRY_COOLDOWN));
             });
-            log_event(
-                "WARN",
-                &format!(
-                    "auto-start {} failed: {e}",
-                    if desired { "enable" } else { "disable" }
-                ),
-            );
+            sysvitals_support::log_auto_start_failure(desired, &e);
         }
     }
 }
