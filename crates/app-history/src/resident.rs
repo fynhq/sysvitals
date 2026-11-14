@@ -241,6 +241,29 @@ pub(crate) fn run_resident(cx: &mut App) {
         // reopened while a newer click still gets through.
         let mut open_generation = 0u32;
         let mut dismissed_generation: Option<u32> = None;
+        // The anchor/monitor the current window was created for. A request
+        // that changes them while the window is still hidden must rebuild the
+        // hidden window; GPUI windows cannot be repositioned after creation.
+        let mut open_anchor: Option<AnchorRect> = None;
+        let mut open_monitor: Option<DisplayId> = None;
+        // Open (or reopen) a hidden popup at the request in `snapshot`. The
+        // shared theme patch is re-applied before every first paint so a
+        // system accent change while the popup was closed is picked up. Keep
+        // the Arc in the closure so it does not borrow the loop's `shared`
+        // across the async task.
+        let open_shared = shared.clone();
+        let open_at = move |cx: &mut App, snapshot: &sysvitals_core::HistoryState| {
+            apply_theme_and_accent(cx);
+            let anchor = snapshot.anchor_is_valid().then_some(AnchorRect {
+                left: snapshot.anchor[0],
+                top: snapshot.anchor[1],
+                right: snapshot.anchor[2],
+                bottom: snapshot.anchor[3],
+            });
+            let monitor =
+                (snapshot.monitor != 0).then_some(DisplayId::new(snapshot.monitor as u64));
+            open_history_window(cx, anchor, monitor, true, Some(open_shared.clone()))
+        };
         // The app starts windowed, so GPUI has already created the DirectX
         // device. When this resident was started without a pending click
         // (manual `--resident`, or a relaunch after an idle exit), release it
@@ -288,6 +311,8 @@ pub(crate) fn run_resident(cx: &mut App) {
                     window = None;
                     first_load = None;
                     popup_size = None;
+                    open_anchor = None;
+                    open_monitor = None;
                     activated = false;
                     opened_at = None;
                     last_activation_attempt = None;
@@ -334,6 +359,8 @@ pub(crate) fn run_resident(cx: &mut App) {
                     window = None;
                     first_load = None;
                     popup_size = None;
+                    open_anchor = None;
+                    open_monitor = None;
                     activated = false;
                     opened_at = None;
                     last_activation_attempt = None;
@@ -348,22 +375,37 @@ pub(crate) fn run_resident(cx: &mut App) {
                     trim_working_set();
                     continue;
                 }
-                // A new open request arrived while the window is open: the
-                // indicator was clicked on a different taskbar/monitor. GPUI
-                // windows cannot be repositioned after creation, so reopen the
-                // popup anchored at the new indicator. While the window is
-                // still hidden and waiting for its first activation, a second
-                // click only re-arms the request; reopening would restart the
-                // first-load wait for no benefit.
+                // A new open request arrived while the window exists: either
+                // the indicator was clicked on another taskbar/monitor, or a
+                // second click arrived while the hidden window was still
+                // loading. If the window is still hidden and the request
+                // carries the same anchor, only re-arm the generation.
+                // Otherwise rebuild the hidden window at the new anchor;
+                // letting it activate at the old one would show the popup on
+                // the wrong display and desynchronize the indicator's toggle
+                // state.
                 if snapshot.generation != open_generation && snapshot.anchor_is_valid() {
-                    if !activated {
+                    let anchor = AnchorRect {
+                        left: snapshot.anchor[0],
+                        top: snapshot.anchor[1],
+                        right: snapshot.anchor[2],
+                        bottom: snapshot.anchor[3],
+                    };
+                    let monitor =
+                        (snapshot.monitor != 0).then_some(DisplayId::new(snapshot.monitor as u64));
+                    let anchor_changed = anchor != open_anchor || monitor != open_monitor;
+                    if !activated && !anchor_changed {
                         open_generation = snapshot.generation;
                         dismissed_generation = None;
                         continue;
                     }
                     log_event(
                         "INFO",
-                        "history: indicator moved; reopening at the new anchor",
+                        if activated {
+                            "history: indicator moved; reopening at the new anchor"
+                        } else {
+                            "history: request changed the anchor while the popup was hidden; reopening"
+                        },
                     );
                     let removed = cx.update(|app| {
                         handle
@@ -376,23 +418,14 @@ pub(crate) fn run_resident(cx: &mut App) {
                             "history: remove_window failed before the move; continuing",
                         );
                     }
-                    let anchor = AnchorRect {
-                        left: snapshot.anchor[0],
-                        top: snapshot.anchor[1],
-                        right: snapshot.anchor[2],
-                        bottom: snapshot.anchor[3],
-                    };
-                    let monitor =
-                        (snapshot.monitor != 0).then_some(DisplayId::new(snapshot.monitor as u64));
-                    let reopened = cx.update(|app| {
-                        apply_theme_and_accent(app);
-                        open_history_window(app, Some(anchor), monitor, true, Some(shared.clone()))
-                    });
+                    let reopened = cx.update(|app| open_at(app, &snapshot));
                     match reopened {
                         Some((new_handle, ready, new_size)) => {
                             window = Some(new_handle);
                             first_load = Some(ready);
                             popup_size = new_size;
+                            open_anchor = Some(anchor);
+                            open_monitor = monitor;
                             activated = false;
                             opened_at = Some(Instant::now());
                             last_activation_attempt = None;
@@ -412,6 +445,8 @@ pub(crate) fn run_resident(cx: &mut App) {
                             window = None;
                             first_load = None;
                             popup_size = None;
+                            open_anchor = None;
+                            open_monitor = None;
                             log_event("WARN", "history: reopen at the new anchor failed");
                         }
                     }
@@ -534,17 +569,14 @@ pub(crate) fn run_resident(cx: &mut App) {
                 });
                 let monitor =
                     (snapshot.monitor != 0).then_some(DisplayId::new(snapshot.monitor as u64));
-                let opened = cx.update(|app| {
-                    // The OS accent may have changed while the popup was
-                    // closed; re-apply before the first paint.
-                    apply_theme_and_accent(app);
-                    open_history_window(app, anchor, monitor, true, Some(shared.clone()))
-                });
+                let opened = cx.update(|app| open_at(app, &snapshot));
                 match opened {
                     Some((handle, ready, size)) => {
                         window = Some(handle);
                         first_load = Some(ready);
                         popup_size = size;
+                        open_anchor = anchor;
+                        open_monitor = monitor;
                         activated = false;
                         opened_at = Some(Instant::now());
                         last_activation_attempt = None;
@@ -562,6 +594,8 @@ pub(crate) fn run_resident(cx: &mut App) {
                         // advances the generation and re-arms the open path.
                         dismissed_generation = Some(snapshot.generation);
                         shared.mark_hidden();
+                        open_anchor = None;
+                        open_monitor = None;
                         log_event("WARN", "history: resident window open failed");
                     }
                 }
