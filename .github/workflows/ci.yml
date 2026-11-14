@@ -88,10 +88,10 @@ jobs:
         include:
           - os: windows-latest
             packages: "-p app-win -p app-settings -p app-history"
-            test_packages: "-p app-win"
+            test_packages: "-p app-win -p app-settings -p app-history"
           - os: macos-latest
             packages: "-p app-mac -p app-settings -p app-history"
-            test_packages: "-p app-mac"
+            test_packages: "-p app-mac -p app-settings -p app-history"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -148,8 +148,10 @@ jobs:
               else:
                   print(f"::error::{text}")
           PY
-      # Native unit tests for the platform crates. The GPUI panels have no
-      # tests yet; their test targets are still checked by clippy above.
+      # Native unit tests for the platform crates. They must not create a
+      # GPUI application or a window: the runners have no interactive desktop,
+      # so only the pure helpers, placement math and shared-memory state
+      # machine are exercised here. Real-window behavior stays in ACCEPTANCE.
       - name: Test platform crates
         run: cargo test --locked ${{ matrix.test_packages }}
 
