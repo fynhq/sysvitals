@@ -49,7 +49,7 @@ use sysvitals_panel::{
     spawn_accent_watch, InstanceLock, PanelSurface, CONTROL_RADIUS,
 };
 #[cfg(windows)]
-use sysvitals_panel::{preplace_hidden_window, taskbar_al, utf16, window_hwnd, window_is_visible};
+use sysvitals_panel::{preplace_hidden_window, taskbar_al, window_hwnd, window_is_visible};
 
 mod config;
 #[cfg(target_os = "macos")]

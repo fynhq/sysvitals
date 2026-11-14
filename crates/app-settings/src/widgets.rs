@@ -14,7 +14,7 @@ pub(crate) fn choice_button(id: String, active: bool) -> Button {
 
 /// Visible page title. It doubles as the top-level heading for assistive
 /// technology; the native window title is set separately.
-pub(crate) fn window_heading(title: String, color: Hsla) -> Div {
+pub(crate) fn window_heading(title: String, color: Hsla) -> impl IntoElement {
     div()
         .id("window-heading")
         .role(Role::Heading)

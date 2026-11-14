@@ -25,7 +25,7 @@ pub(crate) use tick::*;
 
 use std::cell::RefCell;
 use std::process::Child;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 // Shared process plumbing (daily-file logging, panic hook, single-instance
 // guard, build id) lives in `sysvitals-support` so the indicator and the
