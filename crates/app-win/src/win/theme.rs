@@ -199,12 +199,23 @@ pub(crate) unsafe fn make_font_for(hwnd: HWND, vertical: bool) -> HFONT {
 /// supersampled scale (2x) before downsampling.
 pub(crate) unsafe fn make_font_at_for(hwnd: HWND, scale: i32, vertical: bool) -> HFONT {
     let (_, face) = ui_font();
-    CreateFontW(
+    create_font(
         effective_font_height_for(hwnd, vertical) * scale.max(1),
-        0,
-        0,
-        0,
         TEXT_WEIGHT.load(Ordering::Relaxed),
+        &face,
+    )
+}
+
+/// Create a GDI font from explicit values. The window-free entry point lets
+/// the offscreen render tests build the same font the overlay uses without a
+/// taskbar or a monitor.
+pub(crate) unsafe fn create_font(height: i32, weight: i32, face: &[u16]) -> HFONT {
+    CreateFontW(
+        height,
+        0,
+        0,
+        0,
+        weight,
         0,
         0,
         0,

@@ -228,18 +228,27 @@ pub(crate) unsafe fn relayout_overlay(hwnd: HWND) {
     set_overlay_needs_render(hwnd, false);
 }
 
-/// Render a frame into a 32bpp premultiplied-alpha DIB and blit it onto
-/// the layered window with `UpdateLayeredWindow`. Glyphs are rendered at
-/// 2x supersampled resolution and box-filtered down.
-pub(crate) unsafe fn render_layered(hwnd: HWND, row: &FormattedRow, vertical: bool) {
-    let mut win_rc = RECT::default();
-    if GetWindowRect(hwnd, &mut win_rc).is_err() {
-        return;
-    }
-    let w = win_rc.right - win_rc.left;
-    let h = win_rc.bottom - win_rc.top;
-    if w <= 0 || h <= 0 {
-        return;
+/// Rasterize one formatted frame into premultiplied BGRA pixels at window
+/// scale. The whole pipeline — 2x supersampled glyph coverage, box-filtered
+/// downsample and themed composition — is window-free, so the offscreen tests
+/// can run it on a CI runner without a taskbar. `font_height` is the physical
+/// glyph height (negative for character height), matching what
+/// `effective_font_height_for` returns for the overlay.
+#[allow(clippy::too_many_arguments)]
+pub(crate) unsafe fn draw_frame(
+    width: i32,
+    height: i32,
+    row: &FormattedRow,
+    vertical: bool,
+    spacing_px: i32,
+    pad: i32,
+    text_rgb: (u32, u32, u32),
+    font_height: i32,
+    font_weight: i32,
+    face: &[u16],
+) -> Option<Vec<u32>> {
+    if width <= 0 || height <= 0 {
+        return None;
     }
 
     let screen_dc = GetDC(None);
@@ -247,8 +256,8 @@ pub(crate) unsafe fn render_layered(hwnd: HWND, row: &FormattedRow, vertical: bo
 
     // --- Scratch surface at 2x supersampled scale ---------------------
     const SS: i32 = 2;
-    let sw = w * SS;
-    let sh = h * SS;
+    let sw = width * SS;
+    let sh = height * SS;
     let mut ss_bmi = BITMAPINFO::default();
     ss_bmi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
     ss_bmi.bmiHeader.biWidth = sw;
@@ -261,10 +270,10 @@ pub(crate) unsafe fn render_layered(hwnd: HWND, row: &FormattedRow, vertical: bo
     else {
         let _ = DeleteDC(mem_dc);
         let _ = ReleaseDC(None, screen_dc);
-        return;
+        return None;
     };
     let old_ss_bmp = SelectObject(mem_dc, ss_bmp.into());
-    let ss_font = make_font_at_for(hwnd, SS, vertical);
+    let ss_font = create_font(font_height * SS, font_weight, face);
     let old_ss_font = SelectObject(mem_dc, ss_font.into());
     SetBkMode(mem_dc, TRANSPARENT);
     SetTextColor(mem_dc, COLORREF(0x00FF_FFFF));
@@ -276,10 +285,6 @@ pub(crate) unsafe fn render_layered(hwnd: HWND, row: &FormattedRow, vertical: bo
         *ss_px.add(i) = 0;
     }
 
-    let spacing_px = config().display.item_spacing as i32;
-    // Padding follows the orientation so the vertical layout can use its
-    // tighter margin; measurement and rendering must agree on it.
-    let pad = pad_px(vertical) * SS;
     let fm = measure_frame(mem_dc, row, spacing_px * SS, vertical, 2 * SS);
     // Line slot tops in supersampled pixels. Uniform division works for
     // the horizontal layouts; the vertical layout has per-line heights
@@ -298,6 +303,7 @@ pub(crate) unsafe fn render_layered(hwnd: HWND, row: &FormattedRow, vertical: bo
             acc += h;
         }
     }
+    let pad = pad * SS;
     for (i, line) in row.lines.iter().enumerate() {
         let (top, bottom) = tops.get(i).copied().unwrap_or((0, sh));
         if let Some(ref item_widths) = fm.item_widths {
@@ -390,32 +396,16 @@ pub(crate) unsafe fn render_layered(hwnd: HWND, row: &FormattedRow, vertical: bo
     SelectObject(mem_dc, old_ss_font);
     let _ = DeleteObject(ss_font.into());
 
-    // --- Final surface at window scale, downsampled 2x2 ---------------
-    let mut bmi = BITMAPINFO::default();
-    bmi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
-    bmi.bmiHeader.biWidth = w;
-    bmi.bmiHeader.biHeight = -h;
-    bmi.bmiHeader.biPlanes = 1;
-    bmi.bmiHeader.biBitCount = 32;
-    bmi.bmiHeader.biCompression = BI_RGB.0;
-    let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
-    let Ok(bmp) = CreateDIBSection(Some(mem_dc), &bmi, DIB_RGB_COLORS, &mut bits, None, 0) else {
-        SelectObject(mem_dc, old_ss_bmp);
-        let _ = DeleteObject(ss_bmp.into());
-        let _ = DeleteDC(mem_dc);
-        let _ = ReleaseDC(None, screen_dc);
-        return;
-    };
-
-    let (tr, tg, tb) = indicator_text_rgb();
-    let px = bits as *mut u32;
+    // --- Final composition at window scale, downsampled 2x2 -------------
+    let (tr, tg, tb) = text_rgb;
+    let mut pixels = vec![0u32; (width * height) as usize];
     // Glyph-only composition. The indicator draws no hover/pressed/open
     // background at all: the whole rectangle keeps a minimal (but
     // non-zero) alpha so it stays hit-testable over the taskbar, and the
     // supersampled glyph coverage is written premultiplied for
     // `AC_SRC_ALPHA`.
-    for y in 0..h {
-        for x in 0..w {
+    for y in 0..height {
+        for x in 0..width {
             let mut acc = 0u32;
             for dy in 0..SS {
                 for dx in 0..SS {
@@ -425,18 +415,69 @@ pub(crate) unsafe fn render_layered(hwnd: HWND, row: &FormattedRow, vertical: bo
                 }
             }
             let cov = acc / (SS * SS) as u32;
+            let index = (y * width + x) as usize;
             if cov == 0 {
-                *px.add((y * w + x) as usize) = 0x0100_0000;
+                pixels[index] = 0x0100_0000;
             } else {
                 let mix = |glyph: u32| glyph * cov / 255;
-                *px.add((y * w + x) as usize) =
-                    (cov << 24) | (mix(tr) << 16) | (mix(tg) << 8) | mix(tb);
+                pixels[index] = (cov << 24) | (mix(tr) << 16) | (mix(tg) << 8) | mix(tb);
             }
         }
     }
 
     SelectObject(mem_dc, old_ss_bmp);
     let _ = DeleteObject(ss_bmp.into());
+    let _ = DeleteDC(mem_dc);
+    let _ = ReleaseDC(None, screen_dc);
+    Some(pixels)
+}
+
+/// Render a frame into a 32bpp premultiplied-alpha DIB and blit it onto
+/// the layered window with `UpdateLayeredWindow`.
+pub(crate) unsafe fn render_layered(hwnd: HWND, row: &FormattedRow, vertical: bool) {
+    let mut win_rc = RECT::default();
+    if GetWindowRect(hwnd, &mut win_rc).is_err() {
+        return;
+    }
+    let w = win_rc.right - win_rc.left;
+    let h = win_rc.bottom - win_rc.top;
+    if w <= 0 || h <= 0 {
+        return;
+    }
+
+    let (_, face) = ui_font();
+    let Some(pixels) = draw_frame(
+        w,
+        h,
+        row,
+        vertical,
+        config().display.item_spacing as i32,
+        pad_px(vertical),
+        indicator_text_rgb(),
+        effective_font_height_for(hwnd, vertical),
+        TEXT_WEIGHT.load(Ordering::Relaxed),
+        &face,
+    ) else {
+        return;
+    };
+
+    let screen_dc = GetDC(None);
+    let mem_dc = CreateCompatibleDC(Some(screen_dc));
+
+    let mut bmi = BITMAPINFO::default();
+    bmi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+    bmi.bmiHeader.biWidth = w;
+    bmi.bmiHeader.biHeight = -h;
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB.0;
+    let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
+    let Ok(bmp) = CreateDIBSection(Some(mem_dc), &bmi, DIB_RGB_COLORS, &mut bits, None, 0) else {
+        let _ = DeleteDC(mem_dc);
+        let _ = ReleaseDC(None, screen_dc);
+        return;
+    };
+    std::ptr::copy_nonoverlapping(pixels.as_ptr(), bits as *mut u32, pixels.len());
 
     let old_bmp = SelectObject(mem_dc, bmp.into());
     let src_pt = POINT { x: 0, y: 0 };
@@ -480,4 +521,130 @@ pub(crate) unsafe fn render_layered(hwnd: HWND, row: &FormattedRow, vertical: bo
     let _ = DeleteObject(bmp.into());
     let _ = DeleteDC(mem_dc);
     let _ = ReleaseDC(None, screen_dc);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sysvitals_core::format::Line;
+
+    fn test_font() -> (i32, i32, Vec<u16>) {
+        (-24, 400, utf16("Segoe UI"))
+    }
+
+    fn formatted(lines: &[(&str, &str)]) -> FormattedRow {
+        FormattedRow {
+            lines: lines
+                .iter()
+                .map(|(left, right)| Line {
+                    left: (*left).to_string(),
+                    right: (*right).to_string(),
+                })
+                .collect(),
+            items: Vec::new(),
+        }
+    }
+
+    fn render(row: &FormattedRow, width: i32, height: i32, vertical: bool) -> Vec<u32> {
+        let (font_height, font_weight, face) = test_font();
+        unsafe {
+            draw_frame(
+                width,
+                height,
+                row,
+                vertical,
+                8,
+                6,
+                (255, 255, 255),
+                font_height,
+                font_weight,
+                &face,
+            )
+            .expect("the offscreen pipeline must produce a frame")
+        }
+    }
+
+    fn glyph_pixels(pixels: &[u32], width: usize) -> impl Iterator<Item = (usize, u32)> + '_ {
+        pixels
+            .iter()
+            .copied()
+            .enumerate()
+            .filter(|(_, px)| (px >> 24) > 1)
+            .map(move |(index, px)| (index % width, px))
+    }
+
+    #[test]
+    fn a_single_row_is_painted_centered_and_visible() {
+        let row = formatted(&[("CPU 12%", "")]);
+        let pixels = render(&row, 200, 32, false);
+        assert_eq!(pixels.len(), 200 * 32);
+        assert!(
+            pixels.iter().all(|&px| (px >> 24) >= 1),
+            "every pixel keeps the hit-test alpha"
+        );
+        assert!(
+            pixels.iter().all(|&px| {
+                let alpha = (px >> 24) & 0xFF;
+                ((px >> 16) & 0xFF) <= alpha && ((px >> 8) & 0xFF) <= alpha && (px & 0xFF) <= alpha
+            }),
+            "premultiplied channels must not exceed alpha"
+        );
+
+        let xs: Vec<usize> = glyph_pixels(&pixels, 200).map(|(x, _)| x).collect();
+        assert!(!xs.is_empty(), "the text must paint glyph pixels");
+        assert!(
+            *xs.iter().min().unwrap() > 10 && *xs.iter().max().unwrap() < 190,
+            "centered text must keep a margin on both sides"
+        );
+        assert!(
+            *xs.iter().min().unwrap() < 100 && *xs.iter().max().unwrap() > 100,
+            "the row must straddle the horizontal center"
+        );
+    }
+
+    #[test]
+    fn a_dual_column_frame_paints_both_columns() {
+        let row = formatted(&[("CPU 100%", "12%"), ("MEM 100%", "48%")]);
+        let pixels = render(&row, 240, 48, false);
+        let columns: Vec<usize> = glyph_pixels(&pixels, 240).map(|(x, _)| x).collect();
+        assert!(
+            columns.iter().any(|&x| x < 40),
+            "the left column must paint near the left padding"
+        );
+        assert!(
+            columns.iter().any(|&x| x > 60),
+            "the right column must paint past the left column"
+        );
+    }
+
+    #[test]
+    fn a_frame_with_items_lays_out_the_single_row_gap() {
+        let row = FormattedRow {
+            lines: vec![Line::single("CPU 12%  MEM 48%")],
+            items: vec!["CPU 12%".to_string(), "MEM 48%".to_string()],
+        };
+        let pixels = render(&row, 240, 32, false);
+        assert!(glyph_pixels(&pixels, 240).count() > 0);
+    }
+
+    #[test]
+    fn an_empty_canvas_is_rejected_instead_of_panicking() {
+        let row = formatted(&[("CPU 12%", "")]);
+        let (font_height, font_weight, face) = test_font();
+        let rendered = unsafe {
+            draw_frame(
+                0,
+                32,
+                &row,
+                false,
+                8,
+                6,
+                (255, 255, 255),
+                font_height,
+                font_weight,
+                &face,
+            )
+        };
+        assert!(rendered.is_none());
+    }
 }
