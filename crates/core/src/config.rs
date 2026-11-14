@@ -101,10 +101,11 @@ pub struct HistoryConfig {
 }
 
 /// Login-startup preference, shared by both platforms. The settings window
-/// owns it; the platform layer (Windows Run key / macOS `SMAppService`) applies
-/// it. The legacy `[windows] auto_start` key is deliberately not read: it had
-/// no consumer and defaulted to `true`, so honoring it would silently enable
-/// auto-start for existing configs after this feature lands.
+/// owns it; the platform layer (Windows Startup-folder shortcut / macOS
+/// `SMAppService`) applies it. The legacy `[windows] auto_start` key is
+/// deliberately not read: it had no consumer and defaulted to `true`, so
+/// honoring it would silently enable auto-start for existing configs after
+/// this feature lands.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct StartupConfig {

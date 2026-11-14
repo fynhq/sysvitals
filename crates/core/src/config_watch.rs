@@ -72,8 +72,8 @@ impl ConfigWatcher {
     }
 
     /// Stop retrying a failed parse until the file's mtime changes again.
-    /// Used by the history popup, whose panel keeps the last good language
-    /// and CSV scope instead of parsing a broken file every refresh tick.
+    /// Used by the history popup, whose panel keeps the last good config
+    /// instead of parsing a broken file every refresh tick.
     pub fn without_retry(mut self) -> Self {
         self.retry_failed = false;
         self

@@ -225,12 +225,9 @@ impl Render for HistoryView {
 
         // Icon-only copy button: a green check flashes for ~1.2s after a
         // successful copy, then the button returns to the copy icon. The
-        // tooltip keeps the textual hint in the current language. A loading
-        // or empty range has nothing to export, so the command is disabled
-        // rather than failing after the click.
-        // An empty/loading *visible* range has nothing to export. Longer
-        // hand-edited CSV scopes still have a full retention window to copy,
-        // so they are not gated on the on-screen buckets.
+        // tooltip keeps the textual hint in the current language. An empty
+        // or still-loading visible range has nothing to export, so the
+        // command is disabled rather than failing after the click.
         let copy_disabled = !self.copy_available();
         let copy_tip = if copied {
             t(lang, "chart.copied").to_string()

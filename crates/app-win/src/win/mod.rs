@@ -13,7 +13,7 @@
 //! - `theme`    — fonts, DPI and OS theme/high-contrast probes.
 //! - `crash`    — panic hook and the SEH filter.
 //!
-//! Items are `pub` so siblings can reach them through `use super::*`, but
+//! Items are `pub(crate)` so siblings can reach them through `use super::*`, but
 //! `win` itself is private to this crate, so nothing here widens the crate's
 //! real API.
 
