@@ -178,3 +178,44 @@ pub(crate) unsafe fn show_context_menu(hwnd: HWND) {
     MENU_TRACKING.store(false, Ordering::Relaxed);
     perform_menu_choice(hwnd, choice);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn menu_entries_keep_their_order_and_separator() {
+        let entries = menu_entries(Language::En);
+        assert_eq!(entries.len(), 5);
+        assert_eq!(entries[0].id, IDM_TASKMGR);
+        assert_eq!(entries[1].id, IDM_SETTINGS);
+        assert!(entries[2].separator);
+        assert_eq!(entries[2].id, 0);
+        assert!(entries[2].label.is_empty());
+        assert_eq!(entries[3].id, IDM_RESTART);
+        assert_eq!(entries[4].id, IDM_QUIT);
+        assert!(entries
+            .iter()
+            .filter(|entry| !entry.separator)
+            .all(|entry| !entry.label.is_empty()));
+    }
+
+    #[test]
+    fn menu_ids_are_unique_and_labels_follow_the_language() {
+        let en = menu_entries(Language::En);
+        let zh = menu_entries(Language::Zh);
+
+        let mut ids: Vec<usize> = en
+            .iter()
+            .filter(|entry| !entry.separator)
+            .map(|entry| entry.id)
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), 4, "every command id must be distinct");
+
+        assert_eq!(en[0].label, t(Language::En, "menu.task_manager"));
+        assert_eq!(zh[0].label, t(Language::Zh, "menu.task_manager"));
+        assert_ne!(en[0].label, zh[0].label);
+    }
+}
