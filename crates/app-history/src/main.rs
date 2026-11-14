@@ -73,6 +73,21 @@ fn elapsed_ms() -> u128 {
         .unwrap_or(0)
 }
 
+/// Write the launcher-provided ready marker (our PID) once the popup window
+/// exists. The indicator uses it to distinguish "process started but its
+/// window is still being created" from "popup is on screen", so a closing
+/// click is honored immediately instead of after a fixed grace period.
+/// A failed write only degrades to the launcher's fallback; it must never
+/// break the popup.
+fn write_ready_marker(path: Option<&std::path::Path>) {
+    let Some(path) = path else {
+        return;
+    };
+    if let Err(e) = std::fs::write(path, std::process::id().to_string()) {
+        log_event("WARN", &format!("history: ready marker write failed: {e}"));
+    }
+}
+
 mod chart;
 mod placement;
 mod resident;
@@ -164,6 +179,12 @@ fn main() {
 
         let anchor = anchor_arg();
         let monitor = anchor_monitor_arg().map(DisplayId::new);
+        // Ready-marker path passed by the launcher (`--ready-file`). The
+        // child writes its PID there once the popup window exists so the
+        // indicator can tell "still starting" apart from "popup visible"
+        // and honor a closing click immediately instead of waiting out a
+        // fixed launch grace.
+        let ready_file = sysvitals_panel::ready_file_arg();
         log_event(
             "INFO",
             &format!(
@@ -175,6 +196,7 @@ fn main() {
         );
         match open_history_window(cx, anchor, monitor, false, None) {
             Some((_window_handle, _ready, _size)) => {
+                write_ready_marker(ready_file.as_deref());
                 // One-shot launch: the popup can land without activation when
                 // the foreground lock refuses the launching process, so claim
                 // activation as a foreground task — never inside render (see

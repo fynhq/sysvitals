@@ -38,6 +38,11 @@ pub fn anchor_monitor_arg() -> Option<u64> {
     sysvitals_core::cli::parse_anchor_monitor(&command_args())
 }
 
+/// `--ready-file <path>` from the process arguments.
+pub fn ready_file_arg() -> Option<std::path::PathBuf> {
+    sysvitals_core::cli::parse_ready_file(&command_args())
+}
+
 /// Local date (`YYYY-MM-DD`) and time (`HH:MM:SS.mmm`) for log stamps, from
 /// chrono's local clock. The display layers used to format these per
 /// platform (`GetLocalTime` on Windows, `NSDate` on macOS); one clock keeps

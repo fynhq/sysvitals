@@ -27,7 +27,8 @@ use sysvitals_core::backdrop::{
 // the shared CLI/build stamp.
 pub use sysvitals_support::{
     acquire_instance_lock, anchor_arg, anchor_monitor_arg, install_panic_hook, log_event,
-    log_sanitize_issues, parent_pid_arg, poll_config, ConfigEvent, InstanceLock, SV_BUILD_ID,
+    log_sanitize_issues, parent_pid_arg, poll_config, ready_file_arg, ConfigEvent, InstanceLock,
+    SV_BUILD_ID,
 };
 #[cfg(windows)]
 pub use sysvitals_support::{hkcu_dword, os_build_number, taskbar_al, utf16, ParentProcess};

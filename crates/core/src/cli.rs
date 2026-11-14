@@ -3,9 +3,11 @@
 //!
 //! Panels receive their placement and supervision arguments as plain CLI
 //! flags (`--anchor L T R B`, `--anchor-monitor <handle>`,
-//! `--parent-pid <pid>`). The parsing is pure so it is unit-tested here once
-//! instead of being copy-pasted into each panel. Callers pass the argument
-//! list without the binary name.
+//! `--parent-pid <pid>`, `--ready-file <path>`). The parsing is pure so it
+//! is unit-tested here once instead of being copy-pasted into each panel.
+//! Callers pass the argument list without the binary name.
+
+use std::path::PathBuf;
 
 /// The indicator rectangle in GPUI logical pixels, passed to a panel with
 /// `--anchor` so it opens on the same display as the indicator that launched
@@ -74,6 +76,23 @@ pub fn parse_parent_pid(args: &[String]) -> Option<u32> {
         if arg == "--parent-pid" {
             let pid: u32 = iter.next()?.parse().ok()?;
             return (pid != 0).then_some(pid);
+        }
+    }
+    None
+}
+
+/// Parse `--ready-file <path>` from `args`: the file a launched panel writes
+/// its PID into once its window exists. The indicator uses it to tell "the
+/// process is alive but its window is still being created" apart from "the
+/// popup is on screen", so a second click can close the popup as soon as it
+/// is visible instead of waiting out a fixed startup grace. An empty path
+/// yields `None`; a missing marker simply keeps the time-based fallback.
+pub fn parse_ready_file(args: &[String]) -> Option<PathBuf> {
+    let mut iter = args.iter().map(String::as_str);
+    while let Some(arg) = iter.next() {
+        if arg == "--ready-file" {
+            let path = iter.next()?.trim();
+            return (!path.is_empty()).then(|| PathBuf::from(path));
         }
     }
     None
@@ -156,5 +175,21 @@ mod tests {
         assert!(parse_anchor_monitor(&args(&["--anchor-monitor", "-1"])).is_none());
         assert!(parse_anchor_monitor(&args(&["--anchor-monitor"])).is_none());
         assert!(parse_anchor_monitor(&args(&["--anchor", "1", "2", "3", "4"])).is_none());
+    }
+
+    #[test]
+    fn ready_file_parses_and_rejects_empty() {
+        assert_eq!(
+            parse_ready_file(&args(&[
+                "--parent-pid",
+                "42",
+                "--ready-file",
+                "/tmp/sysvitals/history-window.ready"
+            ])),
+            Some(PathBuf::from("/tmp/sysvitals/history-window.ready"))
+        );
+        assert!(parse_ready_file(&args(&["--ready-file"])).is_none());
+        assert!(parse_ready_file(&args(&["--ready-file", "  "])).is_none());
+        assert!(parse_ready_file(&args(&["--anchor", "1", "2", "3", "4"])).is_none());
     }
 }
