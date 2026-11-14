@@ -73,12 +73,8 @@ impl Render for SettingsView {
         for i in 0..Language::ALL.len() {
             let active = i == self.lang_idx;
             lang_row = lang_row.child(
-                Button::new(format!("lang-{i}"))
-                    .small()
-                    .rounded(px(CONTROL_RADIUS))
-                    .when(active, |b| b.primary())
+                choice_button(format!("lang-{i}"), active)
                     .accessibility_label(Language::ALL[i].label())
-                    .toggled(active)
                     .label(Language::ALL[i].label().to_string())
                     .on_click(cx.listener(
                         move |this: &mut Self,
@@ -108,11 +104,7 @@ impl Render for SettingsView {
             let secs = *interval_ms / 1000;
             let text = format!("{secs} {}", t(lang, "settings.unit_seconds"));
             interval_row = interval_row.child(
-                Button::new(format!("interval-{i}"))
-                    .small()
-                    .rounded(px(CONTROL_RADIUS))
-                    .when(active, |b| b.primary())
-                    .toggled(active)
+                choice_button(format!("interval-{i}"), active)
                     .label(text)
                     .on_click(cx.listener(
                         move |this: &mut Self,
@@ -139,16 +131,12 @@ impl Render for SettingsView {
             let active = i == self.theme_idx;
             let tip = t(lang, THEME_KEYS[i]).to_string();
             theme_row = theme_row.child(
-                Button::new(format!("theme-{i}"))
-                    .small()
-                    .rounded(px(CONTROL_RADIUS))
-                    .when(active, |b| b.primary())
+                choice_button(format!("theme-{i}"), active)
                     .icon(THEME_ICONS[i].clone())
                     .tooltip(tip.clone())
                     // Icon-only: the tooltip is the only visible name, and
                     // Button exposes it as the description, not the name.
                     .accessibility_label(tip)
-                    .toggled(active)
                     .on_click(cx.listener(
                         move |this: &mut Self,
                               _: &ClickEvent,
@@ -662,6 +650,8 @@ impl Render for SettingsView {
         // window itself.
         #[allow(unused_variables)]
         let title_text = t(lang, "settings.title").to_string();
+        #[cfg(any(windows, target_os = "macos"))]
+        let heading_color = cx.theme().foreground.opacity(0.9);
         #[cfg(target_os = "macos")]
         let mut root = v_flex().size_full().child(
             h_flex()
@@ -670,17 +660,7 @@ impl Render for SettingsView {
                 .flex_shrink_0()
                 .items_center()
                 .justify_center()
-                .child(
-                    div()
-                        .id("window-heading")
-                        .role(Role::Heading)
-                        .aria_level(1)
-                        .aria_label(title_text.clone())
-                        .text_size(px(13.))
-                        .font_semibold()
-                        .text_color(cx.theme().foreground.opacity(0.9))
-                        .child(title_text),
-                ),
+                .child(window_heading(title_text.clone(), heading_color)),
         );
         #[cfg(windows)]
         let mut root = v_flex().size_full().child(
@@ -689,46 +669,32 @@ impl Render for SettingsView {
                 .pl(px(16.))
                 .bg(hsla(0., 0., 0., 0.))
                 .border_color(hsla(0., 0., 0., 0.))
-                .child(
-                    div()
-                        .id("window-heading")
-                        .role(Role::Heading)
-                        .aria_level(1)
-                        .aria_label(title_text.clone())
-                        .text_size(px(13.))
-                        .font_semibold()
-                        .text_color(cx.theme().foreground.opacity(0.9))
-                        .child(title_text),
-                ),
+                .child(window_heading(title_text.clone(), heading_color)),
         );
         #[cfg(not(any(windows, target_os = "macos")))]
         let mut root = v_flex().size_full();
 
-        if self.config_read_failed {
-            root = root.child(
-                h_flex()
-                    .w_full()
-                    .flex_shrink_0()
-                    .px_4()
-                    .pt_4()
-                    .child(error_banner(
-                        t(lang, "settings.load_failed").to_string(),
-                        t(lang, "settings.load_failed_hint").to_string(),
-                        dark,
-                    )),
-            );
+        let error_banner_content = if self.config_read_failed {
+            Some((
+                t(lang, "settings.load_failed").to_string(),
+                t(lang, "settings.load_failed_hint").to_string(),
+            ))
         } else if self.save_failed.get() {
+            Some((
+                t(lang, "settings.save_failed").to_string(),
+                t(lang, "settings.save_failed_hint").to_string(),
+            ))
+        } else {
+            None
+        };
+        if let Some((title, hint)) = error_banner_content {
             root = root.child(
                 h_flex()
                     .w_full()
                     .flex_shrink_0()
                     .px_4()
                     .pt_4()
-                    .child(error_banner(
-                        t(lang, "settings.save_failed").to_string(),
-                        t(lang, "settings.save_failed_hint").to_string(),
-                        dark,
-                    )),
+                    .child(error_banner(title, hint, dark)),
             );
         }
 

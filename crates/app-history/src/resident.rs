@@ -108,16 +108,6 @@ pub(crate) fn open_history_state() -> Option<*mut sysvitals_core::HistoryState> 
     }
 }
 
-/// `--parent-pid <pid>`: the process exits when the indicator does, even if
-/// the launcher never gets a chance to terminate it. The pure parsing lives
-/// in `core::cli` (shared with the settings panel). Resident mode is
-/// Windows-only; the macOS one-shot path uses the panel helper instead.
-#[cfg(windows)]
-pub(crate) fn parse_parent_pid() -> Option<u32> {
-    let args: Vec<String> = env::args().skip(1).collect();
-    sysvitals_core::cli::parse_parent_pid(&args)
-}
-
 /// macOS one-shot popup: quit when the menu-bar indicator goes away instead
 /// of lingering as an orphan window. Windows resident mode has the stronger
 /// process-handle check in `run_resident`. Shared one-second poll in
@@ -194,7 +184,7 @@ pub(crate) fn run_resident(cx: &mut App) {
         cx.quit();
         return;
     };
-    let parent_pid = parse_parent_pid();
+    let parent_pid = sysvitals_panel::parent_pid_arg();
     let parent = match parent_pid.map(sysvitals_panel::ParentProcess::open) {
         Some(Ok(parent)) => parent,
         Some(Err(error)) => {
@@ -279,6 +269,39 @@ pub(crate) fn run_resident(cx: &mut App) {
         // CreateProcessW returns, so the first pass must not sleep: a pending
         // open would otherwise wait up to one idle poll (250 ms) doing
         // nothing.
+        // Window lifetime fields move together on every teardown path; keep
+        // the reset in one place so a new field cannot be forgotten in one of
+        // the branches.
+        macro_rules! clear_popup_fields {
+            () => {
+                window = None;
+                first_load = None;
+                popup_size = None;
+                open_anchor = None;
+                open_monitor = None;
+                activated = false;
+                opened_at = None;
+                last_activation_attempt = None;
+                activation_attempts = 0;
+            };
+        }
+        macro_rules! arm_popup {
+            ($handle:expr, $ready:expr, $size:expr, $anchor:expr, $monitor:expr, $generation:expr) => {
+                window = Some($handle);
+                first_load = Some($ready);
+                popup_size = $size;
+                open_anchor = $anchor;
+                open_monitor = $monitor;
+                activated = false;
+                opened_at = Some(Instant::now());
+                last_activation_attempt = None;
+                activation_attempts = 0;
+                open_generation = $generation;
+                dismissed_generation = None;
+                idle_since = None;
+                next_trim = None;
+            };
+        }
         let mut first_pass = true;
         loop {
             if first_pass {
@@ -308,15 +331,7 @@ pub(crate) fn run_resident(cx: &mut App) {
                 if !windows.contains(&handle) {
                     log_event("INFO", "history: window dismissed");
                     dismissed_generation = Some(open_generation);
-                    window = None;
-                    first_load = None;
-                    popup_size = None;
-                    open_anchor = None;
-                    open_monitor = None;
-                    activated = false;
-                    opened_at = None;
-                    last_activation_attempt = None;
-                    activation_attempts = 0;
+                    clear_popup_fields!();
                     idle_since = Some(Instant::now());
                     // The device and the working set are released below, so
                     // the next routine trim is one 30 s beat away.
@@ -356,15 +371,7 @@ pub(crate) fn run_resident(cx: &mut App) {
                         }
                     }
                     shared.mark_hidden();
-                    window = None;
-                    first_load = None;
-                    popup_size = None;
-                    open_anchor = None;
-                    open_monitor = None;
-                    activated = false;
-                    opened_at = None;
-                    last_activation_attempt = None;
-                    activation_attempts = 0;
+                    clear_popup_fields!();
                     idle_since = Some(Instant::now());
                     next_trim = Some(Instant::now() + Duration::from_secs(30));
                     // Only release the device once the window is really gone;
@@ -421,19 +428,14 @@ pub(crate) fn run_resident(cx: &mut App) {
                     let reopened = cx.update(|app| open_at(app, &snapshot));
                     match reopened {
                         Some((new_handle, ready, new_size)) => {
-                            window = Some(new_handle);
-                            first_load = Some(ready);
-                            popup_size = new_size;
-                            open_anchor = Some(anchor);
-                            open_monitor = monitor;
-                            activated = false;
-                            opened_at = Some(Instant::now());
-                            last_activation_attempt = None;
-                            activation_attempts = 0;
-                            open_generation = snapshot.generation;
-                            dismissed_generation = None;
-                            idle_since = None;
-                            next_trim = None;
+                            arm_popup!(
+                                new_handle,
+                                ready,
+                                new_size,
+                                Some(anchor),
+                                monitor,
+                                snapshot.generation
+                            );
                             // `visible` is published only once the window is
                             // actually activated (or the 3 s fallback fires);
                             // until then it is a pending request, not an open
@@ -442,11 +444,7 @@ pub(crate) fn run_resident(cx: &mut App) {
                         None => {
                             dismissed_generation = Some(snapshot.generation);
                             shared.mark_hidden();
-                            window = None;
-                            first_load = None;
-                            popup_size = None;
-                            open_anchor = None;
-                            open_monitor = None;
+                            clear_popup_fields!();
                             log_event("WARN", "history: reopen at the new anchor failed");
                         }
                     }
@@ -572,19 +570,7 @@ pub(crate) fn run_resident(cx: &mut App) {
                 let opened = cx.update(|app| open_at(app, &snapshot));
                 match opened {
                     Some((handle, ready, size)) => {
-                        window = Some(handle);
-                        first_load = Some(ready);
-                        popup_size = size;
-                        open_anchor = anchor;
-                        open_monitor = monitor;
-                        activated = false;
-                        opened_at = Some(Instant::now());
-                        last_activation_attempt = None;
-                        activation_attempts = 0;
-                        open_generation = snapshot.generation;
-                        dismissed_generation = None;
-                        idle_since = None;
-                        next_trim = None;
+                        arm_popup!(handle, ready, size, anchor, monitor, snapshot.generation);
                         // Visibility is published on the activation edge (or
                         // the 3 s fallback), not at creation: the window is
                         // still hidden here.

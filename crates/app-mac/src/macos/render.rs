@@ -90,15 +90,6 @@ pub(crate) fn layout_dual(
     (runs, left_w, right_w, line_h)
 }
 
-/// The metrics the current config shows, in the same order
-/// `format_frame` uses.
-pub(crate) fn visible_metrics(cfg: &Config) -> Vec<Metric> {
-    Metric::ALL
-        .into_iter()
-        .filter(|m| cfg.display.metric_visible(*m))
-        .collect()
-}
-
 /// Worst-case width of one metric cell for the font currently in use.
 /// This is the fixed slot width: the value may gain or lose a digit
 /// inside the slot, but the slot itself never moves. Percentages can only
@@ -110,16 +101,6 @@ pub(crate) fn metric_reserve(metric: Metric, cfg: &Config, font: &Retained<NSFon
         Metric::Up | Metric::Down => RATE_RESERVE,
     };
     make_run(&join_prefix(metric_prefix(metric, cfg), value), font).1
-}
-
-/// Configured label prefix for one metric.
-pub(crate) fn metric_prefix(metric: Metric, cfg: &Config) -> &str {
-    match metric {
-        Metric::Cpu => &cfg.display.prefix.cpu,
-        Metric::Mem => &cfg.display.prefix.mem,
-        Metric::Up => &cfg.display.prefix.up,
-        Metric::Down => &cfg.display.prefix.down,
-    }
 }
 
 /// Split a formatted cell into its configured label and value. The

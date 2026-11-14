@@ -19,3 +19,9 @@ chrono = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "=0.2.191"
+
+[build-dependencies]
+sysvitals-build = { path = "../build-support" }

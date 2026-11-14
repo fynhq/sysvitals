@@ -6,6 +6,24 @@ use std::process::{Command, Stdio};
 
 // ------------------------------------------------------- child process launch
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ProcessState {
+    Alive,
+    Exited,
+    /// `WAIT_FAILED` or another unexpected state: the handle can no longer
+    /// be trusted.
+    Failed,
+}
+
+/// Zero-wait probe shared by the liveness and termination paths.
+unsafe fn process_state(handle: HANDLE) -> ProcessState {
+    match WaitForSingleObject(handle, 0) {
+        WAIT_TIMEOUT => ProcessState::Alive,
+        WAIT_OBJECT_0 => ProcessState::Exited,
+        _ => ProcessState::Failed,
+    }
+}
+
 /// Whether the Settings child is still running. Reaps the handle when the
 /// process has exited. Never blocks the message thread.
 pub(crate) fn settings_child_alive() -> bool {
@@ -18,16 +36,14 @@ pub(crate) fn settings_child_alive() -> bool {
         *slot = None;
         return false;
     }
-    match unsafe { WaitForSingleObject(handle, 0) } {
-        WAIT_TIMEOUT => true,
-        WAIT_OBJECT_0 => {
+    match unsafe { process_state(handle) } {
+        ProcessState::Alive => true,
+        ProcessState::Exited => {
             let _ = unsafe { CloseHandle(handle) };
             *slot = None;
             false
         }
-        _ => {
-            // WAIT_FAILED or an unexpected state: the handle can no
-            // longer be trusted. Close it and let the next click relaunch.
+        ProcessState::Failed => {
             let _ = unsafe { CloseHandle(handle) };
             *slot = None;
             log_event("WARN", "settings process wait failed; handle dropped");
@@ -57,13 +73,13 @@ pub(crate) fn terminate_settings(wait_for_exit: bool) -> bool {
         return false;
     }
     // Already exited: reap quietly, treat as "nothing to close".
-    match unsafe { WaitForSingleObject(handle, 0) } {
-        WAIT_OBJECT_0 => {
+    match unsafe { process_state(handle) } {
+        ProcessState::Exited => {
             let _ = unsafe { CloseHandle(handle) };
             return false;
         }
-        WAIT_TIMEOUT => {}
-        _ => {
+        ProcessState::Alive => {}
+        ProcessState::Failed => {
             let _ = unsafe { CloseHandle(handle) };
             log_event("WARN", "settings process wait failed; handle dropped");
             return false;
@@ -99,13 +115,13 @@ pub(crate) fn history_terminate() -> bool {
     if handle.is_invalid() {
         return false;
     }
-    match unsafe { WaitForSingleObject(handle, 0) } {
-        WAIT_TIMEOUT => {}
-        WAIT_OBJECT_0 => {
+    match unsafe { process_state(handle) } {
+        ProcessState::Alive => {}
+        ProcessState::Exited => {
             let _ = unsafe { CloseHandle(handle) };
             return false;
         }
-        _ => {
+        ProcessState::Failed => {
             log_event("WARN", "history process wait failed; handle dropped");
             let _ = unsafe { CloseHandle(handle) };
             return false;
@@ -369,9 +385,9 @@ pub(crate) fn history_child_alive() -> bool {
         *slot = None;
         return false;
     }
-    match unsafe { WaitForSingleObject(handle, 0) } {
-        WAIT_TIMEOUT => true,
-        WAIT_OBJECT_0 => {
+    match unsafe { process_state(handle) } {
+        ProcessState::Alive => true,
+        ProcessState::Exited => {
             let mut code = u32::MAX;
             let _ = unsafe { GetExitCodeProcess(handle, &mut code) };
             HISTORY_LAST_EXIT_CODE.store(code, Ordering::Relaxed);
@@ -394,7 +410,7 @@ pub(crate) fn history_child_alive() -> bool {
             *slot = None;
             false
         }
-        _ => {
+        ProcessState::Failed => {
             log_event("WARN", "history process wait failed; handle dropped");
             let _ = unsafe { CloseHandle(handle) };
             *slot = None;

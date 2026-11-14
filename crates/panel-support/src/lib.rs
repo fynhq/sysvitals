@@ -23,10 +23,14 @@ use sysvitals_core::backdrop::{
 };
 
 // Process plumbing shared by every panel (and, directly, by the platform
-// indicators): daily-file logging, the crash hook and the Windows probes.
+// indicators): daily-file logging, the crash hook, the Windows probes and
+// the shared CLI/build stamp.
+pub use sysvitals_support::{
+    acquire_instance_lock, anchor_arg, anchor_monitor_arg, install_panic_hook, log_event,
+    log_sanitize_issues, parent_pid_arg, poll_config, ConfigEvent, InstanceLock, SV_BUILD_ID,
+};
 #[cfg(windows)]
 pub use sysvitals_support::{hkcu_dword, os_build_number, taskbar_al, utf16, ParentProcess};
-pub use sysvitals_support::{install_panic_hook, log_event, log_sanitize_issues};
 
 /// Which panel is asking for the material tint. The history popup sits
 /// directly on the chart and keeps the standard tint; the settings page is
@@ -232,11 +236,19 @@ pub fn apply_material(cx: &mut App, surface: PanelSurface) {
 
 /// Theme sync, accent override and material tint, in that order. A palette
 /// reload wipes every runtime patch, so the panels must call this after every
-/// appearance change and apply their own extras afterwards.
+/// appearance change and apply their own extras afterwards. The Windows
+/// optical-size font family is re-applied here because the palette reload
+/// also resets it.
 pub fn apply_theme_and_accent(cx: &mut App, surface: PanelSurface) {
     apply_system_theme(cx);
     apply_accent(cx);
     apply_material(cx, surface);
+    #[cfg(windows)]
+    UiTheme::update(cx, |theme| {
+        if let Some(family) = panel_font_family() {
+            theme.font_family = family.into();
+        }
+    });
 }
 
 /// Poll the OS accent color and re-apply the theme patch when it changes.
@@ -303,12 +315,11 @@ where
 
 /// Quit when the launching indicator dies without running its quit path
 /// (crash, Force Quit). The platform job object covers Windows ordinary
-/// exits; this macOS watch also catches a child launched before the job was
+/// exits; this watch also catches a child launched before the job was
 /// configured. `label` names the panel in the log lines.
 #[cfg(target_os = "macos")]
 pub fn watch_parent(cx: &mut App, label: &'static str) {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let Some(pid) = sysvitals_core::cli::parse_parent_pid(&args) else {
+    let Some(pid) = parent_pid_arg() else {
         return;
     };
     log_event("INFO", &format!("{label}: watching parent pid {pid}"));
@@ -326,6 +337,42 @@ pub fn watch_parent(cx: &mut App, label: &'static str) {
     })
     .detach();
 }
+
+/// Windows counterpart of [`watch_parent`]: the child owns a process handle
+/// and polls it once a second. A missing/unopenable parent exits the panel,
+/// matching the macOS behavior.
+#[cfg(windows)]
+pub fn watch_parent(cx: &mut App, label: &'static str) {
+    let Some(pid) = parent_pid_arg() else {
+        return;
+    };
+    let parent = match ParentProcess::open(pid) {
+        Ok(parent) => parent,
+        Err(error) => {
+            log_event(
+                "WARN",
+                &format!("{label}: parent process unavailable: {error}; exiting"),
+            );
+            cx.quit();
+            return;
+        }
+    };
+    log_event("INFO", &format!("{label}: watching parent pid {pid}"));
+    cx.spawn(async move |cx| loop {
+        cx.background_executor()
+            .timer(std::time::Duration::from_secs(1))
+            .await;
+        if parent.exited() {
+            log_event("INFO", &format!("{label}: parent process gone; exiting"));
+            cx.update(|app| app.quit());
+            break;
+        }
+    })
+    .detach();
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+pub fn watch_parent(_cx: &mut App, _label: &'static str) {}
 
 /// Native window handle of a GPUI window, if it has one.
 #[cfg(windows)]

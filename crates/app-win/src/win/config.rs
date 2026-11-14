@@ -15,7 +15,7 @@ pub(crate) fn config() -> Config {
             // normal 500ms poll instead of pinning defaults forever.
             let loaded = match CONFIG_WATCHER.with(|watcher| watcher.borrow_mut().load_initial()) {
                 Ok((c, issues, source)) => {
-                    log_config_issues(&issues);
+                    log_sanitize_issues("config repair", &issues);
                     CONFIG_LOAD_FAILED.store(false, Ordering::Relaxed);
                     CONFIG_FROM_FILE.store(
                         source == sysvitals_core::config::ConfigSource::File,
@@ -41,10 +41,6 @@ pub(crate) fn store_config(new: Config) {
     if let Some(slot) = CONFIG.get() {
         *slot.write().expect("config lock") = new;
     }
-}
-
-pub(crate) fn log_config_issues(issues: &[sysvitals_core::config::SanitizeIssue]) {
-    sysvitals_support::log_sanitize_issues("config repair", issues);
 }
 
 // ----------------------------------------------------------------- logging
@@ -174,71 +170,41 @@ pub(crate) unsafe fn set_auto_start(enabled: bool) -> Result<bool, String> {
     Ok(changed)
 }
 
-/// A failed auto-start apply is retried without waiting for the user to touch
-/// the setting again. The cooldown keeps a permanently unavailable shell
-/// folder or COM shortcut from producing one WARN per config poll.
-const AUTO_START_RETRY_COOLDOWN: Duration = Duration::from_secs(300);
-
 thread_local! {
-    static AUTO_START_RETRY_AT: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
+    /// Shared login-startup policy; the platform side effect is the Startup
+    /// shortcut below. The controller owns the explicit-bit rule, the applied
+    /// cache and the retry cooldown.
+    static AUTO_START: RefCell<AutoStartController> = RefCell::new(AutoStartController::new());
+}
+
+fn set_auto_start_outcome(desired: bool) -> Result<AutoStartOutcome, String> {
+    unsafe { set_auto_start(desired) }.map(|changed| {
+        if changed {
+            AutoStartOutcome::Changed { detail: None }
+        } else {
+            AutoStartOutcome::Unchanged
+        }
+    })
 }
 
 /// Apply the login-startup preference once per value change. The settings
 /// window writes the config; this process owns the Startup-folder side effect.
 pub(crate) fn apply_auto_start(cfg: &Config) {
-    // A `false` that merely came from the default (or a config re-created
-    // after a corrupt file was backed up) is not an explicit user choice,
-    // so it must not remove a login item. A legacy `true` is still safe
-    // to apply: it can only repair/add the entry, never remove one.
-    if !cfg.startup.auto_start_explicit && !cfg.startup.auto_start {
-        // Leave the system state alone, but forget the last applied bit
-        // so a later explicit/legacy `true` can still repair the entry.
-        APPLIED_AUTO_START.store(u32::MAX, Ordering::Relaxed);
-        AUTO_START_RETRY_AT.with(|slot| slot.set(None));
-        return;
-    }
-    let desired = cfg.startup.auto_start;
-    let desired_bits = desired as u32;
-    if APPLIED_AUTO_START.load(Ordering::Relaxed) == desired_bits {
-        AUTO_START_RETRY_AT.with(|slot| slot.set(None));
-        return;
-    }
-    match unsafe { set_auto_start(desired) } {
-        Ok(changed) => {
-            APPLIED_AUTO_START.store(desired_bits, Ordering::Relaxed);
-            AUTO_START_RETRY_AT.with(|slot| slot.set(None));
-            if changed {
-                log_event(
-                    "INFO",
-                    &format!(
-                        "auto-start {}",
-                        if desired { "enabled" } else { "disabled" }
-                    ),
-                );
-            }
-        }
-        Err(e) => {
-            AUTO_START_RETRY_AT.with(|slot| {
-                slot.set(Some(Instant::now() + AUTO_START_RETRY_COOLDOWN));
-            });
-            sysvitals_support::log_auto_start_failure(desired, &e);
-        }
-    }
+    AUTO_START.with(|controller| controller.borrow_mut().apply(cfg, set_auto_start_outcome));
 }
 
 /// Retry a failed auto-start apply on its cooldown, even when the config file
 /// has not changed. Only a file-backed, successfully parsed config may drive
 /// this side effect.
 fn retry_auto_start_if_due() {
-    let due = AUTO_START_RETRY_AT.with(|slot| slot.get().is_some_and(|at| Instant::now() >= at));
-    if !due {
-        return;
-    }
-    AUTO_START_RETRY_AT.with(|slot| slot.set(None));
-    if !CONFIG_FROM_FILE.load(Ordering::Relaxed) {
-        return;
-    }
-    apply_auto_start(&config());
+    let cfg = config();
+    AUTO_START.with(|controller| {
+        controller.borrow_mut().retry_if_due(
+            CONFIG_FROM_FILE.load(Ordering::Relaxed),
+            &cfg,
+            set_auto_start_outcome,
+        );
+    });
 }
 
 // ------------------------------------------------- config file watching
@@ -247,28 +213,21 @@ fn retry_auto_start_if_due() {
 /// against the cached value; on change, reloads the config, re-seeds the
 /// sample timer (interval may have changed), and re-lays out every overlay.
 pub(crate) fn poll_config_change() {
-    let poll = CONFIG_WATCHER.with(|watcher| watcher.borrow_mut().poll());
+    let poll = CONFIG_WATCHER
+        .with(|watcher| sysvitals_support::poll_config(&mut watcher.borrow_mut(), "config reload"));
     let (loaded, source) = match poll {
-        ConfigPoll::Unchanged => {
+        ConfigEvent::Unchanged => {
             retry_auto_start_if_due();
             return;
         }
-        ConfigPoll::Failed { error, logged } => {
-            // Keep the last good config. A fixed file is picked up on the
-            // next poll; the watcher throttles the log to one line per
-            // broken mtime.
-            if logged {
-                log_event("WARN", &format!("config reload failed: {error}"));
-            }
-            return;
-        }
-        ConfigPoll::Loaded {
-            config: loaded,
+        ConfigEvent::Failed => return,
+        ConfigEvent::Loaded {
+            config,
             issues,
             source,
         } => {
-            log_config_issues(&issues);
-            (loaded, source)
+            log_sanitize_issues("config repair", &issues);
+            (config, source)
         }
     };
     CONFIG_FROM_FILE.store(
@@ -285,26 +244,11 @@ pub(crate) fn poll_config_change() {
     } else {
         // Let a later re-created config apply its value again, even if it
         // matches the last one we applied.
-        APPLIED_AUTO_START.store(u32::MAX, Ordering::Relaxed);
-        AUTO_START_RETRY_AT.with(|slot| slot.set(None));
+        AUTO_START.with(|controller| controller.borrow_mut().reset());
     }
     log_event(
         "INFO",
-        &format!(
-            "config file change detected: interval={}ms language={:?} theme={:?} \
-                 dual_row={} show_resources={} show_network={} item_spacing={}px \
-                 anchor={:?} left_margin={}px auto_start={}",
-            loaded.sample.interval_ms,
-            loaded.display.language,
-            loaded.display.theme,
-            loaded.display.dual_row,
-            loaded.display.show_resources,
-            loaded.display.show_network,
-            loaded.display.item_spacing,
-            loaded.windows.anchor,
-            loaded.windows.left_margin_px,
-            loaded.startup.auto_start,
-        ),
+        &format!("config file change detected: {}", loaded.summary()),
     );
     // Re-seed the sample timer in case the interval changed. SetTimer
     // with the same hwnd+id replaces the running timer, so no KillTimer

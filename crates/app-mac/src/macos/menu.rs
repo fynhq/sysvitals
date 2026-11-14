@@ -2,6 +2,26 @@
 
 use super::*;
 
+/// Build one explicitly targeted menu item. Automatic enabling would walk the
+/// responder chain and gray the item out because the handler is not inserted
+/// into it.
+fn menu_item(
+    mtm: MainThreadMarker,
+    title: &str,
+    action: objc2::runtime::Sel,
+    target: &ActionHandler,
+) -> Retained<NSMenuItem> {
+    let item = NSMenuItem::new(mtm);
+    item.setTitle(&NSString::from_str(title));
+    // SAFETY: `action` is a selector implemented by `ActionHandler`;
+    // `target` is the live handler kept in ACTION_HANDLER.
+    unsafe {
+        item.setAction(Some(action));
+        item.setTarget(Some(target));
+    }
+    item
+}
+
 /// Show the context menu at the status item position.
 pub(crate) fn show_context_menu() {
     let mtm = mtm();
@@ -34,41 +54,30 @@ pub(crate) fn show_context_menu() {
         // and moving it to the top of the context menu is what freed the
         // left click to open the trend chart instantly (mirrors the
         // Windows overlay's Task Manager entry).
-        let activity_title = NSString::from_str(t(lang, "menu.activity_monitor"));
-        let activity_item = NSMenuItem::new(mtm);
-        activity_item.setTitle(&activity_title);
-        // SAFETY: setting a valid selector on a menu item.
-        unsafe { activity_item.setAction(Some(sel!(showActivityMonitor:))) };
-        // SAFETY: `target` is the live ActionHandler kept in ACTION_HANDLER.
-        unsafe { activity_item.setTarget(Some(target)) };
-        menu.addItem(&activity_item);
-
-        let settings_title = NSString::from_str(t(lang, "menu.settings"));
-        let settings_item = NSMenuItem::new(mtm);
-        settings_item.setTitle(&settings_title);
-        unsafe { settings_item.setAction(Some(sel!(showSettings:))) };
-        // SAFETY: `target` is the live ActionHandler kept in ACTION_HANDLER.
-        unsafe { settings_item.setTarget(Some(target)) };
-        menu.addItem(&settings_item);
-
-        let restart_title = NSString::from_str(t(lang, "menu.restart"));
-        let restart_item = NSMenuItem::new(mtm);
-        restart_item.setTitle(&restart_title);
-        unsafe { restart_item.setAction(Some(sel!(restartApp:))) };
-        // SAFETY: `target` is the live ActionHandler kept in ACTION_HANDLER.
-        unsafe { restart_item.setTarget(Some(target)) };
+        menu.addItem(&menu_item(
+            mtm,
+            t(lang, "menu.activity_monitor"),
+            sel!(showActivityMonitor:),
+            target,
+        ));
+        menu.addItem(&menu_item(
+            mtm,
+            t(lang, "menu.settings"),
+            sel!(showSettings:),
+            target,
+        ));
 
         // Separator, then Restart above Quit: Restart is a lifecycle
         // action like Quit, so both sit below the divider, Restart first.
+        let restart_item = menu_item(mtm, t(lang, "menu.restart"), sel!(restartApp:), target);
         menu.addItem(&NSMenuItem::separatorItem(mtm));
         menu.addItem(&restart_item);
-
-        let quit_title = NSString::from_str(t(lang, "menu.quit"));
-        let quit_item = NSMenuItem::new(mtm);
-        quit_item.setTitle(&quit_title);
-        unsafe { quit_item.setAction(Some(sel!(quitApp:))) };
-        unsafe { quit_item.setTarget(Some(target)) };
-        menu.addItem(&quit_item);
+        menu.addItem(&menu_item(
+            mtm,
+            t(lang, "menu.quit"),
+            sel!(quitApp:),
+            target,
+        ));
 
         // Pop the menu directly at the button's lower-left corner. The
         // previous approach (attach with `setMenu`, then `performClick`,

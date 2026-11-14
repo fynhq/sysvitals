@@ -25,7 +25,6 @@ gpui-kit = { workspace = true }
 # display before it is shown.
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true }
-raw-window-handle = "=0.6.2"
 
 # macOS-only: reads AppKit's dynamic `controlAccentColor` so the panel's
 # primary buttons follow the current system accent in every mode, including
@@ -38,7 +37,6 @@ raw-window-handle = "=0.6.2"
 # is a plain `f64` alias on the supported 64-bit targets, so no type import is
 # needed to pass the out-params.
 [target.'cfg(target_os = "macos")'.dependencies]
-libc = "=0.2.191"
 objc2 = "=0.6.5"
 objc2-app-kit = { version = "=0.3.2", default-features = false, features = [
     "NSAppearance",

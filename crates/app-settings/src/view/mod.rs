@@ -9,21 +9,20 @@ use sysvitals_panel::restore_window_size_after_move;
 // Dropdown item builders
 // ---------------------------------------------------------------------------
 
-/// Item-spacing presets, shown as raw pixel values. "px" is a unit symbol
-/// shared by both locales, so the list needs no translation.
+/// Render a list of pixel presets. "px" is a unit symbol shared by both
+/// locales, so the list needs no translation.
+fn px_items(values: &[u32]) -> Vec<String> {
+    values.iter().map(|px| format!("{px} px")).collect()
+}
+
+/// Item-spacing presets, shown as raw pixel values.
 pub(crate) fn spacing_items() -> Vec<String> {
-    ALLOWED_ITEM_SPACING_PX
-        .iter()
-        .map(|&px| format!("{px} px"))
-        .collect()
+    px_items(&ALLOWED_ITEM_SPACING_PX)
 }
 
 /// Margin presets, shown like [`spacing_items`].
 pub(crate) fn margin_items() -> Vec<String> {
-    ALLOWED_LEFT_MARGIN_PX
-        .iter()
-        .map(|&px| format!("{px} px"))
-        .collect()
+    px_items(&ALLOWED_LEFT_MARGIN_PX)
 }
 
 /// Anchor items are translated text (the choice labels), rebuilt whenever the

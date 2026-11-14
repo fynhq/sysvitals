@@ -145,6 +145,30 @@ fn append_anchor_args(cmd: &mut std::process::Command) {
     }
 }
 
+/// Spawn one panel binary with the shared parent/anchor arguments. `record`
+/// stores the live child in the panel-specific slot.
+fn launch_panel(exe_name: &str, label: &str, record: impl FnOnce(Child)) {
+    let Some(dir) = exe_dir() else {
+        log_event("WARN", &format!("{label}: cannot determine exe directory"));
+        return;
+    };
+    let path = dir.join(exe_name);
+    if !path.exists() {
+        log_event("WARN", &format!("{label}: not found: {}", path.display()));
+        return;
+    }
+    let parent_pid = std::process::id().to_string();
+    let mut cmd = std::process::Command::new(path);
+    cmd.args(["--parent-pid", parent_pid.as_str()]);
+    // Open the panel on the display that hosts the clicked status item
+    // instead of always centering on the primary screen.
+    append_anchor_args(&mut cmd);
+    match cmd.spawn() {
+        Ok(child) => record(child),
+        Err(e) => log_event("WARN", &format!("{label}: spawn failed: {e}")),
+    }
+}
+
 /// Launch the external GPUI settings process (`SysVitalsSettings`), one
 /// live instance at a time.
 pub(crate) fn launch_settings() {
@@ -154,30 +178,9 @@ pub(crate) fn launch_settings() {
     if SETTINGS_CHILD.with(child_alive) {
         return;
     }
-    let Some(dir) = exe_dir() else {
-        log_event("WARN", "launch_settings: cannot determine exe directory");
-        return;
-    };
-    let settings = dir.join("SysVitalsSettings");
-    if !settings.exists() {
-        log_event(
-            "WARN",
-            &format!("launch_settings: not found: {}", settings.display()),
-        );
-        return;
-    }
-    let parent_pid = std::process::id().to_string();
-    let mut cmd = std::process::Command::new(settings);
-    cmd.args(["--parent-pid", parent_pid.as_str()]);
-    // Let the settings window open on the display that hosts the clicked
-    // status item instead of always centering on the primary screen.
-    append_anchor_args(&mut cmd);
-    match cmd.spawn() {
-        Ok(child) => {
-            SETTINGS_CHILD.with(|slot| *slot.borrow_mut() = Some(child));
-        }
-        Err(e) => log_event("WARN", &format!("launch_settings: spawn failed: {e}")),
-    }
+    launch_panel("SysVitalsSettings", "launch_settings", |child| {
+        SETTINGS_CHILD.with(|slot| *slot.borrow_mut() = Some(child));
+    });
 }
 
 /// Launch the external history chart process (`SysVitalsHistory`), passing
@@ -187,29 +190,10 @@ pub(crate) fn launch_history() {
     if HISTORY_CHILD.with(child_alive) {
         return;
     }
-    let Some(dir) = exe_dir() else {
-        log_event("WARN", "launch_history: cannot determine exe directory");
-        return;
-    };
-    let history = dir.join("SysVitalsHistory");
-    if !history.exists() {
-        log_event(
-            "WARN",
-            &format!("launch_history: not found: {}", history.display()),
-        );
-        return;
-    }
-    let parent_pid = std::process::id().to_string();
-    let mut cmd = std::process::Command::new(history);
-    cmd.args(["--parent-pid", parent_pid.as_str()]);
-    append_anchor_args(&mut cmd);
-    match cmd.spawn() {
-        Ok(child) => {
-            HISTORY_LAUNCHED_AT.with(|launched| launched.set(Some(Instant::now())));
-            HISTORY_CHILD.with(|slot| *slot.borrow_mut() = Some(child));
-        }
-        Err(e) => log_event("WARN", &format!("launch_history: spawn failed: {e}")),
-    }
+    launch_panel("SysVitalsHistory", "launch_history", |child| {
+        HISTORY_LAUNCHED_AT.with(|launched| launched.set(Some(Instant::now())));
+        HISTORY_CHILD.with(|slot| *slot.borrow_mut() = Some(child));
+    });
 }
 
 /// Close the trend popup if one is running: the click-to-toggle half of

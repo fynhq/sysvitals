@@ -192,23 +192,7 @@ pub(crate) fn width_slack_px(vertical: bool) -> i32 {
 /// Antialiased (not ClearType) because the glyphs are composited
 /// per-pixel-alpha over the taskbar.
 pub(crate) unsafe fn make_font_for(hwnd: HWND, vertical: bool) -> HFONT {
-    let (_, face) = ui_font();
-    CreateFontW(
-        effective_font_height_for(hwnd, vertical),
-        0,
-        0,
-        0,
-        TEXT_WEIGHT.load(Ordering::Relaxed),
-        0,
-        0,
-        0,
-        DEFAULT_CHARSET,
-        OUT_DEFAULT_PRECIS,
-        CLIP_DEFAULT_PRECIS,
-        ANTIALIASED_QUALITY,
-        (DEFAULT_PITCH.0 | FF_SWISS.0) as u32,
-        windows::core::PCWSTR(face.as_ptr()),
-    )
+    make_font_at_for(hwnd, 1, vertical)
 }
 
 /// Overlay font at an integer supersample multiplier. Used to render at a

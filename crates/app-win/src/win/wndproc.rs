@@ -197,18 +197,19 @@ pub(crate) fn run() {
         install_crash_hooks();
 
         // Single-instance guard.
-        let mutex_name = utf16("Local\\SysVitals_SingleInstance");
-        let _mutex = match CreateMutexW(None, false, windows::core::PCWSTR(mutex_name.as_ptr())) {
-            Ok(h) => {
-                if windows::Win32::Foundation::GetLastError()
-                    == windows::Win32::Foundation::ERROR_ALREADY_EXISTS
-                {
-                    log_event("INFO", "another instance is already running; exiting");
-                    return;
-                }
-                h
+        let _instance = match acquire_instance_lock("Local\\SysVitals_SingleInstance") {
+            InstanceLock::Acquired(guard) => guard,
+            InstanceLock::Busy => {
+                log_event("INFO", "another instance is already running; exiting");
+                return;
             }
-            Err(_) => return,
+            InstanceLock::Unavailable(error) => {
+                log_event(
+                    "WARN",
+                    &format!("single-instance mutex unavailable: {error}; exiting"),
+                );
+                return;
+            }
         };
 
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -230,24 +231,7 @@ pub(crate) fn run() {
                 env!("CARGO_PKG_VERSION")
             ),
         );
-        log_event(
-            "INFO",
-            &format!(
-                "config loaded: interval={}ms language={:?} theme={:?} dual_row={} \
-                     show_resources={} show_network={} item_spacing={}px anchor={:?} \
-                     left_margin={}px auto_start={}",
-                cfg.sample.interval_ms,
-                cfg.display.language,
-                cfg.display.theme,
-                cfg.display.dual_row,
-                cfg.display.show_resources,
-                cfg.display.show_network,
-                cfg.display.item_spacing,
-                cfg.windows.anchor,
-                cfg.windows.left_margin_px,
-                cfg.startup.auto_start,
-            ),
-        );
+        log_event("INFO", &format!("config loaded: {}", cfg.summary()));
         if !CONFIG_LOAD_FAILED.load(Ordering::Relaxed) && CONFIG_FROM_FILE.load(Ordering::Relaxed) {
             apply_auto_start(&cfg);
         }

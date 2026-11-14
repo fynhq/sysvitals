@@ -43,12 +43,4 @@ pub(crate) fn apply_theme_and_accent(cx: &mut App) {
         theme.colors.button_hover = hover;
         theme.colors.button_active = active;
     });
-    // Win11's Segoe UI Variable has an optical-size axis tuned for UI text;
-    // the palette reload above may reset the family, so re-apply it here.
-    #[cfg(windows)]
-    UiTheme::update(cx, |theme| {
-        if let Some(family) = panel_font_family() {
-            theme.font_family = family.into();
-        }
-    });
 }

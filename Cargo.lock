@@ -193,8 +193,6 @@ version = "0.5.0"
 dependencies = [
  "arboard",
  "gpui-kit",
- "libc",
- "raw-window-handle",
  "sysvitals-build",
  "sysvitals-core",
  "sysvitals-panel",
@@ -206,11 +204,9 @@ name = "app-mac"
 version = "0.5.0"
 dependencies = [
  "block2 0.6.2",
- "libc",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
- "sysvitals-build",
  "sysvitals-core",
  "sysvitals-support",
 ]
@@ -220,11 +216,9 @@ name = "app-settings"
 version = "0.5.0"
 dependencies = [
  "gpui-kit",
- "libc",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
- "raw-window-handle",
  "sysvitals-build",
  "sysvitals-core",
  "sysvitals-panel",
@@ -6391,6 +6385,8 @@ name = "sysvitals-support"
 version = "0.5.0"
 dependencies = [
  "chrono",
+ "libc",
+ "sysvitals-build",
  "sysvitals-core",
  "windows 0.62.2",
 ]

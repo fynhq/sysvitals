@@ -2,6 +2,30 @@
 
 use super::*;
 
+/// Common styling for a segmented choice tile. The caller adds its label,
+/// icon, accessibility name and click handler.
+pub(crate) fn choice_button(id: String, active: bool) -> Button {
+    Button::new(id)
+        .small()
+        .rounded(px(CONTROL_RADIUS))
+        .when(active, |button| button.primary())
+        .toggled(active)
+}
+
+/// Visible page title. It doubles as the top-level heading for assistive
+/// technology; the native window title is set separately.
+pub(crate) fn window_heading(title: String, color: Hsla) -> Div {
+    div()
+        .id("window-heading")
+        .role(Role::Heading)
+        .aria_level(1)
+        .aria_label(title.clone())
+        .text_size(px(13.))
+        .font_semibold()
+        .text_color(color)
+        .child(title)
+}
+
 /// A section heading: WinUI group headers are 12px semibold and muted.
 /// A muted 16px icon anchors the left edge of each group, matching the
 /// single-color row icons below. The text is a level-2 heading in the
@@ -96,24 +120,22 @@ pub(crate) fn blur_on_outside(element: Div) -> Div {
     element.on_mouse_down_out(|_, window, cx| window.blur(cx))
 }
 
-/// A labelled control row: a muted single-color icon and title on the left,
-/// a wrapped tile group on the right. Centered vertically like a WinUI
-/// settings row. The title is exposed as a text node and the row as a group,
-/// so the control keeps its own accessible name while the module stays
-/// identifiable.
-pub(crate) fn labeled_row(
+/// Shared row body for [`labeled_row`] and [`switch_row`]. The only visual
+/// difference is the wider gap before a segmented control.
+fn control_row(
     id: &'static str,
     title: String,
     icon: IconName,
     control: impl IntoElement,
     dim: Hsla,
+    spaced: bool,
 ) -> impl IntoElement {
     h_flex()
         .id(id)
         .role(Role::Group)
         .justify_between()
         .items_center()
-        .gap_4()
+        .when(spaced, |this| this.gap_4())
         .py_2()
         .child(
             h_flex()
@@ -131,6 +153,21 @@ pub(crate) fn labeled_row(
         .child(control)
 }
 
+/// A labelled control row: a muted single-color icon and title on the left,
+/// a wrapped tile group on the right. Centered vertically like a WinUI
+/// settings row. The title is exposed as a text node and the row as a group,
+/// so the control keeps its own accessible name while the module stays
+/// identifiable.
+pub(crate) fn labeled_row(
+    id: &'static str,
+    title: String,
+    icon: IconName,
+    control: impl IntoElement,
+    dim: Hsla,
+) -> impl IntoElement {
+    control_row(id, title, icon, control, dim, true)
+}
+
 /// A labelled on/off row with the WinUI row height.
 pub(crate) fn switch_row(
     id: &'static str,
@@ -139,26 +176,7 @@ pub(crate) fn switch_row(
     control: impl IntoElement,
     dim: Hsla,
 ) -> impl IntoElement {
-    h_flex()
-        .id(id)
-        .role(Role::Group)
-        .justify_between()
-        .items_center()
-        .py_2()
-        .child(
-            h_flex()
-                .items_center()
-                .gap_2()
-                .child(Icon::new(icon).text_color(dim))
-                .child(
-                    div()
-                        .id(format!("{id}-title"))
-                        .role(Role::Label)
-                        .aria_value(title.clone())
-                        .child(title),
-                ),
-        )
-        .child(control)
+    control_row(id, title, icon, control, dim, false)
 }
 
 /// A setting whose control is unavailable on this host. The title stays
@@ -242,12 +260,10 @@ pub(crate) fn error_banner(title: String, hint: String, dark: bool) -> impl Into
         )
 }
 
-/// Version banner shown in the settings footer — see the footer for how it
-/// is produced by the build script.
-pub(crate) const SV_BUILD_ID: &str = match option_env!("SV_BUILD_ID") {
-    Some(id) => id,
-    None => concat!("v", env!("CARGO_PKG_VERSION")),
-};
+/// Build stamp shared by every SysVitals process. The definition lives in
+/// `sysvitals-support` (emitted by its build script) so the settings footer
+/// cannot drift from the indicator startup logs.
+pub(crate) use sysvitals_panel::SV_BUILD_ID;
 
 /// Where the footer version link points. Taken from the manifest's
 /// `repository` field (inherited from the workspace) so the URL cannot drift

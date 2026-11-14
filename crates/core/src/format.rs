@@ -181,7 +181,8 @@ pub struct FormattedRow {
     pub items: Vec<String>,
 }
 
-fn prefix_for(metric: Metric, cfg: &Config) -> &str {
+/// The configured label prefix for one metric.
+pub fn metric_prefix(metric: Metric, cfg: &Config) -> &str {
     match metric {
         Metric::Cpu => &cfg.display.prefix.cpu,
         Metric::Mem => &cfg.display.prefix.mem,
@@ -190,8 +191,19 @@ fn prefix_for(metric: Metric, cfg: &Config) -> &str {
     }
 }
 
-fn shown(metric: Metric, cfg: &Config) -> bool {
+/// Whether one metric is visible under the paired show toggles.
+pub fn metric_visible(metric: Metric, cfg: &Config) -> bool {
     cfg.display.metric_visible(metric)
+}
+
+/// The enabled metrics in `Metric::ALL` order. Shared by the formatter and
+/// the platform renderers that reserve fixed slots for each metric, so the
+/// visible set cannot drift between the text and its layout.
+pub fn visible_metrics(cfg: &Config) -> Vec<Metric> {
+    Metric::ALL
+        .into_iter()
+        .filter(|metric| metric_visible(*metric, cfg))
+        .collect()
 }
 
 /// The metrics that belong to the dual-row left and right columns, honoring
@@ -249,34 +261,31 @@ fn format_value_impl(metric: Metric, snapshot: &Snapshot, with_per_sec: bool) ->
     }
 }
 
+/// Format one column's metrics into `(metric, padded-cell-text)` pairs.
+fn metric_cells(metrics: Vec<Metric>, cfg: &Config, snapshot: &Snapshot) -> Vec<(Metric, String)> {
+    metrics
+        .into_iter()
+        .map(|metric| {
+            (
+                metric,
+                join_prefix(metric_prefix(metric, cfg), &format_value(metric, snapshot)),
+            )
+        })
+        .collect()
+}
+
 /// Build the full status-bar frame from a snapshot and config, honoring the
 /// per-metric show toggles and the dual-row layout choice.
 pub fn format_frame(snapshot: &Snapshot, cfg: &Config) -> FormattedRow {
-    let enabled: Vec<Metric> = Metric::ALL.into_iter().filter(|m| shown(*m, cfg)).collect();
+    let enabled = visible_metrics(cfg);
 
     if cfg.display.dual_row {
         // 2x2 quadrant: left column CPU over MEM, right column U over D.
         // `column_metrics` is the shared source for this grouping; the
         // platform renderers use the same function for slot reservations.
         let (left_metrics, right_metrics) = column_metrics(cfg);
-        let left: Vec<(Metric, String)> = left_metrics
-            .into_iter()
-            .map(|m| {
-                (
-                    m,
-                    join_prefix(prefix_for(m, cfg), &format_value(m, snapshot)),
-                )
-            })
-            .collect();
-        let right: Vec<(Metric, String)> = right_metrics
-            .into_iter()
-            .map(|m| {
-                (
-                    m,
-                    join_prefix(prefix_for(m, cfg), &format_value(m, snapshot)),
-                )
-            })
-            .collect();
+        let left = metric_cells(left_metrics, cfg, snapshot);
+        let right = metric_cells(right_metrics, cfg, snapshot);
 
         // Column widths are computed from the two cells in each column so the
         // numbers stay aligned across the two rows.
@@ -336,7 +345,7 @@ pub fn format_frame(snapshot: &Snapshot, cfg: &Config) -> FormattedRow {
         // that only want a single string (e.g. the terminal example).
         let items: Vec<String> = enabled
             .iter()
-            .map(|m| join_prefix(prefix_for(*m, cfg), &format_value(*m, snapshot)))
+            .map(|m| join_prefix(metric_prefix(*m, cfg), &format_value(*m, snapshot)))
             .collect();
         // Space-joined fallback for string-only consumers (terminal example).
         // The display layer ignores this and uses `items` with a pixel gap.
@@ -374,13 +383,13 @@ fn cell_at(cells: &[(Metric, String)], idx: usize, width: usize) -> String {
 /// user configured (the built-in defaults end with `:`), and it stays
 /// independent of the UI language.
 pub fn format_frame_vertical(snapshot: &Snapshot, cfg: &Config) -> FormattedRow {
-    let enabled: Vec<Metric> = Metric::ALL.into_iter().filter(|m| shown(*m, cfg)).collect();
+    let enabled = visible_metrics(cfg);
     let mut lines: Vec<Line> = Vec::with_capacity(enabled.len() * 2);
     for (i, m) in enabled.iter().enumerate() {
         if i > 0 {
             lines.push(Line::single(""));
         }
-        let prefix = prefix_for(*m, cfg);
+        let prefix = metric_prefix(*m, cfg);
         if !prefix.is_empty() {
             lines.push(Line::single(prefix.to_string()));
         }
@@ -712,6 +721,19 @@ mod tests {
         cfg.display.show_resources = false;
         cfg.display.show_network = false;
         assert_eq!(column_metrics(&cfg), (Vec::new(), Vec::new()));
+    }
+
+    #[test]
+    fn visible_metrics_and_prefixes_match_the_formatter() {
+        let mut cfg = Config::default();
+        assert_eq!(
+            visible_metrics(&cfg),
+            vec![Metric::Cpu, Metric::Mem, Metric::Up, Metric::Down]
+        );
+        cfg.display.show_resources = false;
+        assert_eq!(visible_metrics(&cfg), vec![Metric::Up, Metric::Down]);
+        assert_eq!(metric_prefix(Metric::Cpu, &cfg), "CPU:");
+        assert_eq!(metric_prefix(Metric::Down, &cfg), "D:");
     }
 
     #[test]

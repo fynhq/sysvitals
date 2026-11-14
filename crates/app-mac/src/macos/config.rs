@@ -2,77 +2,46 @@
 
 use super::*;
 
-pub(crate) fn log_config_issues(issues: &[sysvitals_core::config::SanitizeIssue]) {
-    sysvitals_support::log_sanitize_issues("config repair", issues);
-}
-
-/// A failed auto-start apply is retried without waiting for the user to touch
-/// the setting again. The cooldown keeps a permanently failing
-/// `SMAppService` call from logging on every sample tick.
-const AUTO_START_RETRY_COOLDOWN: Duration = Duration::from_secs(300);
-
-thread_local! {
-    static AUTO_START_RETRY_AT: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
-}
-
 /// Retry a failed login-item apply on its cooldown, even when the config file
 /// has not changed. The retry timer is only armed by a file-backed apply, so
 /// a missing/never-loaded config cannot start the side effect on its own.
 fn retry_auto_start_if_due() {
-    let due = AUTO_START_RETRY_AT.with(|slot| slot.get().is_some_and(|at| Instant::now() >= at));
-    if !due {
-        return;
-    }
-    AUTO_START_RETRY_AT.with(|slot| slot.set(None));
     let cfg = CONFIG.with(|c| c.borrow().clone());
-    apply_auto_start(&cfg);
+    AUTO_START.with(|controller| {
+        controller
+            .borrow_mut()
+            .retry_if_due(true, &cfg, set_launch_at_login_outcome);
+    });
 }
 
 /// Load or reload the config file. The watcher only advances its cache on a
 /// successful parse, so a corrupt file keeps the last good config and is
 /// retried when it changes again.
 pub(crate) fn reload_config_if_changed() {
-    let poll = CONFIG_WATCHER.with(|watcher| watcher.borrow_mut().poll());
+    let poll = CONFIG_WATCHER
+        .with(|watcher| sysvitals_support::poll_config(&mut watcher.borrow_mut(), "config reload"));
     let (cfg, issues, source) = match poll {
-        ConfigPoll::Unchanged => {
+        ConfigEvent::Unchanged => {
             retry_auto_start_if_due();
             return;
         }
-        ConfigPoll::Failed { error, logged } => {
-            if logged {
-                log_event("WARN", &format!("config reload failed: {error}"));
-            }
-            return;
-        }
-        ConfigPoll::Loaded {
+        ConfigEvent::Failed => return,
+        ConfigEvent::Loaded {
             config,
             issues,
             source,
         } => (config, issues, source),
     };
-    log_config_issues(&issues);
+    log_sanitize_issues("config repair", &issues);
     CONFIG.with(|c| *c.borrow_mut() = cfg.clone());
     if source == sysvitals_core::config::ConfigSource::File {
         apply_auto_start(&cfg);
     } else {
         // A missing file is not an explicit "off" choice; let a later
         // re-created config apply its value again.
-        APPLIED_AUTO_START.with(|c| c.set(None));
-        AUTO_START_RETRY_AT.with(|slot| slot.set(None));
+        AUTO_START.with(|controller| controller.borrow_mut().reset());
     }
-    log_event(
-        "INFO",
-        &format!(
-            "config reloaded: interval={}ms dual_row={} show_resources={} \
-                 show_network={} item_spacing={}px auto_start={}",
-            cfg.sample.interval_ms,
-            cfg.display.dual_row,
-            cfg.display.show_resources,
-            cfg.display.show_network,
-            cfg.display.item_spacing,
-            cfg.startup.auto_start,
-        ),
-    );
+    log_event("INFO", &format!("config reloaded: {}", cfg.summary()));
 }
 
 /// Ask `SMAppService` for the current login-item state. Returns the new
@@ -125,47 +94,23 @@ pub(crate) fn set_launch_at_login(enabled: bool) -> Result<Option<isize>, String
     }
 }
 
+/// Map the `SMAppService` result onto the shared auto-start outcome.
+fn set_launch_at_login_outcome(desired: bool) -> Result<AutoStartOutcome, String> {
+    match set_launch_at_login(desired)? {
+        None => Ok(AutoStartOutcome::Unchanged),
+        Some(2) if desired => Ok(AutoStartOutcome::PendingApproval),
+        Some(status) => Ok(AutoStartOutcome::Changed {
+            detail: Some(format!("status={status}")),
+        }),
+    }
+}
+
 /// Apply the login-startup preference once per value change. The settings
 /// window writes the config; this process owns the ServiceManagement call.
 pub(crate) fn apply_auto_start(cfg: &Config) {
-    // See the Windows counterpart: an inherited `false` must not remove
-    // a login item; an inherited `true` may still repair/register one.
-    if !cfg.startup.auto_start_explicit && !cfg.startup.auto_start {
-        // Leave the system state alone, but forget the last applied bit
-        // so a later explicit/legacy `true` can still repair the entry.
-        APPLIED_AUTO_START.with(|c| c.set(None));
-        AUTO_START_RETRY_AT.with(|slot| slot.set(None));
-        return;
-    }
-    let desired = cfg.startup.auto_start;
-    if APPLIED_AUTO_START.with(|c| c.get()) == Some(desired) {
-        AUTO_START_RETRY_AT.with(|slot| slot.set(None));
-        return;
-    }
-    match set_launch_at_login(desired) {
-        Ok(status) => {
-            APPLIED_AUTO_START.with(|c| c.set(Some(desired)));
-            AUTO_START_RETRY_AT.with(|slot| slot.set(None));
-            match status {
-                Some(2) if desired => log_event(
-                    "INFO",
-                    "auto-start requires approval in System Settings > Login Items",
-                ),
-                Some(status) => log_event(
-                    "INFO",
-                    &format!(
-                        "auto-start {} (status={status})",
-                        if desired { "enabled" } else { "disabled" }
-                    ),
-                ),
-                None => {}
-            }
-        }
-        Err(e) => {
-            AUTO_START_RETRY_AT.with(|slot| {
-                slot.set(Some(Instant::now() + AUTO_START_RETRY_COOLDOWN));
-            });
-            sysvitals_support::log_auto_start_failure(desired, &e);
-        }
-    }
+    AUTO_START.with(|controller| {
+        controller
+            .borrow_mut()
+            .apply(cfg, set_launch_at_login_outcome);
+    });
 }

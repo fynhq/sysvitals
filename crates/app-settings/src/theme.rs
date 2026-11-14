@@ -29,9 +29,6 @@ pub(crate) fn apply_theme_and_accent(cx: &mut App) {
         }
         #[cfg(windows)]
         {
-            if let Some(family) = panel_font_family() {
-                theme.font_family = family.into();
-            }
             let dark = theme.mode.is_dark();
             // The library's switch thumb falls back to the theme background:
             // white in light mode, but neutral-950 in dark mode, which nearly

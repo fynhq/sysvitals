@@ -2,7 +2,7 @@
 
 use super::*;
 
-use sysvitals_core::config_watch::{ConfigPoll, ConfigWatcher};
+use sysvitals_core::config_watch::ConfigWatcher;
 
 #[cfg(windows)]
 use sysvitals_panel::restore_window_size_after_move;
@@ -439,17 +439,10 @@ impl HistoryView {
     /// whether anything visible changed so the static 1 d / 1 mo views can
     /// skip their three-second repaint.
     pub(crate) fn reload_config(&mut self) -> bool {
-        match self.config_watcher.poll() {
-            ConfigPoll::Unchanged => false,
-            ConfigPoll::Failed { error, logged } => {
-                // The watcher keeps the last good values and does not retry
-                // this mtime again; log only the first failure.
-                if logged {
-                    log_event("WARN", &format!("history: config reload failed: {error}"));
-                }
-                false
-            }
-            ConfigPoll::Loaded { config, .. } => {
+        match sysvitals_panel::poll_config(&mut self.config_watcher, "history: config reload") {
+            ConfigEvent::Unchanged => false,
+            ConfigEvent::Failed => false,
+            ConfigEvent::Loaded { config, .. } => {
                 let changed = self.lang != config.display.language;
                 self.lang = config.display.language;
                 changed

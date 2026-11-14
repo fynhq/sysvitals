@@ -44,13 +44,12 @@ use sysvitals_core::config::{
 };
 use sysvitals_core::{t, Anchor, Config, Language, Theme};
 use sysvitals_panel::{
-    anchor_visible_bounds, backdrop_for, detect_material, layout_rect, log_event,
-    observe_system_appearance, spawn_accent_watch, PanelSurface, CONTROL_RADIUS,
+    acquire_instance_lock, anchor_arg, anchor_monitor_arg, anchor_visible_bounds, backdrop_for,
+    detect_material, layout_rect, log_event, observe_system_appearance, parent_pid_arg,
+    spawn_accent_watch, InstanceLock, PanelSurface, CONTROL_RADIUS,
 };
 #[cfg(windows)]
-use sysvitals_panel::{
-    panel_font_family, preplace_hidden_window, taskbar_al, utf16, window_hwnd, window_is_visible,
-};
+use sysvitals_panel::{preplace_hidden_window, taskbar_al, utf16, window_hwnd, window_is_visible};
 
 mod config;
 #[cfg(target_os = "macos")]
@@ -68,22 +67,39 @@ pub(crate) use theme::*;
 pub(crate) use view::*;
 pub(crate) use widgets::*;
 
+#[cfg(windows)]
+const INSTANCE_LOCK_NAME: &str = "Local\\SysVitalsSettings_SingleInstance";
+#[cfg(not(windows))]
+const INSTANCE_LOCK_NAME: &str = "settings.lock";
+
 fn main() {
     sysvitals_panel::install_panic_hook();
-    if !acquire_single_instance() {
-        log_event(
-            "WARN",
-            "settings: another settings window is already running; exiting",
-        );
-        return;
-    }
+    let _instance = match acquire_instance_lock(INSTANCE_LOCK_NAME) {
+        InstanceLock::Acquired(guard) => Some(guard),
+        InstanceLock::Busy => {
+            log_event(
+                "WARN",
+                "settings: another settings window is already running; exiting",
+            );
+            return;
+        }
+        InstanceLock::Unavailable(error) => {
+            // A mutex/flock failure must not keep the panel from opening; the
+            // parent launch slot remains the primary duplicate guard.
+            log_event(
+                "WARN",
+                &format!("settings: instance guard unavailable: {error}; continuing"),
+            );
+            None
+        }
+    };
     log_event(
         "INFO",
         &format!(
             "settings: starting (version={}, build={}, parent_pid={:?})",
             env!("CARGO_PKG_VERSION"),
             SV_BUILD_ID,
-            parse_parent_pid()
+            parent_pid_arg()
         ),
     );
     #[cfg(windows)]
@@ -149,8 +165,8 @@ fn main() {
         // The indicator passes its rect so the window opens on the same
         // monitor (multi-monitor); an absent or invalid anchor keeps the
         // default centered placement.
-        let anchor = parse_anchor();
-        let monitor = parse_anchor_monitor();
+        let anchor = anchor_arg();
+        let monitor = anchor_monitor_arg().map(DisplayId::new);
 
         let titlebar = {
             #[cfg(target_os = "macos")]

@@ -310,6 +310,27 @@ impl Config {
         toml::to_string_pretty(self).map_err(Into::into)
     }
 
+    /// One-line summary used by every process's config log. Keeping the field
+    /// list here stops the indicator, settings and reload paths from drifting
+    /// when a new user-visible field is added.
+    pub fn summary(&self) -> String {
+        format!(
+            "interval={}ms language={:?} theme={:?} dual_row={} \
+             show_resources={} show_network={} item_spacing={}px anchor={:?} \
+             left_margin={}px auto_start={}",
+            self.sample.interval_ms,
+            self.display.language,
+            self.display.theme,
+            self.display.dual_row,
+            self.display.show_resources,
+            self.display.show_network,
+            self.display.item_spacing,
+            self.windows.anchor,
+            self.windows.left_margin_px,
+            self.startup.auto_start,
+        )
+    }
+
     /// Parse TOML text, apply defaults for anything missing, then sanitize.
     ///
     /// A single unknown enum value (for example `theme = "Dark"` after a
@@ -665,6 +686,26 @@ mod tests {
         let text = c.to_toml_string().unwrap();
         let (back, _) = Config::from_toml_str(&text).unwrap();
         assert_eq!(back, c);
+    }
+
+    #[test]
+    fn summary_mentions_every_user_visible_field() {
+        let c = Config::default();
+        let summary = c.summary();
+        for field in [
+            "interval=",
+            "language=",
+            "theme=",
+            "dual_row=",
+            "show_resources=",
+            "show_network=",
+            "item_spacing=",
+            "anchor=",
+            "left_margin=",
+            "auto_start=",
+        ] {
+            assert!(summary.contains(field), "missing {field}: {summary}");
+        }
     }
 
     #[test]

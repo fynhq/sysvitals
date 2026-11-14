@@ -23,15 +23,9 @@ arboard = "=3.7.0"
 # and moves its own hidden window onto the target display before activation.
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true }
-raw-window-handle = "=0.6.2"
 
-# macOS-only: reads AppKit's dynamic `controlAccentColor` so the popup's
-# primary tile and focus ring follow the current system accent in every mode,
-# including the default multicolor / wallpaper-derived setting (same
-# rationale as the settings panel). See app-settings for the
-# feature-selection notes.
-[target.'cfg(target_os = "macos")'.dependencies]
-libc = "=0.2.191"
+# macOS-only dependencies for the GPUI popup are inherited through
+# `sysvitals-panel`; this binary has no direct macOS platform calls.
 
 [build-dependencies]
 sysvitals-build = { path = "../build-support" }

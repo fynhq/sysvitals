@@ -1,9 +1,10 @@
 //! Shared build-script helpers for the SysVitals binaries.
 //!
-//! The platform crates each embed the same icons/version resources and (for
-//! the indicator and the settings panel) the same `SV_BUILD_ID` stamp. This
-//! crate keeps those routines in one place so a change to the resource layout
-//! or the build-id rules cannot drift between `build.rs` files.
+//! The Windows binaries embed the same icons/version resources through this
+//! crate, and `sysvitals-support` emits the single `SV_BUILD_ID` stamp every
+//! process reports. This crate keeps those routines in one place so a change
+//! to the resource layout or the build-id rules cannot drift between
+//! `build.rs` files.
 //!
 //! The functions run inside the *calling* package's build-script process, so
 //! `CARGO_MANIFEST_DIR`, `CARGO_PKG_VERSION*` and the `cargo:` output lines

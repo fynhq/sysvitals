@@ -2,24 +2,6 @@
 
 use super::*;
 
-/// Parse `--anchor L T R B`; the pure parsing lives in `core::cli` (shared
-/// with the settings panel). Absent, malformed, or degenerate rectangles
-/// yield `None`, which keeps the old centered behavior — a bad argument must
-/// never prevent the window from opening.
-pub(crate) fn parse_anchor() -> Option<AnchorRect> {
-    let args: Vec<String> = env::args().skip(1).collect();
-    sysvitals_core::cli::parse_anchor(&args)
-}
-
-/// Parse `--anchor-monitor <handle>` from the process arguments: the native
-/// display handle (HMONITOR on Windows, NSScreenNumber on macOS) that hosted
-/// the indicator. `None` when absent, zero, or malformed. The pure parsing
-/// lives in `core::cli` (unit-tested there).
-pub(crate) fn parse_anchor_monitor() -> Option<DisplayId> {
-    let args: Vec<String> = env::args().skip(1).collect();
-    sysvitals_core::cli::parse_anchor_monitor(&args).map(DisplayId::new)
-}
-
 /// The usable area of the display an anchor sits on (taskbar/dock excluded),
 /// used to flip and clamp the popup inside a screen the indicator is on.
 /// Display selection is shared with the settings window

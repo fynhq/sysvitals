@@ -42,13 +42,16 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use sysvitals_core::format::FormattedRow;
 use sysvitals_core::{
-    format_frame, format_frame_vertical, t, Config, ConfigPoll, ConfigWatcher, HistoryWriterSlot,
-    Language, Sampler, Theme,
+    format_frame, format_frame_vertical, t, Config, ConfigWatcher, HistoryWriterSlot, Language,
+    Sampler, Theme,
 };
 // Shared process plumbing (daily-file logging, panic hook, HKCU probes)
 // lives in `sysvitals-support` so the overlay and the GPUI panels cannot
 // drift apart.
-use sysvitals_support::{hkcu_dword, log_event, os_build_number, taskbar_al, utf16};
+use sysvitals_support::{
+    acquire_instance_lock, hkcu_dword, log_event, log_sanitize_issues, os_build_number, taskbar_al,
+    utf16, AutoStartController, AutoStartOutcome, ConfigEvent, InstanceLock, SV_BUILD_ID,
+};
 use windows::core::{Interface, BOOL, PCWSTR};
 use windows::Win32::Foundation::{
     CloseHandle, ERROR_FILE_NOT_FOUND, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0, WAIT_TIMEOUT,
@@ -83,9 +86,8 @@ use windows::Win32::System::Memory::{
 };
 use windows::Win32::System::Registry::{RegDeleteKeyValueW, HKEY_CURRENT_USER};
 use windows::Win32::System::Threading::{
-    CreateMutexW, CreateProcessW, GetCurrentProcessId, GetExitCodeProcess, GetProcessId,
-    TerminateProcess, WaitForSingleObject, PROCESS_INFORMATION, STARTF_FORCEOFFFEEDBACK,
-    STARTUPINFOW,
+    CreateProcessW, GetCurrentProcessId, GetExitCodeProcess, GetProcessId, TerminateProcess,
+    WaitForSingleObject, PROCESS_INFORMATION, STARTF_FORCEOFFFEEDBACK, STARTUPINFOW,
 };
 use windows::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
 use windows::Win32::UI::HiDpi::{
@@ -116,14 +118,6 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 // ------------------------------------------------------------------ consts
-
-/// Build stamp emitted by build.rs: `v{semver}` on a tagged commit,
-/// `v{semver}_{short-hash} (dev)` otherwise. Kept in step with the
-/// settings footer and the macOS startup log.
-const SV_BUILD_ID: &str = match option_env!("SV_BUILD_ID") {
-    Some(id) => id,
-    None => concat!("v", env!("CARGO_PKG_VERSION")),
-};
 
 const TIMER_SAMPLE: usize = 0x515;
 const TIMER_MOVE: usize = 0x516;
@@ -207,8 +201,6 @@ static TEXT_WEIGHT: AtomicI32 = AtomicI32::new(600);
 static HIGH_CONTRAST: AtomicU32 = AtomicU32::new(0);
 /// `GetSysColor(COLOR_WINDOWTEXT)` in high-contrast mode (0x00BBGGRR).
 static HC_TEXT: AtomicU32 = AtomicU32::new(0);
-/// Last applied login-startup value; `u32::MAX` means "not applied yet".
-static APPLIED_AUTO_START: AtomicU32 = AtomicU32::new(u32::MAX);
 static CONFIG: OnceLock<RwLock<Config>> = OnceLock::new();
 /// True when the initial config read fell back to defaults because the
 /// file was unreadable or malformed. Auto-start is not applied in that

@@ -24,13 +24,16 @@ pub(crate) use render::*;
 pub(crate) use tick::*;
 
 use std::cell::RefCell;
-use std::os::fd::AsRawFd;
 use std::process::Child;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-// Shared process plumbing (daily-file logging, panic hook) lives in
-// `sysvitals-support` so the indicator and the GPUI panels cannot drift.
-use sysvitals_support::log_event;
+// Shared process plumbing (daily-file logging, panic hook, single-instance
+// guard, build id) lives in `sysvitals-support` so the indicator and the
+// GPUI panels cannot drift.
+use sysvitals_support::{
+    acquire_instance_lock, log_event, log_sanitize_issues, AutoStartController, AutoStartOutcome,
+    ConfigEvent, InstanceLock, SV_BUILD_ID,
+};
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, Bool, ProtocolObject};
@@ -48,11 +51,10 @@ use objc2_foundation::{
 };
 
 use sysvitals_core::format::{
-    column_metrics, format_frame, join_prefix, PERCENT_RESERVE, RATE_RESERVE,
+    column_metrics, format_frame, join_prefix, metric_prefix, visible_metrics, PERCENT_RESERVE,
+    RATE_RESERVE,
 };
-use sysvitals_core::{
-    t, Config, ConfigPoll, ConfigWatcher, FormattedRow, HistoryWriterSlot, Metric, Sampler,
-};
+use sysvitals_core::{t, Config, ConfigWatcher, FormattedRow, HistoryWriterSlot, Metric, Sampler};
 
 // `SMAppService` lives in ServiceManagement.framework. Linking it keeps the
 // class registered for the runtime lookup below; no typed bindings are
@@ -79,20 +81,11 @@ const DUAL_ROW_MIN_STEP_FACTOR: f64 = 0.95;
 
 // ------------------------------------------------------------- diagnostics
 
-/// Build stamp emitted by the build script: `v{semver}` on a tagged
-/// commit, `v{semver}_{short-hash} (dev)` otherwise, and the plain
-/// version when git metadata is unavailable. Kept in step with the stamp
-/// shown in the settings footer so a log file can be tied to a build.
-const SV_BUILD_ID: &str = match option_env!("SV_BUILD_ID") {
-    Some(id) => id,
-    None => concat!("v", env!("CARGO_PKG_VERSION")),
-};
-
-// Logging (`log_event`) and the Rust panic hook come
-// from `sysvitals-support`, shared with the Windows overlay and the GPUI
-// panels. The macOS side additionally logs uncaught Objective-C
-// exceptions below; a mach-exception port handler was judged out of
-// scope — panics and normal exits are covered.
+// Logging (`log_event`), the build stamp and the Rust panic hook come from
+// `sysvitals-support`, shared with the Windows overlay and the GPUI panels.
+// The macOS side additionally logs uncaught Objective-C exceptions below; a
+// mach-exception port handler was judged out of scope — panics and normal
+// exits are covered.
 
 /// Log uncaught Objective-C exceptions before AppKit turns them into a
 /// SIGABRT. Rust's panic hook cannot see these, so a crash inside an
@@ -132,37 +125,6 @@ fn install_exception_logging() {
     unsafe { NSSetUncaughtExceptionHandler(Some(log_uncaught_exception)) };
 }
 
-/// Single-instance guard: an exclusive, non-blocking `flock` on
-/// `<data_dir>/sysvitals.lock`. Returns `true` when this process now holds
-/// the lock; a second launch finds it taken and exits. The file is
-/// deliberately leaked (`mem::forget`) because `flock` locks live on the
-/// open file description — keeping the fd open for the process lifetime is
-/// what keeps the lock held, and process exit releases it (no stale lock).
-/// Every failure to even open the file returns `true`: a broken data dir
-/// must never block the indicator from starting.
-fn acquire_single_instance() -> bool {
-    let Ok(dir) = sysvitals_core::config::data_dir() else {
-        return true;
-    };
-    let _ = std::fs::create_dir_all(&dir);
-    let Ok(file) = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(dir.join("sysvitals.lock"))
-    else {
-        return true;
-    };
-    // SAFETY: `flock` on our own freshly opened fd; LOCK_EX|LOCK_NB never
-    // blocks and only fails when another holder exists.
-    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-    if rc != 0 {
-        return false;
-    }
-    std::mem::forget(file);
-    true
-}
-
 thread_local! {
     static SAMPLER: RefCell<Option<Sampler>> = const { RefCell::new(None) };
     static CONFIG: RefCell<Config> = RefCell::new(Config::default());
@@ -183,9 +145,9 @@ thread_local! {
     /// Interval currently in effect on the timer; the first tick primes
     /// it (0) and schedules the real timer from there.
     static APPLIED_INTERVAL_MS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-    /// Login-startup value last applied through `SMAppService`; `None`
-    /// means it has not been applied in this process yet.
-    static APPLIED_AUTO_START: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+    /// Login-startup policy shared with the Windows overlay; the platform
+    /// side effect is the `SMAppService` call.
+    static AUTO_START: RefCell<AutoStartController> = RefCell::new(AutoStartController::new());
     // Child process handles, kept so a still-running instance is not
     // duplicated (a second spawn is a no-op until the first exits).
     static SETTINGS_CHILD: RefCell<Option<Child>> = const { RefCell::new(None) };
@@ -407,13 +369,24 @@ impl ActionHandler {
 pub(crate) fn run() {
     // Crash diagnostics and the single-instance guard run before anything
     // else, mirroring the Windows overlay's startup sequence. A second
-    // launch exits quietly; the lock is held via an fd that is deliberately
-    // leaked (see `acquire_single_instance`).
+    // launch exits quietly; keeping the guard alive holds the flock.
     sysvitals_support::install_panic_hook();
-    if !acquire_single_instance() {
-        log_event("INFO", "another instance is already running; exiting");
-        return;
-    }
+    let _instance = match acquire_instance_lock("sysvitals.lock") {
+        InstanceLock::Acquired(guard) => Some(guard),
+        InstanceLock::Busy => {
+            log_event("INFO", "another instance is already running; exiting");
+            return;
+        }
+        InstanceLock::Unavailable(error) => {
+            // A broken data dir or an OS refusal must never block the
+            // indicator from starting.
+            log_event(
+                "WARN",
+                &format!("instance guard unavailable: {error}; continuing"),
+            );
+            None
+        }
+    };
     install_exception_logging();
 
     // Everything from the AppKit setup through the first tick runs
@@ -485,7 +458,7 @@ pub(crate) fn run() {
         let mut initial_config_ok = false;
         match CONFIG_WATCHER.with(|w| w.borrow_mut().load_initial()) {
             Ok((cfg, issues, source)) => {
-                log_config_issues(&issues);
+                log_sanitize_issues("config repair", &issues);
                 CONFIG.with(|c| *c.borrow_mut() = cfg);
                 initial_config_ok = source == sysvitals_core::config::ConfigSource::File;
             }
@@ -508,21 +481,7 @@ pub(crate) fn run() {
                 SV_BUILD_ID
             ),
         );
-        log_event(
-            "INFO",
-            &format!(
-                "config loaded: interval={}ms language={:?} theme={:?} dual_row={} \
-                     show_resources={} show_network={} item_spacing={}px auto_start={}",
-                cfg.sample.interval_ms,
-                cfg.display.language,
-                cfg.display.theme,
-                cfg.display.dual_row,
-                cfg.display.show_resources,
-                cfg.display.show_network,
-                cfg.display.item_spacing,
-                cfg.startup.auto_start,
-            ),
-        );
+        log_event("INFO", &format!("config loaded: {}", cfg.summary()));
         // A malformed config must not silently remove a login item the user
         // enabled earlier; only apply after a successful initial read.
         if initial_config_ok {

@@ -45,11 +45,10 @@ use sysvitals_core::cli::AnchorRect;
 use sysvitals_core::config::{config_path, history_path, Config};
 use sysvitals_core::i18n::{t, Language};
 use sysvitals_core::store::{floor_to_grid, Bucket, Store};
-#[cfg(windows)]
-use sysvitals_panel::panel_font_family;
 use sysvitals_panel::{
-    anchor_visible_bounds, backdrop_for, detect_material, layout_rect, log_event,
-    observe_system_appearance, spawn_accent_watch, PanelSurface, CONTROL_RADIUS,
+    anchor_arg, anchor_monitor_arg, anchor_visible_bounds, backdrop_for, detect_material,
+    layout_rect, log_event, log_sanitize_issues, observe_system_appearance, spawn_accent_watch,
+    ConfigEvent, PanelSurface, CONTROL_RADIUS,
 };
 #[cfg(windows)]
 use sysvitals_panel::{preplace_hidden_window, set_per_monitor_dpi_aware, utf16, window_hwnd};
@@ -163,8 +162,8 @@ fn main() {
         #[cfg(target_os = "macos")]
         watch_parent(cx);
 
-        let anchor = parse_anchor();
-        let monitor = parse_anchor_monitor();
+        let anchor = anchor_arg();
+        let monitor = anchor_monitor_arg().map(DisplayId::new);
         log_event(
             "INFO",
             &format!(

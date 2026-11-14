@@ -26,12 +26,24 @@ pub(crate) fn open_history_window(
     Arc<AtomicBool>,
     Option<gpui_kit::Size<Pixels>>,
 )> {
-    let cfg = match config_path().and_then(|p| Config::load(&p).map(|(c, _)| c)) {
-        Ok(cfg) => cfg,
+    let cfg = match config_path() {
+        Ok(path) => match Config::load(&path) {
+            Ok((cfg, issues)) => {
+                log_sanitize_issues("history: config repair", &issues);
+                cfg
+            }
+            Err(e) => {
+                log_event(
+                    "WARN",
+                    &format!("history: config load failed: {e}; using defaults"),
+                );
+                Config::default()
+            }
+        },
         Err(e) => {
             log_event(
                 "WARN",
-                &format!("history: config load failed: {e}; using defaults"),
+                &format!("history: config path unavailable: {e}; using defaults"),
             );
             Config::default()
         }
