@@ -339,6 +339,15 @@ pub fn window_hwnd(window: &Window) -> Option<windows::Win32::Foundation::HWND> 
     Some(HWND(raw.hwnd.get() as *mut _))
 }
 
+/// Whether a native window currently has the `WS_VISIBLE` style. Used by the
+/// hidden-created settings window to tell "activation was refused" apart from
+/// "activation succeeded but focus stayed elsewhere".
+#[cfg(windows)]
+pub fn window_is_visible(hwnd: windows::Win32::Foundation::HWND) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::IsWindowVisible;
+    unsafe { IsWindowVisible(hwnd).as_bool() }
+}
+
 /// Move a still-hidden panel window onto the display it will open on.
 ///
 /// Windows creates the window on the OS default monitor and GPUI moves it

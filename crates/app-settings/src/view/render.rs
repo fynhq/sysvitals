@@ -704,7 +704,20 @@ impl Render for SettingsView {
         #[cfg(not(any(windows, target_os = "macos")))]
         let mut root = v_flex().size_full();
 
-        if self.save_failed.get() {
+        if self.config_read_failed {
+            root = root.child(
+                h_flex()
+                    .w_full()
+                    .flex_shrink_0()
+                    .px_4()
+                    .pt_4()
+                    .child(error_banner(
+                        t(lang, "settings.load_failed").to_string(),
+                        t(lang, "settings.load_failed_hint").to_string(),
+                        dark,
+                    )),
+            );
+        } else if self.save_failed.get() {
             root = root.child(
                 h_flex()
                     .w_full()

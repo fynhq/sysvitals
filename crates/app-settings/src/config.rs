@@ -41,15 +41,18 @@ pub(crate) fn backup_corrupt_config(
 }
 
 /// Load the config, backing up a malformed or non-UTF-8 file before falling
-/// back to defaults. Without the backup the first instant-save would
-/// overwrite the user's (hand-edited) file with defaults.
-pub(crate) fn load_config_with_backup() -> Config {
+/// back to defaults. The boolean is `false` when an existing file could not be
+/// read for a transient reason (sharing violation, permission, I/O): the view
+/// must then refuse instant-save, otherwise its defaults would overwrite the
+/// user's file on the first click or focus loss. Missing files and backed-up
+/// parse/UTF-8 failures are safe to recreate and return `true`.
+pub(crate) fn load_config_with_backup() -> (Config, bool) {
     let Ok(path) = sysvitals_core::config::config_path() else {
         log_event(
             "WARN",
             "settings: cannot resolve the config path; using defaults",
         );
-        return Config::default();
+        return (Config::default(), false);
     };
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
@@ -61,22 +64,24 @@ pub(crate) fn load_config_with_backup() -> Config {
                     path.display()
                 ),
             );
-            return Config::default();
+            return (Config::default(), true);
         }
         Err(e) => {
             // Invalid UTF-8 is malformed content, not a transient sharing
             // violation: preserve the bytes so a later save cannot destroy
             // the user's file. Other read errors stay transient and are not
-            // moved aside.
+            // moved aside; the view disables saving for this window.
             if e.kind() == std::io::ErrorKind::InvalidData {
-                let _ = backup_corrupt_config(&path, &format!("config is not valid UTF-8: {e}"));
-            } else {
-                log_event(
-                    "WARN",
-                    &format!("settings: config read failed: {e}; using defaults"),
-                );
+                let backed_up =
+                    backup_corrupt_config(&path, &format!("config is not valid UTF-8: {e}"))
+                        .is_some();
+                return (Config::default(), backed_up);
             }
-            return Config::default();
+            log_event(
+                "WARN",
+                &format!("settings: config read failed: {e}; using defaults and disabling saves"),
+            );
+            return (Config::default(), false);
         }
     };
     match Config::from_toml_str(&text) {
@@ -86,11 +91,12 @@ pub(crate) fn load_config_with_backup() -> Config {
                 "INFO",
                 &format!("settings: config loaded from {}", path.display()),
             );
-            cfg
+            (cfg, true)
         }
         Err(e) => {
-            let _ = backup_corrupt_config(&path, &format!("config parse failed: {e}"));
-            Config::default()
+            let backed_up =
+                backup_corrupt_config(&path, &format!("config parse failed: {e}")).is_some();
+            (Config::default(), backed_up)
         }
     }
 }

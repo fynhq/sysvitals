@@ -94,6 +94,10 @@ pub(crate) struct SettingsView {
     /// Whether the most recent config write failed. Shown in the footer so a
     /// read-only/full disk does not silently swallow every setting change.
     pub(crate) save_failed: std::cell::Cell<bool>,
+    /// The startup config could not be read for a transient reason. Saving is
+    /// disabled for this window: the UI shows defaults, and writing them would
+    /// overwrite the user's real file. Reopening the window retries the read.
+    pub(crate) config_read_failed: bool,
     /// Serialized form last written (or loaded) so a focus loss with no edits
     /// does not touch the file and trigger an indicator reload.
     pub(crate) last_saved_toml: Option<String>,
@@ -133,6 +137,7 @@ pub(crate) struct SettingsView {
 impl SettingsView {
     pub(crate) fn new(
         cfg: Config,
+        config_read_ok: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
         initial_size: gpui_kit::Size<Pixels>,
@@ -333,6 +338,7 @@ impl SettingsView {
             // after which it tracks the real value.
             last_accent: None,
             save_failed: std::cell::Cell::new(false),
+            config_read_failed: !config_read_ok,
             last_saved_toml,
             last_taskbar_probe: Some(Instant::now()),
             #[cfg(windows)]
@@ -429,6 +435,12 @@ impl SettingsView {
     /// result is unchanged, so merely focusing away does not bump the mtime
     /// and make the indicator reload/re-sample.
     pub(crate) fn save(&mut self, cx: &App) {
+        if self.config_read_failed {
+            // The startup snapshot is defaults, not the user's file. Writing
+            // it would overwrite the real config; leave the file untouched
+            // and let reopening the window retry the read.
+            return;
+        }
         let ui = self.collect_config(cx);
         let Ok(path) = sysvitals_core::config::config_path() else {
             log_event(
@@ -440,7 +452,9 @@ impl SettingsView {
         };
         // Start from the file currently on disk so every field this window
         // does not own (history.retention_days, and any future non-UI field)
-        // survives. Only the UI-owned fields are overlaid.
+        // survives. Only the UI-owned fields are overlaid. A read failure
+        // aborts the save: falling back to the startup snapshot could write
+        // defaults over a file that is temporarily unreadable.
         let mut cfg = match Config::load(&path) {
             Ok((disk, issues)) => {
                 sysvitals_panel::log_sanitize_issues("settings: config merge repair", &issues);
@@ -449,9 +463,10 @@ impl SettingsView {
             Err(e) => {
                 log_event(
                     "WARN",
-                    &format!("settings: config merge read failed: {e}; keeping UI values"),
+                    &format!("settings: config merge read failed: {e}; save skipped"),
                 );
-                self.cfg.clone()
+                self.save_failed.set(true);
+                return;
             }
         };
         let disk_auto_start_explicit = cfg.startup.auto_start_explicit;

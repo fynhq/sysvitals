@@ -48,7 +48,9 @@ use sysvitals_panel::{
     observe_system_appearance, spawn_accent_watch, PanelSurface, CONTROL_RADIUS,
 };
 #[cfg(windows)]
-use sysvitals_panel::{panel_font_family, preplace_hidden_window, taskbar_al, utf16, window_hwnd};
+use sysvitals_panel::{
+    panel_font_family, preplace_hidden_window, taskbar_al, utf16, window_hwnd, window_is_visible,
+};
 
 mod config;
 #[cfg(target_os = "macos")]
@@ -99,7 +101,7 @@ fn main() {
     #[cfg(windows)]
     sysvitals_panel::set_per_monitor_dpi_aware();
 
-    let cfg = load_config_with_backup();
+    let (cfg, config_read_ok) = load_config_with_backup();
 
     // macOS: run as a regular foreground app so opening the settings window
     // puts an icon in the Dock (user requirement), and quit with the last
@@ -222,7 +224,9 @@ fn main() {
         // A failed window creation must not panic the process (the history
         // popup already degrades this way): log and quit instead.
         let opened = gpui_kit::open_window(window_options, cx, move |window, cx| {
-            cx.new(|cx| SettingsView::new(cfg, window, cx, initial_size))
+            cx.new(|cx| {
+                SettingsView::new(cfg, config_read_ok, window, cx, initial_size)
+            })
         });
         let (window_handle, _view) = match opened {
             Ok(opened) => opened,
@@ -239,7 +243,9 @@ fn main() {
         // shows the window, so the cross-DPI rescale never reaches the
         // screen. All three steps run as foreground tasks: native window
         // calls must not run inside an App borrow (see
-        // `preplace_hidden_window`).
+        // `preplace_hidden_window`). Activation is retried and checked for
+        // actual visibility; a permanently hidden window would otherwise keep
+        // the single-instance mutex and make every later click a no-op.
         #[cfg(windows)]
         {
             let hwnd = window_handle
@@ -258,25 +264,54 @@ fn main() {
                         );
                     }
                 }
-                let resized = cx.update(|app| {
-                    window_handle
-                        .update(app, |_, window, _| window.resize(initial_size))
-                        .is_ok()
-                });
-                let activated = cx.update(|app| {
-                    window_handle
-                        .update(app, |_, window, _| window.activate_window())
-                        .is_ok()
-                });
-                if resized && activated {
-                    log_event("INFO", "settings: window shown after hidden placement");
-                } else {
+                let mut shown = false;
+                for attempt in 0..3 {
+                    let _resized = cx.update(|app| {
+                        window_handle
+                            .update(app, |_, window, _| window.resize(initial_size))
+                            .is_ok()
+                    });
+                    let activated = cx.update(|app| {
+                        window_handle
+                            .update(app, |_, window, _| window.activate_window())
+                            .is_ok()
+                    });
+                    let visible = hwnd.is_some_and(window_is_visible);
+                    let active = cx.update(|app| {
+                        window_handle
+                            .update(app, |_, window, _| window.is_window_active())
+                            .unwrap_or(false)
+                    });
+                    // A missing hwnd cannot be probed for visibility; keep
+                    // the previous behavior and trust a successful activation.
+                    if visible || active || (hwnd.is_none() && activated) {
+                        shown = true;
+                        log_event(
+                            "INFO",
+                            &format!(
+                                "settings: window shown after hidden placement (attempt {}, visible={visible}, active={active})",
+                                attempt + 1
+                            ),
+                        );
+                        break;
+                    }
+                    if attempt < 2 {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(700))
+                            .await;
+                    }
+                }
+                if !shown {
                     log_event(
                         "WARN",
-                        &format!(
-                            "settings: show after hidden placement failed (resize={resized}, activate={activated})"
-                        ),
+                        "settings: window remained hidden after activation retries; exiting so the next click can retry",
                     );
+                    // Only quit when the native handle existed and was
+                    // conclusively not visible; otherwise keep the previous
+                    // best-effort behavior.
+                    if hwnd.is_some() {
+                        let _ = cx.update(|app| app.quit());
+                    }
                 }
             })
             .detach();
