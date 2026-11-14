@@ -23,6 +23,16 @@ pub const KB: f64 = 1024.0;
 pub const MB: f64 = 1024.0 * KB;
 pub const GB: f64 = 1024.0 * MB;
 
+/// Worst-case formatted value for a percentage cell. Used by fixed-slot
+/// renderers (macOS menu bar) to reserve a width that never changes between
+/// samples.
+pub const PERCENT_RESERVE: &str = "100%";
+
+/// Worst-case formatted value for a network-rate cell: a four-character
+/// numeric field plus the widest tier letter and the `/s` suffix. Keep in
+/// sync with [`format_rate`]'s four-character cap.
+pub const RATE_RESERVE: &str = "8888 M/s";
+
 /// Render a CPU/MEM percentage as an integer percent string.
 pub fn format_percent(value: f64) -> String {
     if !value.is_finite() {
@@ -184,6 +194,29 @@ fn shown(metric: Metric, cfg: &Config) -> bool {
     cfg.display.metric_visible(metric)
 }
 
+/// The metrics that belong to the dual-row left and right columns, honoring
+/// the paired show toggles. This is the single source for both the formatter
+/// and the platform renderers' fixed-slot reservations: CPU/MEM are the left
+/// column, U/D the right; when only one group is enabled it occupies the left
+/// column so the two-line layout keeps its shape.
+pub fn column_metrics(cfg: &Config) -> (Vec<Metric>, Vec<Metric>) {
+    let resources = [Metric::Cpu, Metric::Mem];
+    let network = [Metric::Up, Metric::Down];
+    let show_resources = cfg.display.show_resources;
+    let show_network = cfg.display.show_network;
+    // When only one group is enabled it occupies the left column, matching
+    // `format_frame`'s "keep two lines, populated column on the left" rule.
+    if show_resources && show_network {
+        (resources.to_vec(), network.to_vec())
+    } else if show_resources {
+        (resources.to_vec(), Vec::new())
+    } else if show_network {
+        (network.to_vec(), Vec::new())
+    } else {
+        (Vec::new(), Vec::new())
+    }
+}
+
 /// Format a single metric value to its display string (no prefix).
 pub fn format_value(metric: Metric, snapshot: &Snapshot) -> String {
     format_value_impl(metric, snapshot, true)
@@ -222,28 +255,25 @@ pub fn format_frame(snapshot: &Snapshot, cfg: &Config) -> FormattedRow {
     let enabled: Vec<Metric> = Metric::ALL.into_iter().filter(|m| shown(*m, cfg)).collect();
 
     if cfg.display.dual_row {
-        // 2x2 quadrant: left column CPU over MEM, right column U over D
-        // CPU/MEM over U/D. Only metrics that are both enabled and in
-        // the column's role participate.
-        let left_role = [Metric::Cpu, Metric::Mem];
-        let right_role = [Metric::Up, Metric::Down];
-        let left: Vec<(Metric, String)> = enabled
-            .iter()
-            .filter(|m| left_role.contains(m))
+        // 2x2 quadrant: left column CPU over MEM, right column U over D.
+        // `column_metrics` is the shared source for this grouping; the
+        // platform renderers use the same function for slot reservations.
+        let (left_metrics, right_metrics) = column_metrics(cfg);
+        let left: Vec<(Metric, String)> = left_metrics
+            .into_iter()
             .map(|m| {
                 (
-                    *m,
-                    join_prefix(prefix_for(*m, cfg), &format_value(*m, snapshot)),
+                    m,
+                    join_prefix(prefix_for(m, cfg), &format_value(m, snapshot)),
                 )
             })
             .collect();
-        let right: Vec<(Metric, String)> = enabled
-            .iter()
-            .filter(|m| right_role.contains(m))
+        let right: Vec<(Metric, String)> = right_metrics
+            .into_iter()
             .map(|m| {
                 (
-                    *m,
-                    join_prefix(prefix_for(*m, cfg), &format_value(*m, snapshot)),
+                    m,
+                    join_prefix(prefix_for(m, cfg), &format_value(m, snapshot)),
                 )
             })
             .collect();
@@ -653,6 +683,46 @@ mod tests {
                 l.left
             );
         }
+    }
+
+    #[test]
+    fn column_metrics_matches_the_paired_toggle_matrix() {
+        let mut cfg = Config::default();
+        assert_eq!(
+            column_metrics(&cfg),
+            (
+                vec![Metric::Cpu, Metric::Mem],
+                vec![Metric::Up, Metric::Down]
+            )
+        );
+        cfg.display.show_network = false;
+        assert_eq!(
+            column_metrics(&cfg),
+            (vec![Metric::Cpu, Metric::Mem], Vec::new())
+        );
+        let mut cfg = Config::default();
+        cfg.display.show_resources = false;
+        assert_eq!(
+            column_metrics(&cfg),
+            (vec![Metric::Up, Metric::Down], Vec::new())
+        );
+        // `sanitize` prevents both groups from being off; the function still
+        // returns an empty pair rather than inventing a metric.
+        let mut cfg = Config::default();
+        cfg.display.show_resources = false;
+        cfg.display.show_network = false;
+        assert_eq!(column_metrics(&cfg), (Vec::new(), Vec::new()));
+    }
+
+    #[test]
+    fn fixed_slot_reserve_strings_cover_the_formatter() {
+        assert_eq!(format_percent(100.0), PERCENT_RESERVE);
+        assert_eq!(format_rate(8888.0 * MB), "8.68 G/s");
+        // The reserve's numeric field width is the same four-character cap
+        // used by format_rate; the unit placeholder is the widest tier.
+        let numeric = RATE_RESERVE.split(' ').next().unwrap();
+        assert_eq!(numeric.len(), 4);
+        assert!(RATE_RESERVE.split(' ').nth(1).unwrap().len() >= 3);
     }
 
     #[test]
