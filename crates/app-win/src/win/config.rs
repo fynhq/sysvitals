@@ -10,29 +10,21 @@ pub(crate) fn config() -> Config {
         .get_or_init(|| {
             // A missing or broken config file must not stop the indicator:
             // fall back to defaults and keep running, but leave a trace so
-            // a parse error is diagnosable.
-            let loaded = match sysvitals_core::config::config_path() {
-                Ok(p) => match Config::load_with_source(&p) {
-                    Ok((c, issues, source)) => {
-                        log_config_issues(&issues);
-                        CONFIG_FROM_FILE.store(
-                            source == sysvitals_core::config::ConfigSource::File,
-                            Ordering::Relaxed,
-                        );
-                        c
-                    }
-                    Err(e) => {
-                        log_event(
-                            "WARN",
-                            &format!("config load failed ({}): {e}; using defaults", p.display()),
-                        );
-                        CONFIG_LOAD_FAILED.store(true, Ordering::Relaxed);
-                        CONFIG_FROM_FILE.store(false, Ordering::Relaxed);
-                        Config::default()
-                    }
-                },
+            // a parse error is diagnosable. The watcher seeds its mtime only
+            // on a successful load; a failed initial read is retried by the
+            // normal 500ms poll instead of pinning defaults forever.
+            let loaded = match CONFIG_WATCHER.with(|watcher| watcher.borrow_mut().load_initial()) {
+                Ok((c, issues, source)) => {
+                    log_config_issues(&issues);
+                    CONFIG_LOAD_FAILED.store(false, Ordering::Relaxed);
+                    CONFIG_FROM_FILE.store(
+                        source == sysvitals_core::config::ConfigSource::File,
+                        Ordering::Relaxed,
+                    );
+                    c
+                }
                 Err(e) => {
-                    log_event("WARN", &format!("config path unavailable: {e}"));
+                    log_event("WARN", &format!("config load failed: {e}; using defaults"));
                     CONFIG_LOAD_FAILED.store(true, Ordering::Relaxed);
                     CONFIG_FROM_FILE.store(false, Ordering::Relaxed);
                     Config::default()
@@ -229,13 +221,7 @@ pub(crate) fn apply_auto_start(cfg: &Config) {
             AUTO_START_RETRY_AT.with(|slot| {
                 slot.set(Some(Instant::now() + AUTO_START_RETRY_COOLDOWN));
             });
-            log_event(
-                "WARN",
-                &format!(
-                    "auto-start {} failed: {e}",
-                    if desired { "enable" } else { "disable" }
-                ),
-            );
+            sysvitals_support::log_auto_start_failure(desired, &e);
         }
     }
 }
@@ -289,6 +275,7 @@ pub(crate) fn poll_config_change() {
         source == sysvitals_core::config::ConfigSource::File,
         Ordering::Relaxed,
     );
+    CONFIG_LOAD_FAILED.store(false, Ordering::Relaxed);
     store_config(loaded.clone());
     // A missing file (for example after saving a corrupt config aside)
     // is not an explicit "auto-start off" choice. Only an existing,

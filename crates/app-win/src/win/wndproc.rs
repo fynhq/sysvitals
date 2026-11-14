@@ -43,9 +43,12 @@ pub(crate) fn handle_history_click(hwnd: HWND) {
     }
 }
 
-/// Read the setting-area name carried by `WM_SETTINGCHANGE`. The string lives
-/// in the sender's address space and is not guaranteed to be readable here, so
-/// the read goes through `ReadProcessMemory`; `None` means "not readable".
+/// Read the setting-area name carried by `WM_SETTINGCHANGE`. USER32 treats
+/// this message as a pointer message and marshals the lParam string into the
+/// receiving process, so the pointer is valid here for the duration of the
+/// handler. The read still goes through `ReadProcessMemory` so a malformed
+/// pointer from a local sender cannot fault the message thread; `None` means
+/// "not readable".
 fn setting_change_name(lparam: LPARAM) -> Option<String> {
     use std::ffi::c_void;
     use windows::Win32::System::Diagnostics::Debug::ReadProcessMemory;
@@ -56,10 +59,9 @@ fn setting_change_name(lparam: LPARAM) -> Option<String> {
     }
     let mut buf = [0u16; 256];
     let mut read = 0usize;
-    // A WM_SETTINGCHANGE string is owned by the sender. For a broadcast it is
-    // not guaranteed to be readable in this process, and any same-user process
-    // can send a bogus pointer; dereferencing it directly is an AV waiting to
-    // happen. ReadProcessMemory validates the range and never faults.
+    // The marshaled string lives in this process; ReadProcessMemory validates
+    // the range and never faults on a bad local pointer. This keeps the same
+    // defensive behavior for same-process senders that pass garbage.
     let ok = unsafe {
         ReadProcessMemory(
             GetCurrentProcess(),
@@ -218,9 +220,6 @@ pub(crate) fn run() {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         refresh_theme();
         let cfg = config();
-
-        // Seed the config mtime so the first poll does not false-trigger.
-        CONFIG_WATCHER.with(|watcher| watcher.borrow_mut().seed_now());
 
         // Daily-file logging: the first line also opens the file and prunes
         // stale logs (see `core::logger`), so no separate startup prune.

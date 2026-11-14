@@ -37,7 +37,7 @@ pub(crate) use wndproc::*;
 
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::sync::{Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use sysvitals_core::format::FormattedRow;
@@ -165,8 +165,10 @@ const WIDTH_SLACK_PX: i32 = 8;
 /// Horizontal taskbars are limited by height, not width, so they keep the
 /// system size untouched.
 ///
-/// 0.75× (was 0.7×): matches the macOS dual-row scale factor exactly so
-/// the two platforms shrink the same system font by the same amount.
+/// 0.75× (was 0.7×): matches the macOS dual-row **floor** (mac starts at 0.8×
+/// and shrinks to 0.75× only when the menu bar is too short), so both
+/// platforms stay within the same reduced-size band without claiming the
+/// effective sizes are always identical.
 const VERTICAL_FONT_HUNDREDTHS: i32 = 75;
 /// Horizontal padding for the vertical layout: the thickness is the binding
 /// constraint, so the text keeps a tighter margin than on horizontal bars.

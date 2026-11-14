@@ -173,7 +173,9 @@ pub(crate) unsafe fn sample_tick() {
         sampler.sample(now)
     });
     LAST_SNAPSHOT.with(|s| *s.borrow_mut() = Some(snapshot));
-    record_history(&cfg, now, &snapshot);
+    HISTORY_WRITER.with(|slot| {
+        sysvitals_support::record_history_sample(&mut slot.borrow_mut(), &cfg, now, &snapshot);
+    });
     relayout_all();
 }
 
@@ -224,25 +226,6 @@ pub(crate) unsafe fn relayout_overlay(hwnd: HWND) {
     }
     render_layered(hwnd, &row, ov.vertical);
     set_overlay_needs_render(hwnd, false);
-}
-
-/// Queue the current CPU/MEM sample for the background history writer.
-/// The UI thread never opens or writes SQLite: an old-database rollup
-/// backfill or a prune/VACUUM can take seconds, which would freeze the
-/// taskbar message loop. The writer owns the open/insert/prune policy and
-/// its own failure logging.
-pub(crate) fn record_history(cfg: &Config, now: i64, snapshot: &sysvitals_core::Snapshot) {
-    let log: sysvitals_core::history_writer::LogFn =
-        Arc::new(|level: &str, message: &str| log_event(level, message));
-    HISTORY_WRITER.with(|slot| {
-        slot.borrow_mut().record(
-            now,
-            snapshot.cpu_pct,
-            snapshot.mem_pct,
-            cfg.history.retention_days,
-            log,
-        );
-    });
 }
 
 /// Render a frame into a 32bpp premultiplied-alpha DIB and blit it onto
