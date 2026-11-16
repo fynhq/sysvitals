@@ -27,9 +27,9 @@ publish = false
 
 [workspace.dependencies]
 # Single source of truth for versions; crates inherit with `workspace = true`.
-sysinfo = { version = "=0.40.1", default-features = false, features = ["system", "network"] }
+sysinfo = { version = "=0.40.3", default-features = false, features = ["system", "network"] }
 serde = { version = "=1.0.229", features = ["derive"] }
-toml = "=1.1.8"
+toml = "=1.2.1"
 anyhow = "=1.0.104"
 directories = "=6.0.0"
 # Terminal/emoji-aware display width for prefix column padding. Also already
@@ -37,7 +37,7 @@ directories = "=6.0.0"
 unicode-width = "=0.2.3"
 # `bundled` statically embeds SQLite so there is no system-library dependency
 # on Windows/macOS. History storage is the only consumer.
-rusqlite = { version = "=0.41.1", features = ["bundled"] }
+rusqlite = { version = "=0.43.0", features = ["bundled"] }
 windows = { version = "=0.62.2", default-features = false, features = [
     "Wdk_System_SystemServices",
     "Win32_Foundation",
@@ -71,7 +71,7 @@ sysvitals-support = { path = "crates/support" }
 
 # GPUI Kit: modern cross-platform UI framework for the settings window.
 # Pinned to the exact version; GPUI is pre-1.0 and moves fast.
-gpui-kit = "=0.9.1"
+gpui-kit = "=0.10.0"
 
 # Local-time formatting for history chart labels and clipboard rows. Only the
 # `clock`+`std` subset is enabled (no parsing, locales, or serde).
