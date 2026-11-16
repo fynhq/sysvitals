@@ -3,6 +3,10 @@
 /target/
 **/target/
 
+# Python bytecode from local helper scripts
+__pycache__/
+*.pyc
+
 # Editor / OS noise
 .DS_Store
 Thumbs.db
