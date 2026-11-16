@@ -6,10 +6,6 @@ use gpui_kit::component::collapsible::Collapsible;
 
 impl Render for SettingsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Re-probe the taskbar shape at most once a second: the user can move
-        // or auto-hide the bar while this window stays open, but a registry
-        // read plus `SHAppBarMessage` on every keystroke-triggered repaint is
-        // needless I/O on the UI thread.
         let probe_due = self
             .last_taskbar_probe
             .is_none_or(|last| last.elapsed() >= std::time::Duration::from_secs(1));
@@ -18,15 +14,9 @@ impl Render for SettingsView {
             self.layout_available = layout_available();
             self.last_taskbar_probe = Some(Instant::now());
         }
-        // Deactivation flush (registered once): persist the current state
-        // whenever the window loses focus, covering the case where a prefix
-        // field still holds the last edit when the window is closed or the
-        // user clicks away.
         if self._deactivation.is_none() {
             let sub = cx.observe_window_activation(window, |this: &mut Self, window, cx| {
                 if window.is_window_active() {
-                    // The first frame may have rendered before activation
-                    // settled; retry the one-shot correction here.
                     #[cfg(windows)]
                     this.restore_window_size(window);
                 } else {
@@ -36,39 +26,18 @@ impl Render for SettingsView {
             self._deactivation = Some(sub);
         }
 
-        // Live OS appearance flip (registered once): the settings panel
-        // always mirrors the system light/dark theme (the `display.theme`
-        // setting is indicator-only), so a system flip repaints this window
-        // immediately. Same first-render registration pattern as the
-        // activation observer (never from a paint-phase API — the root
-        // view's empty active-node stack would panic the unwrap inside
-        // `window.on_key_event`).
         if self._appearance.is_none() {
             self._appearance = Some(observe_system_appearance(cx, window, |cx| {
                 apply_theme_and_accent(cx);
             }));
         }
 
-        // Every label comes from the core i18n table, keyed on the
-        // *currently selected* language, so switching language repaints the
-        // whole window immediately instead of only after saving.
         let lang = self.current_lang();
 
-        // Theme colors are read once up front so the conditional `.when`
-        // closure below never touches `cx` (keeps the borrow checker out of
-        // the builder-chain argument positions).
-        // Secondary text targets WCAG AA at the 12px sizes used here. The
-        // previous 0.5/0.4 pair read too light on the tinted page and cards.
         let dim = cx.theme().foreground.opacity(0.6);
         let faint = cx.theme().foreground.opacity(0.55);
-        // Hover color for the footer version link: the system accent is the
-        // only affordance this GPUI snapshot offers for link text (there is
-        // no underline styling on elements).
         let link = cx.theme().primary;
 
-        // --- Flattened (segmented) option rows for small choice sets: every
-        // choice is a visible tile, the active one carries the primary style.
-        // Spacing/margin/anchor use dropdowns instead (longer option lists).
         let mut lang_row = h_flex().gap_1().flex_wrap();
         for i in 0..Language::ALL.len() {
             let active = i == self.lang_idx;
@@ -82,14 +51,7 @@ impl Render for SettingsView {
                               window: &mut Window,
                               cx: &mut Context<Self>| {
                             this.lang_idx = i;
-                            // The dropdown items and the anchor choices are
-                            // translated text: rebuild them so the page
-                            // repaints in the new language, then persist
-                            // immediately.
                             this.refresh_localized_items(window, cx);
-                            // The custom titlebar repaints from `lang`, but the
-                            // platform title (taskbar / Mission Control /
-                            // accessibility) needs an explicit update.
                             window.set_window_title(t(Language::ALL[i], "settings.title"));
                             this.save(cx);
                             cx.notify();
@@ -119,11 +81,6 @@ impl Render for SettingsView {
             );
         }
 
-        // Theme choices render as icons (globe = follow system, sun = light,
-        // moon = dark) with the translated name kept as the tooltip. All
-        // three glyphs live in the bundled default asset set, so they paint
-        // through the registered `Assets` source — a catalog name outside
-        // that set (e.g. Monitor) would silently render blank.
         const THEME_KEYS: [&str; 3] = ["theme.auto", "theme.light", "theme.dark"];
         const THEME_ICONS: [IconName; 3] = [IconName::Globe, IconName::Sun, IconName::Moon];
         let mut theme_row = h_flex().gap_1();
@@ -134,8 +91,6 @@ impl Render for SettingsView {
                 choice_button(format!("theme-{i}"), active)
                     .icon(THEME_ICONS[i].clone())
                     .tooltip(tip.clone())
-                    // Icon-only: the tooltip is the only visible name, and
-                    // Button exposes it as the description, not the name.
                     .accessibility_label(tip)
                     .on_click(cx.listener(
                         move |this: &mut Self,
@@ -143,12 +98,6 @@ impl Render for SettingsView {
                               _: &mut Window,
                               cx: &mut Context<Self>| {
                             this.theme_idx = i;
-                            // The choice is persisted for the indicator to
-                            // hot-reload. It deliberately does NOT re-theme
-                            // this window or the history popup: those always
-                            // follow the system appearance, so changing it
-                            // must not restyle the panels the user is
-                            // looking at.
                             this.save(cx);
                             cx.notify();
                         },
@@ -156,11 +105,6 @@ impl Render for SettingsView {
             );
         }
 
-        // Style the dropdown triggers/inputs like Windows Settings: a filled
-        // control brush, a visible 1px stroke and the WinUI 4px corner. The
-        // per-element overrides win over the component's internal appearance
-        // (its style refinement is applied last). Other hosts keep the
-        // library look.
         let control: Option<(Hsla, Hsla, f32)> = {
             #[cfg(windows)]
             {
@@ -210,9 +154,6 @@ impl Render for SettingsView {
                 .rounded(px(radius));
         }
 
-        // macOS raises the three dropdowns as native menus. The trigger keeps
-        // the same 140px slot and filled-control look, so the layout below is
-        // shared with Windows.
         #[cfg(target_os = "macos")]
         let mac_style = {
             let theme = cx.theme();
@@ -274,20 +215,7 @@ impl Render for SettingsView {
 
         let dark = cx.theme().mode.is_dark();
 
-        // Native separators are hairlines: one device pixel. GPUI lays out in
-        // logical pixels, so divide by the display scale to land on one
-        // physical pixel on Retina instead of drawing a two-pixel line.
         let scale_factor = window.scale_factor();
-        // Grouped-card fill. Windows paints an opaque WinUI card tone: the
-        // platform renderer accumulates layer alpha additively, so a
-        // translucent card over the translucent page tint saturates to alpha 1
-        // and composites as an opaque gray — the Mica lift never reaches it.
-        // #FBFBFB / #2B2B2B are the opaque equivalents of WinUI's 70% / 5%
-        // white card over the light / dark page. macOS uses a near-white card
-        // in light mode (the
-        // old 0.55 white over the gray blur read as muddy gray next to System
-        // Settings) and a slightly stronger dark lift; the separators below
-        // do the row grouping that the Windows gap used to do.
         let card_bg = {
             #[cfg(target_os = "macos")]
             {
@@ -300,19 +228,12 @@ impl Render for SettingsView {
             #[cfg(not(target_os = "macos"))]
             {
                 if dark {
-                    // Opaque equivalent of WinUI's #0DFFFFFF (5% white) card
-                    // over the dark settings page (~#2B2B2B).
                     hsla(0., 0., 0.17, 1.)
                 } else {
-                    // Opaque equivalent of WinUI's #B3FFFFFF (70% white) card
-                    // over the light settings page (~#FBFBFB).
                     hsla(0., 0., 0.984, 1.)
                 }
             }
         };
-        // WinUI's CardStrokeColorDefault is 6% black in light and 10% black
-        // in dark. The light stroke is what keeps the near-white card readable
-        // on a bright Mica page; the dark stroke is the system's own edge.
         let card_border = {
             #[cfg(target_os = "macos")]
             {
@@ -361,14 +282,9 @@ impl Render for SettingsView {
                 dim,
             ));
 
-        // The last visible group cannot be switched off. Disable that switch
-        // instead of silently re-enabling the other one behind the user's
-        // back (the old guard flipped it without telling anyone).
         let resources_last = self.show_resources && !self.show_network;
         let network_last = self.show_network && !self.show_resources;
         let keep_one_hint = t(lang, "settings.keep_one_hint");
-        // A disabled switch tells the screen reader nothing about why it
-        // cannot be changed, so the reason is folded into its name.
         let resources_label = if resources_last {
             format!("{} — {keep_one_hint}", t(lang, "settings.show_resources"))
         } else {
@@ -407,8 +323,6 @@ impl Render for SettingsView {
             cx.notify();
         }));
 
-        // Theme belongs with the other appearance controls, not General.
-        // macOS hides it because AppKit picks the menu-bar title color.
         let mut display_card = settings_card(card_bg, card_border);
         if cfg!(not(target_os = "macos")) {
             display_card = display_card
@@ -453,10 +367,6 @@ impl Render for SettingsView {
                 dim,
             ));
 
-        // Layout always carries item spacing, so the section never vanishes;
-        // the anchor row either renders its control, shows why it is
-        // unavailable (Windows with left-aligned taskbar icons), or is
-        // omitted where the platform has no anchor choice (macOS).
         let mut layout_card = settings_card(card_bg, card_border).child(labeled_row(
             "row-spacing",
             t(lang, "settings.item_spacing").to_string(),
@@ -486,12 +396,6 @@ impl Render for SettingsView {
                     faint,
                 ));
         }
-        // Keep the row mounted and reveal its measured height with the
-        // theme's control spring. The first frame adopts the current state,
-        // so opening the page never animates; only an anchor/taskbar change
-        // while the window is open expands or collapses the row. The Windows
-        // select is disabled while hidden so a zero-height clipped row cannot
-        // become an invisible tab stop.
         let margin_row = labeled_row(
             "row-margin",
             margin_title,
@@ -509,10 +413,6 @@ impl Render for SettingsView {
                 .open(show_margin)
                 .w_full()
                 .content(
-                    // The reveal measures its content as a root, which sizes a
-                    // flex column to its content. Width is explicit so the row
-                    // keeps the card's full width and its control stays at the
-                    // right edge like the other rows.
                     v_flex()
                         .w_full()
                         .child(card_divider(dark, scale_factor))
@@ -525,9 +425,6 @@ impl Render for SettingsView {
         let prefix_up_count = self.prefix_up.read(cx).value().chars().count();
         let prefix_down_count = self.prefix_down.read(cx).value().chars().count();
         let prefix_card = settings_card(card_bg, card_border).child(
-            // The 2x2 prefix grid uses spacing rather than a divider
-            // between its two rows (2026-10-26, user request); the other
-            // cards keep their row separators.
             v_flex()
                 .gap_3()
                 .child(
@@ -576,8 +473,6 @@ impl Render for SettingsView {
                 ),
         );
 
-        // A failed-save banner stays outside the scroll area, pinned under the
-        // title bar, so it remains visible while the user edits further down.
         let body = v_flex()
             .size_full()
             .p_4()
@@ -612,11 +507,6 @@ impl Render for SettingsView {
                 prefix_card,
                 dim,
             ))
-            // Version footer: pinned to the bottom of the scrollable column
-            // and built from the product name plus `SV_BUILD_ID` (see the
-            // const below). The whole stamp doubles as a single link to the
-            // project repository; only the text itself is interactive, so the
-            // surrounding footer stays inert.
             .child(
                 h_flex().mt_auto().pt_2().justify_center().child(
                     div()
@@ -640,14 +530,7 @@ impl Render for SettingsView {
                 ),
             );
 
-        // Both desktop panels draw into a transparent client area so the
-        // tinted material continues behind the caption. macOS keeps its
-        // centered 34px header and native traffic lights; Windows renders the
-        // component title bar (caption drag + window controls) with a
-        // transparent background, making the caption part of the page.
-        // The visible page title doubles as the top-level heading for
-        // assistive technology; the native window title already names the
-        // window itself.
+        // Both panels use a transparent client area; the OS backdrop material supplies the visible surface.
         #[allow(unused_variables)]
         let title_text = t(lang, "settings.title").to_string();
         #[cfg(any(windows, target_os = "macos"))]

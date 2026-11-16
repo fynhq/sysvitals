@@ -1,19 +1,7 @@
-//! macos_select: split out of the crate root (see `main.rs` for the module map).
+//! Native macOS menu for string dropdowns.
 
 use super::*;
 
-// ---------------------------------------------------------------------------
-// Native macOS dropdown menus
-// ---------------------------------------------------------------------------
-
-/// A system menu for the three string dropdowns on macOS.
-///
-/// The GPUI `Select` popover is a deferred element inside the settings
-/// window, so it can never blur the desktop behind it: a translucent surface
-/// would reveal the settings rows underneath, not the window material. Native
-/// menus own their own vibrant window, which is the platform-correct way to
-/// get the blur (and the keyboard/dismiss behavior) users expect from a
-/// dropdown on macOS.
 use std::cell::Cell;
 
 use objc2::rc::Retained;
@@ -29,8 +17,6 @@ thread_local! {
     static MENU_OPEN: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Keeps a second popup from nesting inside an already tracking menu
-/// (two fast clicks can defer two popups). Reset on every exit path.
 pub(crate) struct MenuGuard;
 
 impl MenuGuard {
@@ -74,10 +60,6 @@ impl MenuTarget {
     }
 }
 
-/// Show `items` at the pointer as a native menu and return the chosen
-/// index. The current item carries the system checkmark. `None` means the
-/// menu was dismissed without a selection, another menu is already open,
-/// or no window was available.
 pub(crate) fn show(items: &[String], selected: usize) -> Option<usize> {
     if items.is_empty() {
         return None;
@@ -95,12 +77,7 @@ pub(crate) fn show(items: &[String], selected: usize) -> Option<usize> {
     };
 
     let menu = NSMenu::new(mtm);
-    // Every item has an explicit target/action below; automatic enabling
-    // would otherwise walk the responder chain and gray them out.
     menu.setAutoenablesItems(false);
-    // A menu raised from a vibrant window can inherit the button's
-    // appearance and render dark in light mode. Follow the app's
-    // effective appearance, like the indicator's context menu.
     let appearance = app.effectiveAppearance();
     menu.setAppearance(Some(&appearance));
 
@@ -120,10 +97,6 @@ pub(crate) fn show(items: &[String], selected: usize) -> Option<usize> {
         menu.addItem(&item);
     }
 
-    // `mouseLocation` is in screen coordinates; convert through the
-    // window into its content view, the space popUpMenuPositioningItem
-    // expects. The menu's upper-left lands at the click point, like a
-    // context menu raised from the trigger.
     let screen_point = NSEvent::mouseLocation();
     let window_point = window.convertPointFromScreen(screen_point);
     let view_point = view.convertPoint_fromView(window_point, None);
@@ -146,16 +119,6 @@ pub(crate) struct MacSelectStyle {
     pub(crate) radius: Pixels,
 }
 
-/// Raise the native menu for a macOS dropdown and commit the chosen index.
-///
-/// `NSMenu` popup runs a nested AppKit tracking loop. Starting it inside a
-/// GPUI click handler holds the mutable `App` borrow for the whole time the
-/// menu is up, and the tracking loop keeps servicing the main run loop: the
-/// 500 ms accent poll and the platform's keyboard-layout notification both
-/// borrow the app from that loop and abort the process with "RefCell already
-/// borrowed". Defer the popup by one main-queue turn so the click dispatch
-/// has returned and no GPUI state is borrowed while the menu tracks; the
-/// selection is applied afterwards.
 #[cfg(target_os = "macos")]
 pub(crate) fn mac_select_popup(
     cx: &mut Context<SettingsView>,
@@ -164,10 +127,6 @@ pub(crate) fn mac_select_popup(
     apply: fn(&mut SettingsView, usize),
 ) {
     cx.spawn(async move |this, cx| {
-        // Must be non-zero: `BackgroundExecutor::timer` short-circuits a zero
-        // duration to a ready task, which would keep this poll inline in the
-        // click handler. A real timer is dispatched back through the platform
-        // dispatcher and therefore lands after the click dispatch.
         cx.background_executor()
             .timer(std::time::Duration::from_millis(1))
             .await;
@@ -183,11 +142,6 @@ pub(crate) fn mac_select_popup(
     .detach();
 }
 
-/// The macOS dropdown trigger: the same filled control look as the GPUI
-/// Select, but clicking it raises a native menu instead of an in-window
-/// popover. Width is owned by the caller so all three dropdowns keep their
-/// existing layout slots. The trigger is a button named after its setting,
-/// with the selected value as its accessible value.
 #[cfg(target_os = "macos")]
 pub(crate) fn mac_select_trigger(
     id: &'static str,

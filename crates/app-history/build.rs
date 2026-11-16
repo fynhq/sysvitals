@@ -1,6 +1,4 @@
-//! Build script for app-history: embeds the application icon/version
-//! resources on Windows. The routine is shared with the other binaries in
-//! `sysvitals-build`.
+//! Build script: embeds the Windows icon/version resources.
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");

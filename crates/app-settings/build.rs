@@ -1,5 +1,4 @@
-//! Build script for app-settings: embeds the application icon/version
-//! resources on Windows. The build stamp is emitted by `sysvitals-support`.
+//! Build script: embeds the Windows icon/version resources.
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");

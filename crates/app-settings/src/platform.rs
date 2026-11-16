@@ -1,15 +1,7 @@
-//! platform: split out of the crate root (see `main.rs` for the module map).
+//! Platform gates for settings layout options.
 
 use super::*;
 
-// ---------------------------------------------------------------------------
-// Platform gate for the layout section
-// ---------------------------------------------------------------------------
-
-/// Whether the indicator's layout section is offered on this machine: the
-/// far-left anchor exists only on Windows 11 with a centered taskbar. Reads
-/// the very same HKCU value as the overlay (`sysvitals_support::taskbar_al`)
-/// so the two can never disagree.
 #[cfg(windows)]
 pub(crate) fn layout_available() -> bool {
     taskbar_al() == Some(1)
@@ -20,12 +12,6 @@ pub(crate) fn layout_available() -> bool {
     false
 }
 
-/// Whether the taskbar is currently docked left or right. On such a bar the
-/// margin value offsets the indicator from the bar's top edge, and that knob
-/// must be editable even where the anchor section is not offered, so the
-/// settings window probes the same app-bar position the overlay reads.
-/// `false` anywhere the probe fails (macOS, hidden taskbar, pre-registered
-/// shell) keeps the previous UI surface untouched.
 #[cfg(windows)]
 pub(crate) fn taskbar_is_vertical() -> bool {
     use windows::Win32::UI::Shell::{
@@ -42,10 +28,6 @@ pub(crate) fn taskbar_is_vertical() -> bool {
     if unsafe { SHAppBarMessage(ABM_GETTASKBARPOS, &mut abd) } == 0 {
         return false;
     }
-    // Auto-hidden bars report a rect parked off-screen; then the orientation
-    // does not matter for what is visible right now. Validate against the
-    // virtual desktop: the main taskbar can sit on a secondary monitor with
-    // negative or beyond-primary coordinates.
     let (vx, vy, vw, vh) = unsafe {
         (
             GetSystemMetrics(SM_XVIRTUALSCREEN),
@@ -66,9 +48,6 @@ pub(crate) fn taskbar_is_vertical() -> bool {
     false
 }
 
-/// Quit when the indicator that launched this panel disappears without
-/// running its quit path. The Windows job object and the macOS parent watch
-/// both live in `sysvitals_panel` so the panels share one policy.
 pub(crate) fn watch_parent(cx: &mut App) {
     sysvitals_panel::watch_parent(cx, "settings");
 }
@@ -76,11 +55,6 @@ pub(crate) fn watch_parent(cx: &mut App) {
 const SETTINGS_MARGIN: f32 = 16.0;
 const SETTINGS_MIN_SIZE: f32 = 200.0;
 
-/// Fit the requested window size into a display's usable work area. GPUI's
-/// `check_given_bounds()` only verifies the window center, so a fixed
-/// 400x740 settings window can otherwise spill above/below a short work area
-/// on a high-DPI laptop. The arithmetic lives in `core::layout` so it runs
-/// in the Linux unit-test gate.
 pub(crate) fn fit_window_size(
     requested: gpui_kit::Size<Pixels>,
     work: Bounds<Pixels>,
@@ -107,17 +81,9 @@ pub(crate) fn centered_on_work(
     WindowBounds::Windowed(Bounds::centered_at(center, fitted))
 }
 
-/// Center the settings window on the display that contains the anchor (the
-/// indicator that opened it), so it follows the indicator across monitors.
-/// Display selection is shared with the history popup
-/// (`sysvitals_panel::anchor_visible_bounds`: native monitor handle first,
-/// rectangle probe fallback); this function only centers on the result.
 pub(crate) fn settings_window_bounds(
     anchor: Option<&AnchorRect>,
     monitor: Option<DisplayId>,
-    // `Size` is ambiguous between `gpui::Size<Pixels>` (from `gpui_kit::*`)
-    // and the `gpui_component::Size` enum (from `gpui_kit::component::*`);
-    // the layout size is the generic geometry type.
     requested: gpui_kit::Size<Pixels>,
     cx: &App,
 ) -> WindowBounds {
@@ -137,8 +103,6 @@ pub(crate) fn settings_window_bounds(
 
 #[cfg(test)]
 mod tests {
-    // Import explicitly: a glob of the crate root would also pull in GPUI's
-    // `test` module, which makes `#[test]` expand into its own test macro.
     use super::{centered_on_work, fit_window_size, point, px, size, Bounds, Pixels, WindowBounds};
 
     fn work(width: f32, height: f32) -> Bounds<Pixels> {

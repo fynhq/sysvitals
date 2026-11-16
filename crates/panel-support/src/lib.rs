@@ -1,15 +1,4 @@
-//! Shared theme and window plumbing for the two GPUI panels (`app-settings`
-//! and `app-history`).
-//!
-//! Both windows follow the system light/dark appearance, the OS accent and
-//! the same backdrop-material fallback rules, and both need the same hidden-
-//! window placement, DPI and parent-watch mechanics. Keeping the probes,
-//! theme patches and window helpers in one place removes copy-paste that
-//! would otherwise have to be fixed twice whenever a token changes.
-//!
-//! GPUI-free process plumbing (logging, the panic hook, registry probes)
-//! lives in `sysvitals-support` and is re-exported here so panel call sites
-//! have a single import surface.
+//! Shared theme and window plumbing for the GPUI panels.
 
 use gpui_kit::component::theme::Theme as UiTheme;
 use gpui_kit::*;
@@ -22,9 +11,6 @@ use sysvitals_core::backdrop::{
     Material,
 };
 
-// Process plumbing shared by every panel (and, directly, by the platform
-// indicators): daily-file logging, the crash hook, the Windows probes and
-// the shared CLI/build stamp.
 pub use sysvitals_support::{
     acquire_instance_lock, anchor_arg, anchor_monitor_arg, install_panic_hook, log_event,
     log_sanitize_issues, parent_pid_arg, poll_config, ready_file_arg, ConfigEvent, InstanceLock,
@@ -33,25 +19,17 @@ pub use sysvitals_support::{
 #[cfg(windows)]
 pub use sysvitals_support::{hkcu_dword, os_build_number, taskbar_al, utf16, ParentProcess};
 
-/// Which panel is asking for the material tint. The history popup sits
-/// directly on the chart and keeps the standard tint; the settings page is
-/// made of opaque cards and exposes Mica at full strength.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PanelSurface {
     Settings,
     History,
 }
 
-/// Corner radius shared by every panel control (buttons, inputs, dropdowns).
-/// Windows uses WinUI's `ControlCornerRadius` (4px), which also stays visually
-/// nested inside its 8px cards; macOS keeps the library's 6px.
 #[cfg(windows)]
 pub const CONTROL_RADIUS: f32 = 4.0;
 #[cfg(not(windows))]
 pub const CONTROL_RADIUS: f32 = 6.0;
 
-/// The backdrop material this Windows host supports, honoring the user's
-/// transparency-effects preference.
 #[cfg(windows)]
 pub fn detect_material() -> Material {
     const PERSONALIZE_KEY: &str =
@@ -62,9 +40,6 @@ pub fn detect_material() -> Material {
     choose_windows_material(sysvitals_support::os_build_number(), transparency)
 }
 
-/// macOS always requests the blur material: `NSVisualEffectView` exists on
-/// every supported host, and AppKit automatically flattens it when the user
-/// enables "reduce transparency".
 #[cfg(target_os = "macos")]
 pub fn detect_material() -> Material {
     choose_macos_material(true)
@@ -75,7 +50,6 @@ pub fn detect_material() -> Material {
     Material::Opaque
 }
 
-/// Map the chosen material onto GPUI's window-background request.
 pub fn backdrop_for(material: Material) -> WindowBackgroundAppearance {
     match material {
         Material::Mica => WindowBackgroundAppearance::MicaBackdrop,
@@ -84,8 +58,6 @@ pub fn backdrop_for(material: Material) -> WindowBackgroundAppearance {
     }
 }
 
-/// Windows 11 ships Segoe UI Variable, whose optical size is tuned for UI
-/// text. Older builds keep the system-resolved font.
 #[cfg(windows)]
 pub fn panel_font_family() -> Option<&'static str> {
     sysvitals_support::os_build_number()
@@ -98,14 +70,6 @@ pub fn panel_font_family() -> Option<&'static str> {
     None
 }
 
-/// The system accent color packed as `0x00RRGGBB`, or `None` when it should
-/// not be used at all.
-///
-/// Windows reads Explorer's `AccentColorMenu` (ABGR), which changes as soon
-/// as the picker is confirmed; DWM colorization is only a fallback because it
-/// can lag and is darkened by the transparency mix. macOS always follows
-/// `NSColor.controlAccentColor`, which resolves both an explicit pick and the
-/// default multicolor / wallpaper-derived accent.
 #[cfg(windows)]
 pub fn system_accent_hex() -> Option<u32> {
     const ACCENT_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Accent";
@@ -114,10 +78,6 @@ pub fn system_accent_hex() -> Option<u32> {
     }
     use windows::Win32::Graphics::Dwm::DwmGetColorizationColor;
     let mut argb = 0u32;
-    // `Default::default()` avoids naming the `BOOL` type: in windows-core
-    // 0.62 that is a plain `pub type BOOL = i32` alias, so `BOOL(0)` would
-    // compile as a tuple-struct constructor (E0423). The opaque-blend flag is
-    // not read — the accent color is meaningful either way.
     if unsafe { DwmGetColorizationColor(&mut argb, &mut Default::default()) }.is_err() {
         return None;
     }
@@ -142,7 +102,6 @@ pub fn system_accent_hex() -> Option<u32> {
     None
 }
 
-/// Convert a packed 24-bit RGB hex to GPUI's `Hsla`.
 fn rgb_hex_to_hsla(hex: u32) -> Hsla {
     let r = ((hex >> 16) & 0xFF) as f32 / 255.0;
     let g = ((hex >> 8) & 0xFF) as f32 / 255.0;
@@ -169,8 +128,6 @@ fn rgb_hex_to_hsla(hex: u32) -> Hsla {
     hsla(h, s, l, 1.0)
 }
 
-/// Push the OS accent color into the GPUI theme so primary-tinted controls
-/// match the system picker.
 pub fn apply_accent(cx: &mut App) {
     let Some(hex) = system_accent_hex() else {
         return;
@@ -208,13 +165,10 @@ pub fn apply_accent(cx: &mut App) {
     });
 }
 
-/// Sync the window palette to the OS light/dark appearance.
 fn apply_system_theme(cx: &mut App) {
     UiTheme::sync_system_appearance(None, cx);
 }
 
-/// Tint the root surface so the backdrop reads through. `Opaque` is a no-op,
-/// preserving the pre-material rendering exactly.
 pub fn apply_material(cx: &mut App, surface: PanelSurface) {
     let material = detect_material();
     if !should_tint(material) {
@@ -235,11 +189,6 @@ pub fn apply_material(cx: &mut App, surface: PanelSurface) {
     });
 }
 
-/// Theme sync, accent override and material tint, in that order. A palette
-/// reload wipes every runtime patch, so the panels must call this after every
-/// appearance change and apply their own extras afterwards. The Windows
-/// optical-size font family is re-applied here because the palette reload
-/// also resets it.
 pub fn apply_theme_and_accent(cx: &mut App, surface: PanelSurface) {
     apply_system_theme(cx);
     apply_accent(cx);
@@ -252,15 +201,7 @@ pub fn apply_theme_and_accent(cx: &mut App, surface: PanelSurface) {
     });
 }
 
-/// Poll the OS accent color and re-apply the theme patch when it changes.
-///
-/// `state` reaches into the view's cached last-seen accent; `reload` re-runs
-/// the panel's full theme patch when the accent disappears (the OS fell back
-/// to multicolor, or the probe failed) — a palette reload is the only way to
-/// drop the old override. The loop stops with the view entity, i.e. when the
-/// window closes. The probe runs inside `update` on purpose: on macOS
-/// `system_accent_hex` reads AppKit (`controlAccentColor`), which belongs to
-/// the main thread — the same thread `update` runs on.
+// Accent-only changes do not fire the appearance observer; poll the OS accent every 500 ms and re-apply.
 pub fn spawn_accent_watch<V, S, R>(cx: &mut Context<V>, mut state: S, mut reload: R)
 where
     V: 'static,
@@ -295,10 +236,6 @@ where
     .detach();
 }
 
-/// Re-apply the panel palette when the OS light/dark appearance flips live.
-/// `on_change` must re-run the panel's full theme patch (a palette reload
-/// wipes every runtime override). Returns the subscription the caller keeps
-/// for the window's lifetime.
 pub fn observe_system_appearance<V, F>(
     cx: &mut Context<V>,
     window: &mut Window,
@@ -314,10 +251,6 @@ where
     })
 }
 
-/// Quit when the launching indicator dies without running its quit path
-/// (crash, Force Quit). The platform job object covers Windows ordinary
-/// exits; this watch also catches a child launched before the job was
-/// configured. `label` names the panel in the log lines.
 #[cfg(target_os = "macos")]
 pub fn watch_parent(cx: &mut App, label: &'static str) {
     let Some(pid) = parent_pid_arg() else {
@@ -339,9 +272,6 @@ pub fn watch_parent(cx: &mut App, label: &'static str) {
     .detach();
 }
 
-/// Windows counterpart of [`watch_parent`]: the child owns a process handle
-/// and polls it once a second. A missing/unopenable parent exits the panel,
-/// matching the macOS behavior.
 #[cfg(windows)]
 pub fn watch_parent(cx: &mut App, label: &'static str) {
     let Some(pid) = parent_pid_arg() else {
@@ -375,7 +305,6 @@ pub fn watch_parent(cx: &mut App, label: &'static str) {
 #[cfg(not(any(windows, target_os = "macos")))]
 pub fn watch_parent(_cx: &mut App, _label: &'static str) {}
 
-/// Native window handle of a GPUI window, if it has one.
 #[cfg(windows)]
 pub fn window_hwnd(window: &Window) -> Option<windows::Win32::Foundation::HWND> {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -387,28 +316,13 @@ pub fn window_hwnd(window: &Window) -> Option<windows::Win32::Foundation::HWND> 
     Some(HWND(raw.hwnd.get() as *mut _))
 }
 
-/// Whether a native window currently has the `WS_VISIBLE` style. Used by the
-/// hidden-created settings window to tell "activation was refused" apart from
-/// "activation succeeded but focus stayed elsewhere".
 #[cfg(windows)]
 pub fn window_is_visible(hwnd: windows::Win32::Foundation::HWND) -> bool {
     use windows::Win32::UI::WindowsAndMessaging::IsWindowVisible;
     unsafe { IsWindowVisible(hwnd).as_bool() }
 }
 
-/// Move a still-hidden panel window onto the display it will open on.
-///
-/// Windows creates the window on the OS default monitor and GPUI moves it
-/// to the anchor's display when the window is shown. A cross-DPI move makes
-/// Windows re-scale the window from the previous DPI, which used to run
-/// while the panel was already visible (the "growing" flash on a 4K
-/// secondary display). Moving the hidden window first lets the DPI change
-/// happen off-screen; activation then only applies the final placement.
-///
-/// Must run outside an App update: `SetWindowPos` synchronously delivers
-/// `WM_MOVE`/`WM_SIZE`, and those messages re-enter GPUI's window callbacks
-/// (`AsyncApp::update`) while the app is already borrowed, panicking with
-/// "RefCell already borrowed".
+// Place a still-hidden panel on its target display before showing; a cross-DPI move rescales the logical size.
 #[cfg(windows)]
 pub fn preplace_hidden_window(hwnd: windows::Win32::Foundation::HWND, monitor: DisplayId) -> bool {
     use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, HMONITOR, MONITORINFO};
@@ -436,9 +350,6 @@ pub fn preplace_hidden_window(hwnd: windows::Win32::Foundation::HWND, monitor: D
     .is_ok()
 }
 
-/// GPUI does not declare DPI awareness itself. Without this the process is
-/// treated as DPI-unaware and Windows bitmap-stretches the whole window on a
-/// scaled display, which is what makes the text look soft.
 #[cfg(windows)]
 pub fn set_per_monitor_dpi_aware() {
     use windows::Win32::UI::HiDpi::{
@@ -449,18 +360,6 @@ pub fn set_per_monitor_dpi_aware() {
     }
 }
 
-/// Re-assert the logical size a panel window was laid out for after Windows
-/// moved it onto the indicator's display.
-///
-/// Windows places a freshly created window on the OS default monitor and
-/// `SetWindowPlacement` then moves it to the anchor display. When that move
-/// crosses a DPI boundary, the `WM_DPICHANGED` suggested rectangle is
-/// derived from the *old* DPI, so a window already sized for the target DPI
-/// is scaled a second time (a 680x390 popup opened from a 125% primary on a
-/// 100% secondary came out 542x311, leaving a visible gap above the
-/// taskbar). GPUI applies that suggestion, so the intended size is
-/// re-applied once, after the move. A same-DPI move stays within a pixel of
-/// the target and is untouched. `size_fixed` is the caller's one-shot latch.
 pub fn restore_window_size_after_move(
     window: &mut Window,
     size_fixed: &mut bool,
@@ -488,15 +387,6 @@ pub fn restore_window_size_after_move(
     window.resize(target);
 }
 
-/// The usable bounds (taskbar/dock excluded) of the display hosting the
-/// indicator anchor, or `None` when no display matches.
-///
-/// The native display handle is authoritative when the launcher passed one:
-/// GPUI scales each monitor's logical space by its own factor, so on
-/// mixed-DPI setups the anchor rectangle alone can fall inside two displays'
-/// bounds and the probe would pick the wrong one. The rectangle midpoint
-/// probe remains the fallback for launches without a handle (older companion
-/// process, macOS).
 pub fn anchor_visible_bounds(
     cx: &App,
     anchor: &sysvitals_core::cli::AnchorRect,
@@ -523,9 +413,6 @@ pub fn anchor_visible_bounds(
     display.map(|d| d.visible_bounds())
 }
 
-/// Convert GPUI window bounds into the pure geometry rectangle used by
-/// `sysvitals_core::layout`. The placement math itself is unit-tested on the
-/// Linux quality gate; this is only the GPUI type adapter.
 pub fn layout_rect(bounds: &Bounds<Pixels>) -> sysvitals_core::layout::Rect {
     sysvitals_core::layout::Rect::new(
         f32::from(bounds.origin.x),
