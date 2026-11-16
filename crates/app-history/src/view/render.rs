@@ -159,6 +159,7 @@ impl Render for HistoryView {
         let copied = self.copied;
         let copy_failed = self.copy_failed;
         let current_range = self.range;
+        let primary_fill = cx.theme().primary;
 
         let mut range_buttons = h_flex()
             .id("range-group")
@@ -171,7 +172,10 @@ impl Render for HistoryView {
             let btn = Button::new(format!("range-{:?}", r))
                 .small()
                 .rounded(px(CONTROL_RADIUS))
-                .when(is_active, |b| b.primary())
+                // Primary drops the default variant's 1px border; keep a fill-colored one so switching never resizes the row.
+                .when(is_active, |b| {
+                    b.primary().border_1().border_color(primary_fill)
+                })
                 .toggled(is_active)
                 .label(label)
                 .on_click(cx.listener(move |this: &mut Self, _: &ClickEvent, _, cx| {
