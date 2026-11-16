@@ -2,11 +2,14 @@
 
 use super::*;
 
-pub(crate) fn choice_button(id: String, active: bool) -> Button {
+pub(crate) fn choice_button(id: String, active: bool, fill: Hsla) -> Button {
     Button::new(id)
         .small()
         .rounded(px(CONTROL_RADIUS))
-        .when(active, |button| button.primary())
+        // Primary drops the default variant's 1px border; keep a fill-colored one so switching never resizes the row.
+        .when(active, |button| {
+            button.primary().border_1().border_color(fill)
+        })
         .toggled(active)
 }
 

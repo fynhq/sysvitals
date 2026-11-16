@@ -42,7 +42,7 @@ impl Render for SettingsView {
         for i in 0..Language::ALL.len() {
             let active = i == self.lang_idx;
             lang_row = lang_row.child(
-                choice_button(format!("lang-{i}"), active)
+                choice_button(format!("lang-{i}"), active, cx.theme().primary)
                     .accessibility_label(Language::ALL[i].label())
                     .label(Language::ALL[i].label().to_string())
                     .on_click(cx.listener(
@@ -66,7 +66,7 @@ impl Render for SettingsView {
             let secs = *interval_ms / 1000;
             let text = format!("{secs} {}", t(lang, "settings.unit_seconds"));
             interval_row = interval_row.child(
-                choice_button(format!("interval-{i}"), active)
+                choice_button(format!("interval-{i}"), active, cx.theme().primary)
                     .label(text)
                     .on_click(cx.listener(
                         move |this: &mut Self,
@@ -88,7 +88,7 @@ impl Render for SettingsView {
             let active = i == self.theme_idx;
             let tip = t(lang, THEME_KEYS[i]).to_string();
             theme_row = theme_row.child(
-                choice_button(format!("theme-{i}"), active)
+                choice_button(format!("theme-{i}"), active, cx.theme().primary)
                     .icon(THEME_ICONS[i].clone())
                     .tooltip(tip.clone())
                     .accessibility_label(tip)
