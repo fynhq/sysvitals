@@ -1,18 +1,12 @@
-//! config: split out of `win` (see `win` for the module map).
+//! Config access, watcher seeding, and launch-at-login.
 
 use super::*;
 use std::path::{Path, PathBuf};
 
-// ------------------------------------------------------------ config access
-
 pub(crate) fn config() -> Config {
     CONFIG
         .get_or_init(|| {
-            // A missing or broken config file must not stop the indicator:
-            // fall back to defaults and keep running, but leave a trace so
-            // a parse error is diagnosable. The watcher seeds its mtime only
-            // on a successful load; a failed initial read is retried by the
-            // normal 500ms poll instead of pinning defaults forever.
+            // A failed initial config read falls back to defaults and is retried by the 500 ms poll, not pinned forever.
             let loaded = match CONFIG_WATCHER.with(|watcher| watcher.borrow_mut().load_initial()) {
                 Ok((c, issues, source)) => {
                     log_sanitize_issues("config repair", &issues);
@@ -43,15 +37,6 @@ pub(crate) fn store_config(new: Config) {
     }
 }
 
-// ----------------------------------------------------------------- logging
-
-// Logging (`log_event`) comes from `sysvitals-support` so every SysVitals
-// process shares one implementation.
-
-// ------------------------------------------------------------------ helpers
-
-/// Resolve the per-user Startup folder through the shell so redirected
-/// profiles (roaming or OneDrive AppData) land where Explorer reads it.
 fn startup_dir() -> Result<PathBuf, String> {
     let raw = unsafe { SHGetKnownFolderPath(&FOLDERID_Startup, KF_FLAG_DEFAULT, None) }
         .map_err(|e| format!("startup folder lookup failed: {e}"))?;
@@ -69,9 +54,6 @@ fn same_path(a: &Path, b: &Path) -> bool {
     a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase()
 }
 
-/// Read the target of an existing shortcut so an unchanged entry is not
-/// rewritten on every launch. Missing, foreign, or unreadable links yield
-/// `None` and are simply recreated.
 unsafe fn shortcut_target(link_path: &Path) -> Option<PathBuf> {
     let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).ok()?;
     let persist: IPersistFile = link.cast().ok()?;
@@ -86,7 +68,6 @@ unsafe fn shortcut_target(link_path: &Path) -> Option<PathBuf> {
     Some(PathBuf::from(String::from_utf16_lossy(&buf[..len])))
 }
 
-/// Write `SysVitals.lnk` in the Startup folder pointing at this executable.
 unsafe fn write_startup_shortcut(link_path: &Path, exe: &Path) -> Result<(), String> {
     let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)
         .map_err(|e| format!("shortcut COM unavailable: {e}"))?;
@@ -95,7 +76,6 @@ unsafe fn write_startup_shortcut(link_path: &Path, exe: &Path) -> Result<(), Str
         .map_err(|e| format!("shortcut target rejected: {e}"))?;
     if let Some(dir) = exe.parent() {
         let dir_w = utf16(&dir.to_string_lossy());
-        // Best effort: the working directory does not affect startup.
         let _ = link.SetWorkingDirectory(PCWSTR(dir_w.as_ptr()));
     }
     let title = utf16("SysVitals");
@@ -110,9 +90,6 @@ unsafe fn write_startup_shortcut(link_path: &Path, exe: &Path) -> Result<(), Str
         .map_err(|e| format!("shortcut save failed ({}): {e}", link_path.display()))
 }
 
-/// Remove a Run value written by builds that used the registry. The shortcut
-/// is authoritative now; a leftover value would launch a second copy at
-/// login, so cleanup failure is logged but never masks the shortcut result.
 unsafe fn remove_legacy_run_value() -> bool {
     let key = utf16(LEGACY_RUN_KEY);
     let value = utf16(LEGACY_RUN_VALUE);
@@ -138,10 +115,6 @@ unsafe fn remove_legacy_run_value() -> bool {
     }
 }
 
-/// Create or remove the per-user Startup-folder shortcut. Returns whether the
-/// system state actually changed. The link carries the current executable
-/// path, so moving the folder and launching the new copy repairs the entry on
-/// the next start.
 pub(crate) unsafe fn set_auto_start(enabled: bool) -> Result<bool, String> {
     let link_path = startup_link_path()?;
     let mut changed = if enabled {
@@ -171,9 +144,6 @@ pub(crate) unsafe fn set_auto_start(enabled: bool) -> Result<bool, String> {
 }
 
 thread_local! {
-    /// Shared login-startup policy; the platform side effect is the Startup
-    /// shortcut below. The controller owns the explicit-bit rule, the applied
-    /// cache and the retry cooldown.
     static AUTO_START: RefCell<AutoStartController> = RefCell::new(AutoStartController::new());
 }
 
@@ -187,15 +157,10 @@ fn set_auto_start_outcome(desired: bool) -> Result<AutoStartOutcome, String> {
     })
 }
 
-/// Apply the login-startup preference once per value change. The settings
-/// window writes the config; this process owns the Startup-folder side effect.
 pub(crate) fn apply_auto_start(cfg: &Config) {
     AUTO_START.with(|controller| controller.borrow_mut().apply(cfg, set_auto_start_outcome));
 }
 
-/// Retry a failed auto-start apply on its cooldown, even when the config file
-/// has not changed. Only a file-backed, successfully parsed config may drive
-/// this side effect.
 fn retry_auto_start_if_due() {
     let cfg = config();
     AUTO_START.with(|controller| {
@@ -207,11 +172,6 @@ fn retry_auto_start_if_due() {
     });
 }
 
-// ------------------------------------------------- config file watching
-
-/// Called on each TIMER_CONFIG tick. Compares the config file's mtime
-/// against the cached value; on change, reloads the config, re-seeds the
-/// sample timer (interval may have changed), and re-lays out every overlay.
 pub(crate) fn poll_config_change() {
     let poll = CONFIG_WATCHER
         .with(|watcher| sysvitals_support::poll_config(&mut watcher.borrow_mut(), "config reload"));
@@ -236,24 +196,15 @@ pub(crate) fn poll_config_change() {
     );
     CONFIG_LOAD_FAILED.store(false, Ordering::Relaxed);
     store_config(loaded.clone());
-    // A missing file (for example after saving a corrupt config aside)
-    // is not an explicit "auto-start off" choice. Only an existing,
-    // parsed file may apply the platform side effect.
     if source == sysvitals_core::config::ConfigSource::File {
         apply_auto_start(&loaded);
     } else {
-        // Let a later re-created config apply its value again, even if it
-        // matches the last one we applied.
         AUTO_START.with(|controller| controller.borrow_mut().reset());
     }
     log_event(
         "INFO",
         &format!("config file change detected: {}", loaded.summary()),
     );
-    // Re-seed the sample timer in case the interval changed. SetTimer
-    // with the same hwnd+id replaces the running timer, so no KillTimer
-    // is needed; if the replacement fails the old timer keeps ticking at
-    // the previous interval instead of sampling stopping entirely.
     unsafe {
         let sentinel = sentinel_hwnd();
         if SetTimer(
@@ -269,8 +220,6 @@ pub(crate) fn poll_config_change() {
             );
         }
     }
-    // Reset the grow-only widths so a narrower layout takes effect, then
-    // re-lay out every overlay from the last sample (no re-sample spike).
     OVERLAYS.with(|slot| {
         for ov in slot.borrow_mut().iter_mut() {
             ov.win_w = 0;

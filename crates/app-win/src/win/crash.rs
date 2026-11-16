@@ -1,12 +1,8 @@
-//! crash: split out of `win` (see `win` for the module map).
+//! Panic hook and Win32 unhandled-exception logging.
 
 use super::*;
 
-// ------------------------------------------------------------ crash hooks
-
-/// Install crash diagnostics: the shared Rust panic hook plus a Win32
-/// unhandled exception filter. Both write the crash reason to the log
-/// file so a silent process death becomes diagnosable.
+// Panic hook + Win32 unhandled-exception filter both log the crash reason for silent-death diagnosis.
 pub(crate) fn install_crash_hooks() {
     sysvitals_support::install_panic_hook();
     unsafe {
@@ -29,11 +25,9 @@ unsafe extern "system" fn unhandled_exception_filter(info: *const EXCEPTION_POIN
                 "unhandled exception: 0x{code:08X} at 0x{addr:016X} in {module} — process will terminate"
             ),
         );
-    // EXCEPTION_EXECUTE_HANDLER: let the OS terminate after our logging.
     1
 }
 
-/// Best-effort: return the module file name that contains `addr`.
 pub(crate) unsafe fn module_name_for_address(addr: *mut std::ffi::c_void) -> String {
     let mut hmod = windows::Win32::Foundation::HMODULE::default();
     let ok = GetModuleHandleExW(

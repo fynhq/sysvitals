@@ -1,23 +1,13 @@
-//! tick: split out of `macos` (see `macos/mod.rs` for the module map).
+//! Menu-bar sampling timer and run-loop tick.
 
 use super::*;
 
-/// Tick driven by the repeating timer. `IN_RUN_LOOP` marks the point where
-/// ticks are dispatched from inside `NSApplication::run`; the startup tick
-/// runs earlier, so accessibility/tooltip updates are applied from the
-/// timer ticks instead of from that first tick.
 pub(crate) fn timer_tick() {
     IN_RUN_LOOP.set(true);
     tick();
     IN_RUN_LOOP.set(false);
 }
 
-/// Own and (re-)arm the repeating sample timer. The first tick primes it;
-/// later ticks re-schedule only when a config hot-reload changed
-/// `sample.interval_ms`, so a new interval takes effect within one old tick
-/// — the macOS counterpart of the Windows overlay re-seeding its sample
-/// timer on config change (previously the interval was read once at startup
-/// and never updated live).
 pub(crate) fn reschedule_if_interval_changed() {
     let interval_ms = CONFIG.with(|c| c.borrow().sample.interval_ms);
     if APPLIED_INTERVAL_MS.get() == interval_ms {
@@ -31,13 +21,8 @@ pub(crate) fn reschedule_if_interval_changed() {
     let timer = unsafe {
         NSTimer::timerWithTimeInterval_repeats_block(interval_ms as f64 / 1000.0, true, &block)
     };
-    // Add to common modes, not just the default mode: the context menu's
-    // nested tracking loop would otherwise pause sampling/history while
-    // the menu is open.
     let run_loop = NSRunLoop::mainRunLoop();
     unsafe { run_loop.addTimer_forMode(&timer, NSRunLoopCommonModes) };
-    // Install the new timer and invalidate the one it replaces so exactly
-    // one keeps firing.
     let prev = SAMPLE_TIMER.with(|slot| slot.replace(Some(timer)));
     if let Some(old) = prev {
         old.invalidate();
@@ -45,7 +30,6 @@ pub(crate) fn reschedule_if_interval_changed() {
     APPLIED_INTERVAL_MS.set(interval_ms);
 }
 
-/// Sample metrics, record the history row, and update the indicator.
 pub(crate) fn tick() {
     reload_config_if_changed();
     reschedule_if_interval_changed();
@@ -69,8 +53,6 @@ pub(crate) fn tick() {
 
     let row = format_frame(&snapshot, &cfg);
     render_indicator(&row, &cfg);
-    // The startup tick runs before the run loop; deferred accessibility
-    // updates from that tick land on the first timer-driven tick.
     if IN_RUN_LOOP.get() {
         apply_pending_accessibility();
     }

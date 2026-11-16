@@ -1,21 +1,16 @@
-//! children: split out of `win` (see `win` for the module map).
+//! Child process management for settings, history, and panels.
 
 use super::*;
 use std::os::windows::process::CommandExt;
 use std::process::{Command, Stdio};
 
-// ------------------------------------------------------- child process launch
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ProcessState {
     Alive,
     Exited,
-    /// `WAIT_FAILED` or another unexpected state: the handle can no longer
-    /// be trusted.
     Failed,
 }
 
-/// Zero-wait probe shared by the liveness and termination paths.
 unsafe fn process_state(handle: HANDLE) -> ProcessState {
     match WaitForSingleObject(handle, 0) {
         WAIT_TIMEOUT => ProcessState::Alive,
@@ -24,8 +19,6 @@ unsafe fn process_state(handle: HANDLE) -> ProcessState {
     }
 }
 
-/// Whether the Settings child is still running. Reaps the handle when the
-/// process has exited. Never blocks the message thread.
 pub(crate) fn settings_child_alive() -> bool {
     let mut slot = SETTINGS_PROCESS.lock().unwrap_or_else(|e| e.into_inner());
     let Some(raw) = *slot else {
@@ -52,15 +45,7 @@ pub(crate) fn settings_child_alive() -> bool {
     }
 }
 
-/// Terminate the Settings child if it is still running. The handle is
-/// closed and the slot cleared either way. `wait_for_exit` is only used
-/// from the background launch worker (a replacement must wait for the old
-/// instance's single-instance mutex to be released); the UI paths pass
-/// `false` so closing never blocks the message loop.
 pub(crate) fn terminate_settings(wait_for_exit: bool) -> bool {
-    // Take the handle out of the shared slot before any blocking wait:
-    // the UI thread must be able to call `settings_child_alive()` while a
-    // replacement worker waits up to 2s for the old process object.
     let raw = {
         let mut slot = SETTINGS_PROCESS.lock().unwrap_or_else(|e| e.into_inner());
         slot.take()
@@ -72,7 +57,6 @@ pub(crate) fn terminate_settings(wait_for_exit: bool) -> bool {
     if handle.is_invalid() {
         return false;
     }
-    // Already exited: reap quietly, treat as "nothing to close".
     match unsafe { process_state(handle) } {
         ProcessState::Exited => {
             let _ = unsafe { CloseHandle(handle) };
@@ -87,11 +71,6 @@ pub(crate) fn terminate_settings(wait_for_exit: bool) -> bool {
     }
     let _ = unsafe { TerminateProcess(handle, 0) };
     if wait_for_exit {
-        // The process object is signaled only after the child's handles
-        // are closed — including its single-instance mutex. Without this,
-        // a replacement launched immediately could see the dying instance
-        // and exit. This runs on a worker thread, never the UI thread,
-        // and the slot is already empty so the UI never waits on us.
         let wait = unsafe { WaitForSingleObject(handle, 2_000) };
         if wait != WAIT_OBJECT_0 {
             log_event("WARN", "settings window did not exit within 2s");
@@ -102,10 +81,6 @@ pub(crate) fn terminate_settings(wait_for_exit: bool) -> bool {
     true
 }
 
-/// Terminate the resident history process. Called only on restart/quit:
-/// a normal popup close is a shared-state request that only removes the
-/// window and releases the GPU; the framework stays warm for ten minutes,
-/// then exits by itself.
 pub(crate) fn history_terminate() -> bool {
     let mut slot = HISTORY_PROCESS.lock().unwrap_or_else(|e| e.into_inner());
     let Some(raw) = slot.take() else {
@@ -133,20 +108,11 @@ pub(crate) fn history_terminate() -> bool {
     true
 }
 
-/// Close both child panels on restart/quit. Leaving them alive makes a
-/// restarted instance open a second History window (its slot starts
-/// empty) and leaves Settings orphaned after Quit.
 pub(crate) fn close_children() {
     let _ = history_terminate();
-    // Quit/restart: the relaunch is delayed by the caller, so there is no
-    // single-instance race to wait out here; never block the UI thread.
     let _ = terminate_settings(false);
 }
 
-/// Create the kill-on-close job that owns every panel child. Keeping the
-/// job handle for the process lifetime means an indicator crash, a quit
-/// during a slow `CreateProcessW`, or an explorer restart can never leave
-/// an orphan Settings/History process behind.
 pub(crate) unsafe fn init_child_job() {
     if CHILD_JOB.load(Ordering::Relaxed) != 0 {
         return;
@@ -174,10 +140,6 @@ pub(crate) unsafe fn init_child_job() {
     CHILD_JOB.store(job.0 as isize, Ordering::Relaxed);
 }
 
-/// Put a freshly spawned panel into the kill-on-close job. Failure is
-/// non-fatal: the explicit slot termination still covers the normal
-/// quit/restart paths, and the child's `--parent-pid` covers mac-style
-/// crash cleanup where it applies.
 pub(crate) unsafe fn assign_to_child_job(process: HANDLE) {
     let raw = CHILD_JOB.load(Ordering::Relaxed);
     if raw == 0 {
@@ -189,9 +151,6 @@ pub(crate) unsafe fn assign_to_child_job(process: HANDLE) {
     }
 }
 
-/// Spawn `exe_path` with the given argv tail. Returns the process handle
-/// (the thread handle is closed here). Used by the background Settings
-/// and resident-history launchers; never call this from the UI thread.
 pub(crate) fn spawn_process(
     exe_path: &str,
     dir: &str,
@@ -205,19 +164,10 @@ pub(crate) fn spawn_process(
     });
     let si = STARTUPINFOW {
         cb: std::mem::size_of::<STARTUPINFOW>() as u32,
-        // Both children are GUI-subsystem binaries. Without this flag the
-        // system puts the cursor in feedback mode ("Working in Background")
-        // for the first seconds of the child's startup, which reads as a
-        // spinner on every cold chart click; neither launch is a foreground
-        // app switch, so the feedback is pure noise here.
         dwFlags: STARTF_FORCEOFFFEEDBACK,
         ..Default::default()
     };
     let mut pi = PROCESS_INFORMATION::default();
-    // CreateProcessW launches the sibling directly: the Shell execute path
-    // used before can pump messages and adds shell lookup overhead. The
-    // child is a GUI-subsystem binary, so no console/STARTUPINFO window
-    // fields are needed.
     let result = unsafe {
         CreateProcessW(
             windows::core::PCWSTR(exe_w.as_ptr()),
@@ -241,11 +191,6 @@ pub(crate) fn spawn_process(
     }
 }
 
-/// Launch the external settings process (`SysVitalsSettings.exe`) on a
-/// worker thread. `CreateProcessW` has been measured at hundreds of
-/// milliseconds to several seconds on loaded hosts, and replacing a
-/// window on another monitor additionally waits for the old instance's
-/// single-instance mutex. Neither may block the indicator message loop.
 pub(crate) fn launch_settings(hwnd: HWND) {
     let mut args = format!("--parent-pid {}", unsafe { GetCurrentProcessId() });
     if let Some(anchor) = window_anchor_logical(hwnd) {
@@ -253,9 +198,6 @@ pub(crate) fn launch_settings(hwnd: HWND) {
             " --anchor {} {} {} {}",
             anchor[0], anchor[1], anchor[2], anchor[3]
         ));
-        // The rectangle alone is ambiguous on mixed-DPI setups: GPUI's
-        // logical space is scaled per display, so the panel also gets the
-        // native display handle to select the target monitor explicitly.
         let monitor = window_monitor_id(hwnd);
         if monitor != 0 {
             args.push_str(&format!(" --anchor-monitor {monitor}"));
@@ -275,10 +217,6 @@ pub(crate) fn launch_settings(hwnd: HWND) {
         return;
     }
     if alive {
-        // GPUI cannot move an existing window, so a Settings click on
-        // another screen closes the window and reopens it there. Every
-        // setting is persisted on change, so nothing is lost except
-        // transient scroll/focus state.
         log_event("INFO", "settings: moving window to the clicked monitor");
     }
     let Some(dir) = current_exe_dir() else {
@@ -296,8 +234,6 @@ pub(crate) fn launch_settings(hwnd: HWND) {
         "INFO",
         &format!("launching SysVitalsSettings.exe (replace={alive}) {args}"),
     );
-    // The panel takes seconds to appear; hold the wait cursor until its
-    // first visible window (reconciled from `sync_history_state`).
     settings_wait_cursor_begin();
     let sentinel_raw = sentinel_hwnd().0 as isize;
     let replace = alive;
@@ -305,8 +241,6 @@ pub(crate) fn launch_settings(hwnd: HWND) {
         .name("sysvitals-settings".to_string())
         .spawn(move || {
             if replace {
-                // Must run on the worker: waits up to 2s for the old
-                // instance's named mutex to be released.
                 let _ = terminate_settings(true);
             }
             let started = Instant::now();
@@ -321,9 +255,6 @@ pub(crate) fn launch_settings(hwnd: HWND) {
                         set_settings_pid(handle);
                         *SETTINGS_PROCESS.lock().unwrap_or_else(|e| e.into_inner()) =
                             Some(handle.0 as isize);
-                        // Record the monitor only after the process is
-                        // actually alive; a failed replacement must not
-                        // make a later click on the new monitor a no-op.
                         SETTINGS_MONITOR.store(monitor, Ordering::Relaxed);
                         log_event(
                             "INFO",
@@ -360,21 +291,13 @@ pub(crate) fn launch_settings(hwnd: HWND) {
     }
 }
 
-/// Whether the resident history framework is running or being launched.
 pub(crate) fn history_busy() -> bool {
     history_child_alive() || HISTORY_LAUNCHING.load(Ordering::SeqCst)
 }
 
-/// Exit code of the last reaped resident, or `u32::MAX` before the first
-/// reap. A clean (zero) exit is the idle shutdown handshake; a nonzero code
-/// is a crash and must not trigger a pending-request relaunch.
 static HISTORY_LAST_EXIT_CODE: AtomicU32 = AtomicU32::new(u32::MAX);
-/// Request generation already relaunched after an idle exit. Prevents a
-/// failed relaunch from spawning a new process on every 250 ms sync tick; a
-/// fresh click advances the generation and retries.
 static HISTORY_RELAUNCHED_GENERATION: AtomicU32 = AtomicU32::new(0);
 
-/// Reap the resident history process if it exited (crash, manual kill).
 pub(crate) fn history_child_alive() -> bool {
     let mut slot = HISTORY_PROCESS.lock().unwrap_or_else(|e| e.into_inner());
     let Some(raw) = *slot else {
@@ -393,8 +316,6 @@ pub(crate) fn history_child_alive() -> bool {
             HISTORY_LAST_EXIT_CODE.store(code, Ordering::Relaxed);
             if !QUITTING.load(Ordering::Relaxed) {
                 if code == 0 {
-                    // The resident exits cleanly after a long idle period to
-                    // release its GPU/heap. It is relaunched on demand.
                     log_event(
                         "INFO",
                         "history resident exited after idling; it will be relaunched on demand",
@@ -419,9 +340,6 @@ pub(crate) fn history_child_alive() -> bool {
     }
 }
 
-/// One-shot latch for shared-memory failures: the history sync timer calls
-/// this path four times a second, so a persistent mapping failure must not
-/// flood the daily log.
 static HISTORY_STATE_WARNED: AtomicBool = AtomicBool::new(false);
 
 fn warn_history_state(message: &str) {
@@ -430,12 +348,6 @@ fn warn_history_state(message: &str) {
     }
 }
 
-/// Create a security descriptor for the shared history block that grants the
-/// creating user full access. `CreateFileMappingW` would otherwise apply the
-/// process token's default DACL; making the owner-rights grant explicit keeps
-/// the block usable after a token/integrity change and documents the
-/// single-user boundary. Returns `None` (default DACL) if SDDL conversion
-/// fails, which is no worse than the previous behaviour.
 fn history_state_security() -> Option<(
     windows::Win32::Security::SECURITY_ATTRIBUTES,
     windows::Win32::Security::PSECURITY_DESCRIPTOR,
@@ -468,8 +380,6 @@ fn history_state_security() -> Option<(
     ))
 }
 
-/// Create (or reopen) the shared history state block. Kept alive for the
-/// process lifetime; the resident child maps it by name.
 pub(crate) fn history_state_ptr() -> Option<*mut sysvitals_core::HistoryState> {
     HISTORY_STATE.with(|slot| {
         if slot.borrow().is_none() {
@@ -486,7 +396,6 @@ pub(crate) fn history_state_ptr() -> Option<*mut sysvitals_core::HistoryState> {
                     windows::core::PCWSTR(name.as_ptr()),
                 )
             };
-            // Capture before any other Win32 call can overwrite it.
             let already_exists = unsafe { windows::Win32::Foundation::GetLastError() }
                 == windows::Win32::Foundation::ERROR_ALREADY_EXISTS;
             if let Some((_, descriptor)) = security {
@@ -510,9 +419,6 @@ pub(crate) fn history_state_ptr() -> Option<*mut sysvitals_core::HistoryState> {
                 return None;
             }
             let ptr = view.Value as *mut sysvitals_core::HistoryState;
-            // An existing mapping belongs to a still-live resident child or
-            // to a dead process's leftovers. Only clear it when the header is
-            // not ours; a live block keeps its request/visibility flags.
             let usable = already_exists
                 && unsafe {
                     let header = std::ptr::read_volatile(ptr);
@@ -534,10 +440,6 @@ pub(crate) fn history_snapshot() -> Option<sysvitals_core::HistoryState> {
     Some(unsafe { sysvitals_core::HistoryState::read_consistent(ptr) })
 }
 
-/// Ask the resident child to close. The generation moves with the
-/// request, so the resident loop can tell this close apart from the
-/// generation that opened the window and will not reopen it while a
-/// newer click is pending.
 pub(crate) fn history_close_request() {
     let Some(ptr) = history_state_ptr() else {
         return;
@@ -547,9 +449,6 @@ pub(crate) fn history_close_request() {
     }
 }
 
-/// Clear both flags after a resident-child death (or before starting a
-/// fresh frame) so a stale request/visibility cannot make the next click
-/// a no-op toggle-close or auto-open a window nobody asked for.
 pub(crate) fn history_mark_stopped() {
     let Some(ptr) = history_state_ptr() else {
         return;
@@ -559,12 +458,6 @@ pub(crate) fn history_mark_stopped() {
     }
 }
 
-// ------------------------------------------------ launch wait cursor
-
-/// What the wait cursor is waiting for. Every launch the indicator starts
-/// (chart popup, settings panel, Task Manager) spends a noticeable gap
-/// before its window appears; the overlay shows the system wait cursor for
-/// that gap so the click is acknowledged immediately.
 const WAIT_NONE: u32 = 0;
 const WAIT_HISTORY: u32 = 1;
 const WAIT_SETTINGS: u32 = 2;
@@ -572,10 +465,7 @@ const WAIT_TASKMGR: u32 = 3;
 
 static WAIT_TARGET: AtomicU32 = AtomicU32::new(WAIT_NONE);
 static WAIT_SINCE_MS: AtomicU64 = AtomicU64::new(0);
-/// PID of the settings child launched last; 0 until its launch worker
-/// stores the process handle.
 static SETTINGS_PID: AtomicU32 = AtomicU32::new(0);
-/// Hard stop so a refused or failed launch cannot leave the pointer spinning.
 const WAIT_CURSOR_TIMEOUT_MS: u64 = 10_000;
 
 fn now_ms() -> u64 {
@@ -585,9 +475,6 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// Start the wait cursor. Called from the click/menu handler while the
-/// pointer is over the indicator, so the cursor applies immediately even
-/// when the user does not move the mouse again.
 fn wait_cursor_begin(target: u32) {
     WAIT_SINCE_MS.store(now_ms(), Ordering::Relaxed);
     WAIT_TARGET.store(target, Ordering::Relaxed);
@@ -601,8 +488,6 @@ pub(crate) fn history_wait_cursor_begin() {
 }
 
 pub(crate) fn settings_wait_cursor_begin() {
-    // A replacement launch must wait for the *new* process's window, not
-    // the old instance's still-visible one.
     SETTINGS_PID.store(0, Ordering::Relaxed);
     wait_cursor_begin(WAIT_SETTINGS);
 }
@@ -611,14 +496,10 @@ pub(crate) fn taskmgr_wait_cursor_begin() {
     wait_cursor_begin(WAIT_TASKMGR);
 }
 
-/// Keeps `WM_SETCURSOR` on the overlay returning the wait cursor while a
-/// launch is pending.
 pub(crate) fn wait_cursor_active() -> bool {
     WAIT_TARGET.load(Ordering::Relaxed) != WAIT_NONE
 }
 
-/// Restore the arrow only when the pointer still sits on one of our
-/// overlays; every other window repaints its own cursor from WM_SETCURSOR.
 pub(crate) fn wait_cursor_clear() {
     if WAIT_TARGET.swap(WAIT_NONE, Ordering::Relaxed) == WAIT_NONE {
         return;
@@ -636,9 +517,6 @@ pub(crate) fn wait_cursor_clear() {
     }
 }
 
-/// Reconcile a pending wait cursor once per sync tick: the launched window
-/// becoming visible ends it, and a failed launch or a window that never
-/// shows must not leave the pointer spinning.
 pub(crate) fn wait_cursor_reconcile() {
     let target = WAIT_TARGET.load(Ordering::Relaxed);
     if target == WAIT_NONE {
@@ -716,16 +594,10 @@ fn visible_task_manager() -> bool {
     }
 }
 
-/// Hand the settings child's PID to the wait-cursor reconciler as soon as
-/// the launch worker has the process handle.
 pub(crate) fn set_settings_pid(handle: HANDLE) {
     SETTINGS_PID.store(unsafe { GetProcessId(handle) }, Ordering::Relaxed);
 }
 
-/// Native display handle (HMONITOR) hosting a window, carried as `i64`
-/// through the shared history state and the settings command line.
-/// The overlay registry is refreshed every move tick, so it is the
-/// preferred source; a live query covers windows not in the registry.
 pub(crate) fn window_monitor_id(hwnd: HWND) -> i64 {
     if let Some(ov) = overlay_by_hwnd(hwnd) {
         return ov.monitor as i64;
@@ -733,9 +605,6 @@ pub(crate) fn window_monitor_id(hwnd: HWND) -> i64 {
     unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST).0 as i64 }
 }
 
-/// A window's rect converted to GPUI global logical pixels (physical
-/// pixels divided by the window's own monitor DPI). Used as the history
-/// popup anchor and as the settings window's monitor hint.
 pub(crate) fn window_anchor_logical(hwnd: HWND) -> Option<[f32; 4]> {
     let mut rect = RECT::default();
     if unsafe { GetWindowRect(hwnd, &mut rect) }.is_err() {
@@ -751,10 +620,6 @@ pub(crate) fn window_anchor_logical(hwnd: HWND) -> Option<[f32; 4]> {
     ])
 }
 
-/// Publish an open request: the indicator's rect plus `desired_open=1`
-/// under one generation write. `GetWindowRect` reports physical pixels;
-/// the child lays its window out in GPUI's global logical pixel space
-/// (top-left origin, y down), so scale by the window's own monitor DPI.
 pub(crate) fn history_open_request(hwnd: HWND) -> bool {
     let Some(ptr) = history_state_ptr() else {
         return false;
@@ -773,24 +638,10 @@ pub(crate) fn history_open_request(hwnd: HWND) -> bool {
     true
 }
 
-/// Start the resident history framework for a fresh click, clearing any
-/// request a previous instance left behind (for example a self-dismissed
-/// popup whose `desired_open` stays 1 by design). The click publishes a new
-/// request immediately after this call.
 pub(crate) fn ensure_history_resident() {
     start_history_resident(true);
 }
 
-/// Start the resident history framework on a worker thread. `CreateProcessW`
-/// has been measured at 190 ms – 5.4 s on loaded hosts; doing it here keeps
-/// the indicator's message loop responsive. The framework is launched on the
-/// first chart click and after an idle exit, never at indicator startup: its
-/// GPUI/DirectX baseline is the largest memory block in the product, so a
-/// user who does not open the chart never pays for it.
-///
-/// `clear_request` is false only when the caller must preserve a pending
-/// click that raced the previous process's idle exit; the fresh child then
-/// opens that request as soon as it starts.
 fn start_history_resident(clear_request: bool) {
     if history_busy() {
         return;
@@ -824,10 +675,6 @@ fn start_history_resident(clear_request: bool) {
                 Ok(handle) => {
                     unsafe { assign_to_child_job(handle) };
                     if QUITTING.load(Ordering::Relaxed) {
-                        // The indicator began quitting while CreateProcessW
-                        // was in flight. The job object would reap it on
-                        // process exit, but terminating here also avoids
-                        // briefly showing a panel that no click asked for.
                         let _ = unsafe { TerminateProcess(handle, 0) };
                         let _ = unsafe { CloseHandle(handle) };
                         log_event("INFO", "history launch cancelled by quit");
@@ -848,8 +695,6 @@ fn start_history_resident(clear_request: bool) {
                 }
             }
             HISTORY_LAUNCHING.store(false, Ordering::SeqCst);
-            // Wake the UI so the launch handle converges without waiting for
-            // the 250 ms sync timer. A destroyed sentinel makes this a no-op.
             let _ = unsafe {
                 PostMessageW(
                     Some(HWND(sentinel_raw as *mut std::ffi::c_void)),
@@ -865,18 +710,7 @@ fn start_history_resident(clear_request: bool) {
     }
 }
 
-/// Reap a dead resident process and reconcile the request it left behind.
-///
-/// Three cases:
-/// - a click raced a clean idle exit (`desired_open` names a generation the
-///   dead process never consumed): relaunch immediately and keep the request;
-/// - the dead process consumed the request before exiting (`desired_open` is
-///   the pre-exit request, whose popup had dismissed itself): clear it;
-/// - a crash or a stale `visible` left over: clear the block so the next click
-///   is not mistaken for a toggle-close of a popup that is gone.
-///
-/// Do not bump the generation four times a second while idle; only a state a
-/// dead child actually left behind is touched.
+// Reap a dead resident and reconcile its last request; a pending click must relaunch instead of being dropped.
 pub(crate) fn sync_history_state() {
     wait_cursor_reconcile();
     let alive = history_child_alive();
@@ -887,11 +721,6 @@ pub(crate) fn sync_history_state() {
         return;
     };
     if state.desired_open != 0 {
-        // Only a clean idle exit records the generation it consumed; a clean
-        // exit before serving a click (mapping/parent unavailable) leaves it
-        // zero, and a crash leaves the previous value behind. Both must not
-        // trigger a relaunch loop (core::HistoryState has the unit-tested
-        // decision).
         let raced_exit =
             state.click_raced_idle_exit(HISTORY_LAST_EXIT_CODE.load(Ordering::Relaxed) == 0);
         if raced_exit && HISTORY_RELAUNCHED_GENERATION.load(Ordering::Relaxed) != state.generation {
@@ -911,9 +740,6 @@ pub(crate) fn sync_history_state() {
     }
 }
 
-/// Full path of the running executable. The buffer grows until
-/// `GetModuleFileNameW` reports it fit, so a deep install path is not
-/// silently truncated at a fixed 1024 UTF-16 units.
 fn current_exe_path() -> Option<String> {
     let mut buf = vec![0u16; 512];
     loop {
@@ -931,17 +757,12 @@ fn current_exe_path() -> Option<String> {
     }
 }
 
-/// Best-effort: return the directory containing the current executable.
 pub(crate) fn current_exe_dir() -> Option<String> {
     let path = current_exe_path()?;
     path.rfind(['\\', '/']).map(|i| path[..i].to_string())
 }
 
-/// Restart the overlay: schedule a delayed relaunch of the current exe
-/// (after the single-instance mutex is released on exit), then exit.
 pub(crate) fn restart_self() {
-    /// `CREATE_NO_WINDOW`; passed as a raw flag because std's
-    /// `CommandExt::creation_flags` takes a `u32`.
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
     let Some(exe) = current_exe_path() else {
@@ -956,31 +777,16 @@ pub(crate) fn restart_self() {
         return;
     };
 
-    // Launch through cmd only for the `start` builtin, but resolve both
-    // cmd.exe and ping.exe by absolute path. `timeout.exe` is deliberately
-    // not used: it fails immediately without console stdin (and a bare name
-    // can resolve to Git's MSYS timeout first), which would race the
-    // single-instance mutex. `ping` provides the delay without a console.
     let cmd = system.join("cmd.exe");
     let ping = system.join("ping.exe");
     let script = format!(
         "\"{}\" -n 3 127.0.0.1 >nul & start \"\" \"%SYSVITALS_RESTART_EXE%\"",
         ping.display()
     );
-    // `cmd /c` whose first character is a quote and whose text contains
-    // special characters (`&`, `>`) strips the leading quote and the *last*
-    // quote of the whole line, corrupting the ping token and failing before
-    // `start` ever runs (observed: exit code 1, no relaunch). One extra
-    // wrapping pair is what cmd strips instead, leaving the script intact.
     let script = format!("\"{script}\"");
     let spawned = Command::new(cmd)
         .arg("/c")
-        // cmd.exe does not use C-runtime quoting; append the script verbatim so
-        // the inner quotes reach `start` intact.
         .raw_arg(script)
-        // Pass the path in the environment, not interpolated into the command
-        // line: cmd expands `%VAR%` once, so a `%` in a legal install path is
-        // not reinterpreted.
         .env("SYSVITALS_RESTART_EXE", &exe)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -991,8 +797,6 @@ pub(crate) fn restart_self() {
     match spawned {
         Ok(_) => {
             log_event("INFO", "restart_self: scheduling relaunch and exiting");
-            // The new instance starts with empty child slots; close ours so it
-            // cannot open a second History window next to the old one.
             close_children();
             unsafe { shutdown_and_quit() };
         }

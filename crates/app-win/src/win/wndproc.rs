@@ -1,14 +1,7 @@
-//! wndproc: split out of `win` (see `win` for the module map).
+//! Overlay window procedure and message routing.
 
 use super::*;
 
-// ----------------------------------------------------------------- wndproc
-
-/// Left-click toggle. Opens the popup anchored at this indicator when it
-/// is closed. When it is open, a click on the same monitor's indicator
-/// closes it (toggle); a click on a different monitor's indicator moves it
-/// there. `visible` (owned by the child) is the actual open state;
-/// `desired_open` alone is not (it stays 1 after a blur/Esc dismissal).
 pub(crate) fn handle_history_click(hwnd: HWND) {
     if !history_child_alive() {
         history_mark_stopped();
@@ -20,19 +13,12 @@ pub(crate) fn handle_history_click(hwnd: HWND) {
         ensure_history_resident();
         if history_open_request(hwnd) {
             HISTORY_ANCHOR_MONITOR.store(this_monitor, Ordering::Relaxed);
-            // The popup appears only after the resident process starts and
-            // GPUI draws its first frame; hold the wait cursor over that gap
-            // and let `sync_history_state` release it once `visible` flips.
             history_wait_cursor_begin();
         }
     } else if HISTORY_ANCHOR_MONITOR.load(Ordering::Relaxed) == this_monitor {
         history_close_request();
         HISTORY_ANCHOR_MONITOR.store(0, Ordering::Relaxed);
     } else {
-        // A different monitor's indicator was clicked while the popup is
-        // open: republish the open request with this indicator's anchor.
-        // The resident loop sees the generation change while a window is
-        // open and reopens it there.
         log_event(
             "INFO",
             "history: moving popup to the clicked indicator's screen",
@@ -43,12 +29,6 @@ pub(crate) fn handle_history_click(hwnd: HWND) {
     }
 }
 
-/// Read the setting-area name carried by `WM_SETTINGCHANGE`. USER32 treats
-/// this message as a pointer message and marshals the lParam string into the
-/// receiving process, so the pointer is valid here for the duration of the
-/// handler. The read still goes through `ReadProcessMemory` so a malformed
-/// pointer from a local sender cannot fault the message thread; `None` means
-/// "not readable".
 fn setting_change_name(lparam: LPARAM) -> Option<String> {
     use std::ffi::c_void;
     use windows::Win32::System::Diagnostics::Debug::ReadProcessMemory;
@@ -59,9 +39,6 @@ fn setting_change_name(lparam: LPARAM) -> Option<String> {
     }
     let mut buf = [0u16; 256];
     let mut read = 0usize;
-    // The marshaled string lives in this process; ReadProcessMemory validates
-    // the range and never faults on a bad local pointer. This keeps the same
-    // defensive behavior for same-process senders that pass garbage.
     let ok = unsafe {
         ReadProcessMemory(
             GetCurrentProcess(),
@@ -80,11 +57,6 @@ fn setting_change_name(lparam: LPARAM) -> Option<String> {
     Some(String::from_utf16_lossy(&buf[..len]))
 }
 
-/// Whether a `WM_SETTINGCHANGE` broadcast affects the taskbar's appearance,
-/// metrics or clock format. `lParam == 0` is the documented "all settings"
-/// broadcast and is always honored. An unreadable/non-UTF-16 payload is
-/// treated conservatively as relevant instead of dereferencing an invalid
-/// pointer.
 fn relevant_setting_change(lparam: LPARAM) -> bool {
     if lparam.0 == 0 {
         return true;
@@ -104,13 +76,6 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             if !relevant_setting_change(lparam) {
                 return LRESULT(0);
             }
-            // Theme, text-size and font changes arrive here. Re-read the
-            // theme, drop the cached font metrics and re-measure: the
-            // previous code repainted with the old width, clipping the
-            // new weight/size until the next sample tick. The UIA clock
-            // anchor moves when the text size or time format changes, so
-            // its cache must be dropped as well (it is keyed by the bar
-            // rect, which does not change).
             let old_light = LIGHT_THEME.load(Ordering::Relaxed);
             let old_hc = HIGH_CONTRAST.load(Ordering::Relaxed);
             refresh_theme();
@@ -147,11 +112,6 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(0)
         }
         WM_LBUTTONUP => {
-            // Toggle the trend chart. There is no deferral: the class
-            // style dropped `CS_DBLCLKS`, so Windows does not synthesize a
-            // `WM_LBUTTONDBLCLK`, and Task Manager lives in the
-            // right-click menu. Any left click is a left click. A press
-            // paints nothing: the indicator has no pressed/hover backdrop.
             handle_history_click(hwnd);
             LRESULT(0)
         }
@@ -162,10 +122,6 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_DESTROY => {
             OVERLAYS.with(|slot| slot.borrow_mut().retain(|o| o.hwnd != hwnd));
             if !QUITTING.load(Ordering::Relaxed) {
-                // The taskbar owns this window; explorer restarted and
-                // destroyed it. The sentinel's reconcile recreates it
-                // against the new taskbar. The resident History process is
-                // independent and keeps running.
                 log_event(
                     "INFO",
                     "overlay destroyed with its taskbar; reconcile will recreate",
@@ -174,9 +130,6 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(0)
         }
         WM_SETCURSOR => {
-            // While a launch is pending, keep the wait cursor over the
-            // indicator even if the mouse moves; the class cursor alone
-            // would repaint the arrow on every `WM_SETCURSOR`.
             if (lparam.0 as usize & 0xFFFF) as u32 == HTCLIENT && wait_cursor_active() {
                 if let Ok(cursor) = unsafe { LoadCursorW(None, IDC_WAIT) } {
                     unsafe { SetCursor(Some(cursor)) };
@@ -189,14 +142,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
     }
 }
 
-// --------------------------------------------------------------------- run
-
 pub(crate) fn run() {
     unsafe {
-        // Crash diagnostics first.
         install_crash_hooks();
 
-        // Single-instance guard.
         let _instance = match acquire_instance_lock("Local\\SysVitals_SingleInstance") {
             InstanceLock::Acquired(guard) => guard,
             InstanceLock::Busy => {
@@ -213,17 +162,11 @@ pub(crate) fn run() {
         };
 
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-        // Every panel child is owned by this job; closing the handle on
-        // process exit kills the children even after a crash.
         init_child_job();
-        // Needed only when the indicator is found cloaked on another
-        // virtual desktop; the apartment is never otherwise used.
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         refresh_theme();
         let cfg = config();
 
-        // Daily-file logging: the first line also opens the file and prunes
-        // stale logs (see `core::logger`), so no separate startup prune.
         log_event(
             "INFO",
             &format!(
@@ -250,13 +193,6 @@ pub(crate) fn run() {
         let class_name = utf16("SysVitalsOverlay");
         let wc = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
-            // No `CS_DBLCLKS`: the indicator's left click now opens the
-            // trend chart immediately, and the system resource viewer
-            // (Task Manager) lives in the right-click menu. Keeping
-            // `CS_DBLCLKS` would let Windows synthesize a
-            // `WM_LBUTTONDBLCLK` after the trailing `WM_LBUTTONUP`,
-            // which we no longer handle; dropping it here makes the
-            // click pipeline honestly single-click only.
             style: CS_HREDRAW | CS_VREDRAW,
             lpfnWndProc: Some(wndproc),
             hInstance: hmodule.into(),
@@ -269,9 +205,6 @@ pub(crate) fn run() {
             return;
         }
 
-        // The sentinel is a hidden top-level window that is deliberately
-        // *not* owned by the taskbar: it must outlive explorer restarts to
-        // receive the `TaskbarCreated` broadcast and rebuild the overlay.
         let taskbar_created =
             RegisterWindowMessageW(windows::core::PCWSTR(utf16("TaskbarCreated").as_ptr()));
         if taskbar_created != 0 {
@@ -342,18 +275,10 @@ pub(crate) fn run() {
             }
         }
 
-        // Create one overlay per existing taskbar, then paint the first
-        // sample. `reconcile_overlays` also runs every move tick, on
-        // `TaskbarCreated` and on display changes, so taskbars that appear
-        // later (secondary bars, hot-plug, explorer restart) get one too.
         reconcile_overlays();
         if LAST_SNAPSHOT.with(|s| s.borrow().is_none()) {
             sample_tick();
         }
-        // The resident History framework is deliberately NOT started here.
-        // It owns the DirectX device and the GPUI heap, so it is launched by
-        // the first chart click and exits after a long idle period; a user
-        // who never opens the chart never pays for it.
 
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).0 > 0 {
@@ -363,21 +288,12 @@ pub(crate) fn run() {
     }
 }
 
-/// Hidden top-level window that survives explorer restarts. It owns every
-/// periodic timer and receives the `TaskbarCreated` broadcast, driving all
-/// overlays at once (the overlays themselves are owned by their taskbars
-/// and die with them, so they cannot be the ones holding the timers).
 unsafe extern "system" fn sentinel_wndproc(
     hwnd: HWND,
     msg: u32,
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    // Session end (shutdown, restart, log off). The indicator has no
-    // unsaved state, so it never delays the shell: allow the shutdown,
-    // then run the normal teardown when the session is really ending.
-    // A cancelled shutdown arrives as `WM_ENDSESSION` with a zero
-    // `wparam` and must leave the process running untouched.
     if msg == WM_QUERYENDSESSION {
         return LRESULT(1);
     }
@@ -407,19 +323,12 @@ unsafe extern "system" fn sentinel_wndproc(
         return LRESULT(0);
     }
     if msg == WM_APP_SETTINGS_READY {
-        // Reap a child that exited immediately after launch; the worker
-        // has already stored or cleared the handle.
         let _ = settings_child_alive();
         wait_cursor_reconcile();
         return LRESULT(0);
     }
     if msg == WM_DISPLAYCHANGE {
         log_event("INFO", "WM_DISPLAYCHANGE: display configuration changed");
-        // Monitor handles are not stable across a display reconfiguration;
-        // forget which screen anchors the popup so the next click opens
-        // or moves it again instead of being mistaken for a same-screen
-        // toggle. The settings-window monitor cache is equally stale and
-        // must not keep claiming the panel is already on "that" screen.
         HISTORY_ANCHOR_MONITOR.store(0, Ordering::Relaxed);
         SETTINGS_MONITOR.store(0, Ordering::Relaxed);
         invalidate_clock_anchor();
@@ -469,10 +378,6 @@ unsafe extern "system" fn sentinel_wndproc(
                             log_event("INFO", "SetTimer(TIMER_SAMPLE) recovered");
                         }
                     }
-                    // Re-probe shell/taskbar preferences at a low cadence;
-                    // the per-tick geometry code then reads the cache
-                    // instead of making a synchronous shell/registry
-                    // call on every overlay.
                     AUTO_HIDE.store(u32::MAX, Ordering::Relaxed);
                     WIN11_CENTERED.store(u32::MAX, Ordering::Relaxed);
                     reconcile_overlays();

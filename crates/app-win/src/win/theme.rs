@@ -1,11 +1,8 @@
-//! theme: split out of `win` (see `win` for the module map).
+//! Taskbar theme, font, and color resolution.
 
 use super::*;
 
 pub(crate) unsafe fn refresh_theme() {
-    // The taskbar alignment lives beside the theme values and can change
-    // while the indicator is running; drop the cached probe so the next
-    // placement reads it again.
     WIN11_CENTERED.store(u32::MAX, Ordering::Relaxed);
     AUTO_HIDE.store(u32::MAX, Ordering::Relaxed);
     LIGHT_THEME.store(
@@ -19,9 +16,6 @@ pub(crate) unsafe fn refresh_theme() {
     };
     TEXT_WEIGHT.store(weight, Ordering::Relaxed);
 
-    // High contrast is an accessibility override: when it is on, the
-    // taskbar no longer follows the normal light/dark palette, so keep the
-    // system text color instead of our black/white choice.
     let mut hc = HIGHCONTRASTW {
         cbSize: std::mem::size_of::<HIGHCONTRASTW>() as u32,
         ..Default::default()
@@ -42,9 +36,6 @@ pub(crate) unsafe fn refresh_theme() {
     }
 }
 
-/// Win11 with centered taskbar icons: the only case where the far-left
-/// anchor is offered. Cached because placement runs every tick; the
-/// setting-change / TaskbarCreated paths invalidate the cache.
 pub(crate) unsafe fn win11_centered_taskbar() -> bool {
     let cached = WIN11_CENTERED.load(Ordering::Relaxed);
     if cached != u32::MAX {
@@ -55,8 +46,6 @@ pub(crate) unsafe fn win11_centered_taskbar() -> bool {
     centered
 }
 
-/// Whether the effective theme is light (config override wins over the
-/// system flag).
 pub(crate) fn theme_is_light() -> bool {
     match config().display.theme {
         Theme::Auto => LIGHT_THEME.load(Ordering::Relaxed) == 1,
@@ -65,8 +54,6 @@ pub(crate) fn theme_is_light() -> bool {
     }
 }
 
-/// Indicator glyph color. High contrast wins over both the system
-/// light/dark flag and the user's `display.theme` override.
 pub(crate) fn indicator_text_rgb() -> (u32, u32, u32) {
     if HIGH_CONTRAST.load(Ordering::Relaxed) == 1 {
         let bgr = HC_TEXT.load(Ordering::Relaxed);
@@ -78,13 +65,6 @@ pub(crate) fn indicator_text_rgb() -> (u32, u32, u32) {
     }
 }
 
-// ------------------------------------------------------------------- fonts
-
-// System UI face + pixel height, cached on the message thread. Read
-// from `NONCLIENTMETRICS.lfMessageFont` so the indicator's font follows
-// the system setting (face and size). `WM_SETTINGCHANGE` and
-// `WM_DPICHANGED` invalidate this cache: text-size and per-monitor DPI
-// changes must not require a restart.
 thread_local! {
     pub(crate) static UI_FONT: RefCell<Option<(i32, Vec<u16>)>> = const { RefCell::new(None) };
 }
@@ -109,9 +89,6 @@ pub(crate) fn ui_font() -> (i32, Vec<u16>) {
                 return fallback();
             }
             let lf = &nc.lfMessageFont;
-            // lfHeight is negative (character height) in practice, but be
-            // explicit: normalize to a negative em height so CreateFontW
-            // sizes glyphs exactly like the system does.
             let height = match lf.lfHeight {
                 h if h < 0 => h,
                 h if h > 0 => -h,
@@ -139,8 +116,6 @@ pub(crate) fn invalidate_ui_font() {
     UI_FONT.with(|slot| *slot.borrow_mut() = None);
 }
 
-/// DPI of the monitor hosting `hwnd`. `GetDpiForSystem` is only a fallback
-/// when the window handle is unavailable.
 pub(crate) fn dpi_for(hwnd: HWND) -> u32 {
     let dpi = unsafe { GetDpiForWindow(hwnd) };
     (if dpi == 0 {
@@ -151,26 +126,18 @@ pub(crate) fn dpi_for(hwnd: HWND) -> u32 {
     .max(96)
 }
 
-/// Effective glyph height in physical pixels for one overlay's taskbar
-/// orientation. The cached system font height is expressed at the system
-/// DPI; scale it to the overlay's own monitor and then apply the vertical
-/// reduction, so mixed-DPI setups and live text-size changes both work.
 pub(crate) fn effective_font_height_for(hwnd: HWND, vertical: bool) -> i32 {
     let (height, _) = ui_font();
     let system_dpi = (unsafe { GetDpiForSystem() }).max(96) as i32;
     let window_dpi = dpi_for(hwnd) as i32;
     let height = height * window_dpi / system_dpi;
     if vertical {
-        // `height` is a negative character height; clamp the reduction so a
-        // tiny system font can never produce 0 (which CreateFontW would
-        // silently interpret as "default font").
         (height * VERTICAL_FONT_HUNDREDTHS / 100).min(-1)
     } else {
         height
     }
 }
 
-/// Horizontal padding for the given orientation.
 pub(crate) fn pad_px(vertical: bool) -> i32 {
     if vertical {
         VERTICAL_PAD_PX
@@ -179,7 +146,6 @@ pub(crate) fn pad_px(vertical: bool) -> i32 {
     }
 }
 
-/// Width slack for the given orientation.
 pub(crate) fn width_slack_px(vertical: bool) -> i32 {
     if vertical {
         VERTICAL_WIDTH_SLACK_PX
@@ -188,15 +154,10 @@ pub(crate) fn width_slack_px(vertical: bool) -> i32 {
     }
 }
 
-/// Overlay font: the system UI face at the system UI size, grayscale AA.
-/// Antialiased (not ClearType) because the glyphs are composited
-/// per-pixel-alpha over the taskbar.
 pub(crate) unsafe fn make_font_for(hwnd: HWND, vertical: bool) -> HFONT {
     make_font_at_for(hwnd, 1, vertical)
 }
 
-/// Overlay font at an integer supersample multiplier. Used to render at a
-/// supersampled scale (2x) before downsampling.
 pub(crate) unsafe fn make_font_at_for(hwnd: HWND, scale: i32, vertical: bool) -> HFONT {
     let (_, face) = ui_font();
     create_font(
@@ -206,9 +167,6 @@ pub(crate) unsafe fn make_font_at_for(hwnd: HWND, scale: i32, vertical: bool) ->
     )
 }
 
-/// Create a GDI font from explicit values. The window-free entry point lets
-/// the offscreen render tests build the same font the overlay uses without a
-/// taskbar or a monitor.
 pub(crate) unsafe fn create_font(height: i32, weight: i32, face: &[u16]) -> HFONT {
     CreateFontW(
         height,

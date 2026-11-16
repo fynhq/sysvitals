@@ -1,12 +1,7 @@
-//! render: split out of `macos` (see `macos/mod.rs` for the module map).
+//! Self-drawn status-item image rendering and invalidation.
 
 use super::*;
 
-/// One text run baked into the current indicator image: an attributed
-/// string (carrying the font) plus the point to draw it at, in the image's
-/// flipped (top-left origin, y downward) space. The list is captured by the
-/// image's drawing handler, so AppKit can rasterize it without touching
-/// thread-local state from a possibly non-main thread.
 #[derive(Clone)]
 pub(crate) struct DrawItem {
     pub(crate) attr: Retained<NSAttributedString>,
@@ -14,17 +9,11 @@ pub(crate) struct DrawItem {
     pub(crate) y: f64,
 }
 
-/// The rendered template image for the current layout plus the width the
-/// status item must reserve. A template keeps AppKit's automatic menu-bar
-/// light/dark inversion; there is deliberately no hover/pressed/open
-/// backdrop variant.
 pub(crate) struct StatusImage {
     pub(crate) image: Retained<NSImage>,
     pub(crate) width: f64,
 }
 
-/// One laid-out dual-row line: left run, optional right run, with measured
-/// widths/heights kept for the column math.
 pub(crate) struct RowRun {
     pub(crate) la: Retained<NSAttributedString>,
     pub(crate) lw: f64,
@@ -34,22 +23,12 @@ pub(crate) struct RowRun {
     pub(crate) rh: f64,
 }
 
-/// Build one attributed run (font baked in) and measure it. `size()` reads
-/// the attributed string's own attributes, so measurement and drawing can
-/// never disagree on the font.
 pub(crate) fn make_run(
     text: &str,
     font: &Retained<NSFont>,
 ) -> (Retained<NSAttributedString>, f64, f64) {
     let s = NSString::from_str(text);
-    // NSFont's super chain is NSFont -> NSObject -> AnyObject; the
-    // attribute-dict value type is AnyObject, so two `as_super` steps land
-    // on the right reference (`as_super` comes from `objc2::ClassType`).
     let obj: &AnyObject = font.as_super().as_super();
-    // `NSFontAttributeName` is an extern static (the pointer itself lives
-    // in AppKit), so reading it needs unsafe; dereferencing it to the
-    // `&NSString` it always holds is the only operation, which the
-    // framework guarantees to be valid.
     let key: &NSString = unsafe { NSFontAttributeName };
     let dict = NSDictionary::from_slices(&[key], &[obj]);
     // SAFETY: the attribute dictionary holds a valid `NSFont` under the
@@ -59,9 +38,6 @@ pub(crate) fn make_run(
     (attr, sz.width, sz.height)
 }
 
-/// Build the measured runs for the 2x2 dual-row layout. Kept separate so
-/// the caller can shrink the font and retry if the block exceeds the menu
-/// bar height.
 pub(crate) fn layout_dual(
     row: &FormattedRow,
     font: &Retained<NSFont>,
@@ -90,11 +66,6 @@ pub(crate) fn layout_dual(
     (runs, left_w, right_w, line_h)
 }
 
-/// Worst-case width of one metric cell for the font currently in use.
-/// This is the fixed slot width: the value may gain or lose a digit
-/// inside the slot, but the slot itself never moves. Percentages can only
-/// reach "100%"; network rates reserve the widest four-character numeric
-/// field across all unit tiers (see `RATE_RESERVE`).
 pub(crate) fn metric_reserve(metric: Metric, cfg: &Config, font: &Retained<NSFont>) -> f64 {
     let value = match metric {
         Metric::Cpu | Metric::Mem => PERCENT_RESERVE,
@@ -103,12 +74,6 @@ pub(crate) fn metric_reserve(metric: Metric, cfg: &Config, font: &Retained<NSFon
     make_run(&join_prefix(metric_prefix(metric, cfg), value), font).1
 }
 
-/// Split a formatted cell into its configured label and value. The
-/// formatter joins them with one space; drawing the two runs separately
-/// lets the label stay at the slot start while the value is pinned to the
-/// slot end, so the indicator's outer edges hug its content. A cell that
-/// does not start with the configured prefix (unexpected formatting) is
-/// returned whole as the value.
 pub(crate) fn split_cell(text: &str, prefix: &str) -> (String, String) {
     let text = text.trim_end();
     if !prefix.is_empty() {
@@ -119,8 +84,6 @@ pub(crate) fn split_cell(text: &str, prefix: &str) -> (String, String) {
     (String::new(), text.to_string())
 }
 
-/// Widest reserved cell in a dual-row column, measured with the final
-/// (possibly height-fitted) font.
 pub(crate) fn column_reserve(metrics: &[Metric], cfg: &Config, font: &Retained<NSFont>) -> f64 {
     metrics
         .iter()
@@ -128,10 +91,6 @@ pub(crate) fn column_reserve(metrics: &[Metric], cfg: &Config, font: &Retained<N
         .fold(0f64, f64::max)
 }
 
-/// Font used for the two-line layout: the regular menu-bar face scaled
-/// down to fit the fixed bar height would lose too much stroke weight, so
-/// dual-row uses a semibold system face at the same reduced size. The
-/// single-row layout keeps `menuBarFontOfSize(0.0)` untouched.
 pub(crate) fn dual_row_font(size: f64) -> Retained<NSFont> {
     // SAFETY: `NSFontWeightSemibold` is an AppKit extern static; reading
     // any extern static is unsafe, matching the `NSFontAttributeName` use
@@ -140,45 +99,15 @@ pub(crate) fn dual_row_font(size: f64) -> Retained<NSFont> {
     NSFont::systemFontOfSize_weight(size, weight)
 }
 
-/// Render the formatted frame into the status item as a self-drawn
-/// template image — the macOS counterpart of the Windows overlay's GDI
-/// painting, giving pixel control over dual-row alignment, item spacing
-/// and vertical centering that AppKit's string title does not offer.
-///
-/// Slot widths come from the format's upper bounds rather than the
-/// current sample: a value gaining or losing a digit only moves inside
-/// its own slot, so a dual-row column origin and the status item's length
-/// stay fixed between samples. There is no baked outer inset and no
-/// custom hover/press background: content meets the item's outer edges so
-/// NSStatusBar can apply its normal inter-item spacing, as native extras
-/// do.
-///
-/// Skips every action when the render signature (layout parameters plus
-/// all texts) is unchanged: the mounted image simply stays, so an
-/// idle-second tick costs nothing (no rebuild, no bitmap churn). On change
-/// a fresh block-image is built and mounted; the previous image is
-/// reference-counted away.
 pub(crate) fn render_indicator(row: &FormattedRow, cfg: &Config) {
     let dual = cfg.display.dual_row && row.lines.len() > 1;
-    // `sanitize` constrains `item_spacing` to {4, 8, 16, 32}, so no
-    // extra lower bound is needed here.
     let spacing = f64::from(cfg.display.item_spacing);
     if !cfg.display.show_resources && !cfg.display.show_network {
         return;
     }
-    // The menu-bar height (logical points) is the canvas height; drawing
-    // inside it keeps the glyphs at the system's own vertical band.
     let img_h = NSStatusBar::systemStatusBar().thickness();
 
-    // Single-row strictly follows the system menu-bar font (size 0 =
-    // standard); dual-row starts from the 0.8x variant and the fit loop
-    // below shrinks it further only when the two line boxes exceed the
-    // fixed bar height.
     let base = NSFont::menuBarFontOfSize(0.0);
-    // A cheap signature avoids building fonts/attributed strings when the
-    // sampled texts and layout inputs did not change. The final signature
-    // below still guards the actual image; this only skips the measurement
-    // work on a stable idle frame.
     let input_signature = format!(
         "{dual}|{spacing}|{img_h:.1}|{:.2}|{row:?}",
         base.pointSize()
@@ -188,9 +117,6 @@ pub(crate) fn render_indicator(row: &FormattedRow, cfg: &Config) {
     {
         return;
     }
-    // Never shrink below the previous 0.75x baseline: if 0.8x cannot be
-    // made to fit by tightening the line step, fall back to the known-good
-    // size instead of ending up smaller than before.
     let font_floor = (base.pointSize() * 0.75).max(1.0);
     let mut font = if dual {
         let scaled = (base.pointSize() * DUAL_ROW_FONT_FACTOR).max(1.0);
@@ -200,19 +126,11 @@ pub(crate) fn render_indicator(row: &FormattedRow, cfg: &Config) {
     };
     let requested_size = font.pointSize();
 
-    // --- lay out the runs (flipped space: y grows downward) -----------
     let mut items: Vec<DrawItem> = Vec::new();
     let mut texts: Vec<String> = Vec::new();
     let width;
     let mut line_step = 0.0_f64;
-    // `display.theme` is deliberately not consulted: the indicator is a
-    // template image, which AppKit tints from the menu-bar appearance —
-    // light/dark inversion is automatic and per-item color is not a thing
-    // on the menu bar (see the theme-picker removal in app-settings).
     if dual {
-        // 2x2 quadrant: the grouping comes from `core::format::column_metrics`,
-        // the same function `format_frame` uses, so the reserved slots cannot
-        // drift from the rendered lines when the toggles change.
         let (left_metrics, right_metrics) = column_metrics(cfg);
         for line in &row.lines {
             texts.push(line.left.clone());
@@ -222,19 +140,8 @@ pub(crate) fn render_indicator(row: &FormattedRow, cfg: &Config) {
         let n = runs.len() as f64;
         line_step = line_h;
         let mut block_h = line_h + line_step * (n - 1.0).max(0.0);
-        // The system menu-bar thickness is the hard canvas height. The
-        // attributed line box includes leading, so first try tightening
-        // the inter-line step (two short rows of labels can sit closer
-        // without touching); only if even the minimum step does not fit
-        // do we shrink the font and re-measure. On a tall enough bar this
-        // preserves the requested 0.8x; on a 22pt bar the loop falls back
-        // to the 0.75x floor, and the tightened step keeps that fallback
-        // inside the canvas instead of clipping its bottom.
         let mut attempts = 0;
         while block_h > img_h && attempts < 3 {
-            // The step may dip slightly below one font size: the rows are
-            // short labels, and at DUAL_ROW_MIN_STEP_FACTOR the previous
-            // row's descenders still clear the next row's capitals.
             let min_step = (font.pointSize() * DUAL_ROW_MIN_STEP_FACTOR).max(1.0);
             let candidate = ((img_h - 0.5).max(1.0) - line_h) / (n - 1.0).max(1.0);
             if candidate >= min_step {
@@ -280,13 +187,6 @@ pub(crate) fn render_indicator(row: &FormattedRow, cfg: &Config) {
             );
         }
         let y0 = ((img_h - block_h) / 2.0).max(0.0);
-        // Fixed slots keep every origin stable, but the image has no
-        // baked outer padding: the left cell starts at x = 0 and the
-        // right value ends at the image's right edge. Inter-item spacing
-        // is left to NSStatusBar, matching native menu-bar extras. Within
-        // the right column the label stays at the column's fixed x while
-        // the value is right-aligned, so labels remain aligned and only
-        // the numerals' left edge moves inside their slot.
         let left_slot = column_reserve(&left_metrics, cfg, &font).max(left_w);
         let right_slot = column_reserve(&right_metrics, cfg, &font).max(right_w);
         let has_right = runs.iter().any(|r| r.ra.is_some());
@@ -325,9 +225,6 @@ pub(crate) fn render_indicator(row: &FormattedRow, cfg: &Config) {
             }
         }
     } else {
-        // Single row: each metric gets its own fixed slot, so a digit
-        // change in one metric cannot push the following metrics around;
-        // each slot is vertically centered on its own measured height.
         let parts: Vec<String> = if !row.items.is_empty() {
             row.items.clone()
         } else {
@@ -349,9 +246,6 @@ pub(crate) fn render_indicator(row: &FormattedRow, cfg: &Config) {
             .map(|m| metric_reserve(*m, cfg, &font))
             .collect();
         if slots.len() != parts.len() {
-            // Defensive fallback: the frame and config disagree on the
-            // visible metric set, so measure the actual strings instead
-            // of risking a clipped slot.
             slots = parts
                 .iter()
                 .map(|p| make_run(p.trim_end(), &font).1)
@@ -363,10 +257,6 @@ pub(crate) fn render_indicator(row: &FormattedRow, cfg: &Config) {
             let (attr, w, h) = make_run(part.trim_end(), &font);
             texts.push(part);
             let slot = slots.get(i).copied().unwrap_or(w).max(w);
-            // First cell hugs the left edge; the last cell hugs the right
-            // edge so the item's visible bounds match its content and the
-            // system can apply its normal inter-item spacing. Middle
-            // slots stay left-aligned on their fixed origins.
             let x = if count > 1 && i + 1 == count {
                 slot_start + slot - w
             } else {
@@ -392,12 +282,6 @@ pub(crate) fn render_indicator(row: &FormattedRow, cfg: &Config) {
         return;
     }
 
-    // --- build the template image --------------------------------------
-    // Flipped drawing context: origin top-left, y downward — the space the
-    // layout above was computed in. The handler captures the run list, so
-    // rasterization never touches thread-local state. Making the image a
-    // template keeps AppKit's automatic light/dark inversion. The
-    // indicator paints no hover/pressed/open backdrop: only the glyphs.
     let draw_items = items.clone();
     let draw_block = block2::RcBlock::new(move |_rect: NSRect| -> Bool {
         for it in &draw_items {
@@ -427,21 +311,16 @@ pub(crate) fn render_indicator(row: &FormattedRow, cfg: &Config) {
     update_accessibility(accessible);
 }
 
-/// Force the next `render_indicator` pass to rebuild and remount the image.
 fn invalidate_draw_signature() {
     DRAW_SIGNATURE.with(|s| s.borrow_mut().clear());
     RENDER_INPUT_SIGNATURE.with(|s| s.borrow_mut().clear());
 }
 
-/// Mount the pre-rendered template image and its reserved width. Called
-/// whenever `render_indicator` rebuilds the image, and once at startup.
 pub(crate) fn apply_status_image() {
     let mtm = mtm();
     STATUS_IMAGE.with(|slot| {
         let slot = slot.borrow();
         let Some(images) = slot.as_ref() else {
-            // No image yet: force the next render to build one instead of
-            // matching a signature whose mount never happened.
             invalidate_draw_signature();
             return;
         };
@@ -455,16 +334,11 @@ pub(crate) fn apply_status_image() {
                 invalidate_draw_signature();
                 return;
             };
-            // Title cleared so only the image renders; `ImageOnly` +
-            // `ScaleNone` keeps AppKit from rescaling the point layout.
             button.setTitle(&NSString::from_str(""));
             button.setImage(Some(&images.image));
             button.setImagePosition(NSCellImagePosition::ImageOnly);
             button.setImageScaling(NSImageScaling::ScaleNone);
             item.setLength(images.width);
-            // Call through `NSView` explicitly: `NSControl` also declares a
-            // deprecated zero-argument `setNeedsDisplay()`, which wins
-            // method resolution on the button and shadows the view method.
             let view: &NSView = &button;
             view.setNeedsDisplay(true);
             view.displayIfNeeded();
@@ -472,12 +346,6 @@ pub(crate) fn apply_status_image() {
     });
 }
 
-/// Record the accessibility text for the current frame and, once the app
-/// runs on its real run loop, push it to AppKit. The startup tick happens
-/// before `NSApplication::run`, so the setters are deferred until ticks
-/// are dispatched from inside the run loop. The value is stored
-/// unconditionally so a deferred update still lands on the first timer
-/// tick even when the image itself is reused unchanged.
 pub(crate) fn update_accessibility(text: String) {
     if text.is_empty() {
         return;
@@ -488,7 +356,6 @@ pub(crate) fn update_accessibility(text: String) {
     }
 }
 
-/// Push the stored accessibility value to AppKit when it changed.
 pub(crate) fn apply_pending_accessibility() {
     let text = ACCESSIBILITY_TEXT.with(|slot| slot.borrow().clone());
     if text.is_empty() {
@@ -501,9 +368,6 @@ pub(crate) fn apply_pending_accessibility() {
     ACCESSIBILITY_APPLIED.with(|slot| *slot.borrow_mut() = text);
 }
 
-/// Expose the live values to VoiceOver and as the status item's native
-/// tooltip. The template image itself has no accessible text, so without
-/// this the menu-bar item reads as an unlabeled button.
 pub(crate) fn apply_accessibility(value: &str) {
     if value.is_empty() {
         return;
@@ -527,10 +391,6 @@ pub(crate) fn apply_accessibility(value: &str) {
     });
 }
 
-/// Suppress AppKit's own status-button highlight. The system draws a
-/// pressed/selected backdrop through the button cell; clearing both cell
-/// style masks (`NSNoCellMask`) stops it from entering that drawing mode,
-/// so a click paints no background of its own.
 pub(crate) fn disable_button_highlight(button: &NSStatusBarButton) {
     let Some(cell) = button.cell() else {
         return;

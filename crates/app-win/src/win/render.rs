@@ -1,30 +1,16 @@
-//! render: split out of `win` (see `win` for the module map).
+//! GDI indicator rendering and layout.
 
 use super::*;
 
-// ------------------------------------------------------- measurement/render
-
-/// Geometry of one frame measured with the font currently selected into
-/// `hdc`.
 pub(crate) struct FrameMetrics {
     pub(crate) line_h: i32,
     pub(crate) want_w: i32,
     pub(crate) right_x: Option<i32>,
     pub(crate) multi_line: bool,
     pub(crate) item_widths: Option<Vec<i32>>,
-    /// Vertical layout only: height of each line slot in pixels, in line
-    /// order. Blank separator lines take `item_spacing` (the same gap the
-    /// horizontal single-row layout puts between metrics) instead of a
-    /// full text line, so both layouts use one consistent block gap and
-    /// the column stays short. Empty for the other layouts, where every
-    /// line slot has the uniform `line_h`.
     pub(crate) line_heights: Vec<i32>,
 }
 
-/// Whether a blank line is the vertical layout's inter-block separator
-/// rather than content. The vertical frame is the only multi-line,
-/// single-column frame whose lines can be empty (the stacked builder
-/// inserts one blank line between metric blocks).
 pub(crate) fn is_vertical_separator(line: &sysvitals_core::Line) -> bool {
     line.left.is_empty() && line.right.is_empty()
 }
@@ -52,7 +38,6 @@ pub(crate) unsafe fn measure_frame(
         rc.right - rc.left
     };
 
-    // Single-row with individual items: lay out with a pixel gap.
     if !row.items.is_empty() && !multi_line {
         let mut item_widths = Vec::with_capacity(row.items.len());
         let mut total_w = 0i32;
@@ -79,11 +64,6 @@ pub(crate) unsafe fn measure_frame(
         for line in &row.lines {
             want_w = want_w.max(text_w(&line.render()));
         }
-        // Vertical layout: separator lines shrink to the configured block
-        // gap so it matches the horizontal single-row metric gap; content
-        // lines keep the measured text height plus a breathing margin.
-        // `line_pad` is supplied by the caller so the 2x supersampled
-        // measurement scales it along with the glyphs.
         let line_heights: Vec<i32> = if vertical {
             row.lines
                 .iter()
@@ -126,10 +106,6 @@ pub(crate) unsafe fn measure_frame(
     }
 }
 
-/// Measure the formatted rows and grow one overlay to fit. Width only
-/// ever grows; height follows the row count, and in the vertical layout
-/// the per-line slot heights from [`measure_frame`] (separator lines
-/// sized to `item_spacing`, not a full text line).
 pub(crate) unsafe fn resize_overlay(hwnd: HWND, row: &FormattedRow, vertical: bool) {
     let cfg = config();
     let spacing_px = cfg.display.item_spacing as i32;
@@ -157,10 +133,6 @@ pub(crate) unsafe fn resize_overlay(hwnd: HWND, row: &FormattedRow, vertical: bo
     });
 }
 
-/// One sampling tick: take a single reading, store it, write it to the
-/// history database and re-layout every overlay from it. All overlays
-/// share this one sample so network rates are computed over the full
-/// interval regardless of how many taskbars are showing.
 pub(crate) unsafe fn sample_tick() {
     let cfg = config();
     let now = SystemTime::now()
@@ -179,7 +151,6 @@ pub(crate) unsafe fn sample_tick() {
     relayout_all();
 }
 
-/// Re-layout and redraw every overlay from the last sample.
 pub(crate) fn relayout_all() {
     let hwnds: Vec<HWND> = OVERLAYS.with(|slot| slot.borrow().iter().map(|o| o.hwnd).collect());
     for hwnd in hwnds {
@@ -187,19 +158,10 @@ pub(crate) fn relayout_all() {
     }
 }
 
-/// Rebuild one overlay's frame from the last sample with the current
-/// config, its own orientation and font. Config hot-reload, DPI/text-size
-/// changes and theme flips all use this: taking a fresh sample for an
-/// unrelated setting change used to compute network rates over a few
-/// milliseconds and paint a bogus spike. Only the periodic timer (and
-/// startup) samples.
 pub(crate) unsafe fn relayout_overlay(hwnd: HWND) {
     let Some(ov) = overlay_by_hwnd(hwnd) else {
         return;
     };
-    // Auto-hide and fullscreen hide the overlay between sample ticks.
-    // Measuring/formatting/painting a window nobody can see is pure waste;
-    // the visible tick repaints from the latest snapshot.
     if !IsWindowVisible(hwnd).as_bool() {
         set_overlay_needs_render(hwnd, true);
         return;
@@ -215,11 +177,7 @@ pub(crate) unsafe fn relayout_overlay(hwnd: HWND) {
         format_frame(&snapshot, &cfg)
     };
     resize_overlay(hwnd, &row, ov.vertical);
-    // Re-place with the new size before painting: a right-anchored window
-    // must not grow into the tray until the next one-second move tick.
     apply_position(hwnd);
-    // `apply_position` may hide the overlay if the taskbar vanished between
-    // the check above and placement; do not paint a hidden window.
     if !IsWindowVisible(hwnd).as_bool() {
         set_overlay_needs_render(hwnd, true);
         return;
@@ -228,12 +186,7 @@ pub(crate) unsafe fn relayout_overlay(hwnd: HWND) {
     set_overlay_needs_render(hwnd, false);
 }
 
-/// Rasterize one formatted frame into premultiplied BGRA pixels at window
-/// scale. The whole pipeline — 2x supersampled glyph coverage, box-filtered
-/// downsample and themed composition — is window-free, so the offscreen tests
-/// can run it on a CI runner without a taskbar. `font_height` is the physical
-/// glyph height (negative for character height), matching what
-/// `effective_font_height_for` returns for the overlay.
+// Render 2x supersampled glyph coverage, box-filter down to window scale; the pipeline is window-free for tests.
 #[allow(clippy::too_many_arguments)]
 pub(crate) unsafe fn draw_frame(
     width: i32,
@@ -254,7 +207,6 @@ pub(crate) unsafe fn draw_frame(
     let screen_dc = GetDC(None);
     let mem_dc = CreateCompatibleDC(Some(screen_dc));
 
-    // --- Scratch surface at 2x supersampled scale ---------------------
     const SS: i32 = 2;
     let sw = width * SS;
     let sh = height * SS;
@@ -278,7 +230,6 @@ pub(crate) unsafe fn draw_frame(
     SetBkMode(mem_dc, TRANSPARENT);
     SetTextColor(mem_dc, COLORREF(0x00FF_FFFF));
 
-    // Clear the scratch surface to black (coverage 0).
     let ss_px = ss_bits as *mut u32;
     let ss_n = (sw * sh) as usize;
     for i in 0..ss_n {
@@ -286,10 +237,6 @@ pub(crate) unsafe fn draw_frame(
     }
 
     let fm = measure_frame(mem_dc, row, spacing_px * SS, vertical, 2 * SS);
-    // Line slot tops in supersampled pixels. Uniform division works for
-    // the horizontal layouts; the vertical layout has per-line heights
-    // (separator lines sized to `item_spacing`, content lines sized to
-    // the text height + breathing), so tops accumulate from that table.
     let ss_line_h = sh / row.lines.len().max(1) as i32;
     let mut tops: Vec<(i32, i32)> = Vec::with_capacity(row.lines.len());
     if fm.line_heights.is_empty() {
@@ -307,7 +254,6 @@ pub(crate) unsafe fn draw_frame(
     for (i, line) in row.lines.iter().enumerate() {
         let (top, bottom) = tops.get(i).copied().unwrap_or((0, sh));
         if let Some(ref item_widths) = fm.item_widths {
-            // Single-row pixel-spacing layout.
             let gap = spacing_px * SS;
             let total_w: i32 =
                 item_widths.iter().sum::<i32>() + gap * (row.items.len().saturating_sub(1) as i32);
@@ -329,7 +275,6 @@ pub(crate) unsafe fn draw_frame(
                 x += item_widths[j] + gap;
             }
         } else if let Some(right_x) = fm.right_x {
-            // Dual-row: left column left-aligned, right column at offset.
             let mut left_rc = RECT {
                 left: pad,
                 top,
@@ -359,7 +304,6 @@ pub(crate) unsafe fn draw_frame(
                 );
             }
         } else if fm.multi_line {
-            // Multi-line single column: left-aligned.
             let text = line.render();
             let mut line_rc = RECT {
                 left: pad,
@@ -375,7 +319,6 @@ pub(crate) unsafe fn draw_frame(
                 DT_SINGLELINE | DT_LEFT | DT_VCENTER | DT_NOPREFIX,
             );
         } else {
-            // Single row: centered.
             let text = line.render();
             let mut line_rc = RECT {
                 left: 0,
@@ -396,14 +339,8 @@ pub(crate) unsafe fn draw_frame(
     SelectObject(mem_dc, old_ss_font);
     let _ = DeleteObject(ss_font.into());
 
-    // --- Final composition at window scale, downsampled 2x2 -------------
     let (tr, tg, tb) = text_rgb;
     let mut pixels = vec![0u32; (width * height) as usize];
-    // Glyph-only composition. The indicator draws no hover/pressed/open
-    // background at all: the whole rectangle keeps a minimal (but
-    // non-zero) alpha so it stays hit-testable over the taskbar, and the
-    // supersampled glyph coverage is written premultiplied for
-    // `AC_SRC_ALPHA`.
     for y in 0..height {
         for x in 0..width {
             let mut acc = 0u32;
@@ -432,8 +369,6 @@ pub(crate) unsafe fn draw_frame(
     Some(pixels)
 }
 
-/// Render a frame into a 32bpp premultiplied-alpha DIB and blit it onto
-/// the layered window with `UpdateLayeredWindow`.
 pub(crate) unsafe fn render_layered(hwnd: HWND, row: &FormattedRow, vertical: bool) {
     let mut win_rc = RECT::default();
     if GetWindowRect(hwnd, &mut win_rc).is_err() {

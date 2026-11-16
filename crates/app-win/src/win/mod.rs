@@ -1,21 +1,4 @@
-//! Windows display layer: one topmost layered overlay per taskbar.
-//!
-//! Module map:
-//! - `overlay`  — per-taskbar overlay state, geometry, visibility/topmost,
-//!   reconciliation and the UIA clock anchor cache.
-//! - `render`   — measurement, GDI rasterization, 2x supersampling and the
-//!   periodic sample tick.
-//! - `children` — Settings/History process lifetime, job object and the
-//!   shared-memory history state.
-//! - `wndproc`  — the sentinel window procedure and the message loop.
-//! - `menu`     — the native context menu.
-//! - `config`   — config load/save, mtime polling and auto-start.
-//! - `theme`    — fonts, DPI and OS theme/high-contrast probes.
-//! - `crash`    — panic hook and the SEH filter.
-//!
-//! Items are `pub(crate)` so siblings can reach them through `use super::*`, but
-//! `win` itself is private to this crate, so nothing here widens the crate's
-//! real API.
+//! Windows taskbar overlay implementation, sentinel timers, and overlay registry.
 
 mod children;
 mod config;
@@ -45,9 +28,6 @@ use sysvitals_core::{
     format_frame, format_frame_vertical, t, Config, ConfigWatcher, HistoryWriterSlot, Language,
     Sampler, Theme,
 };
-// Shared process plumbing (daily-file logging, panic hook, HKCU probes)
-// lives in `sysvitals-support` so the overlay and the GPUI panels cannot
-// drift apart.
 use sysvitals_support::{
     acquire_instance_lock, hkcu_dword, log_event, log_sanitize_issues, os_build_number, taskbar_al,
     utf16, AutoStartController, AutoStartOutcome, ConfigEvent, InstanceLock, SV_BUILD_ID,
@@ -117,151 +97,56 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
-// ------------------------------------------------------------------ consts
-
 const TIMER_SAMPLE: usize = 0x515;
 const TIMER_MOVE: usize = 0x516;
-/// Timer id for the config-file change poller.
 const TIMER_CONFIG: usize = 0x517;
 const MOVE_MS: u32 = 1_000;
-/// How often (ms) we poll the config file's mtime for external changes.
 const CONFIG_POLL_MS: u32 = 500;
-/// Posted by the background history-launch thread once the resident
-/// process handle is stored (or the launch failed).
 const WM_APP_HISTORY_READY: u32 = 0x8000 + 3;
-/// Posted by the background settings-launch thread once the child handle
-/// is stored (or the launch failed).
 const WM_APP_SETTINGS_READY: u32 = 0x8000 + 4;
-/// Polls the resident history process so a crash is reaped and a stale
-/// request cleared without waiting for the next click.
 const TIMER_HISTORY: usize = 0x519;
 const HISTORY_SYNC_MS: u32 = 250;
-/// Retry cadence for re-finding `Shell_TrayWnd` after explorer restarts.
 const TIMER_REBIND: usize = 0x51A;
 const REBIND_RETRY_MS: u32 = 500;
-/// Sentinel watchdog: recreates the overlay if it ever vanishes without a
-/// `TaskbarCreated` broadcast (defensive; the broadcast covers the normal
-/// explorer-restart path).
 const TIMER_WATCH: usize = 0x51B;
 const WATCHDOG_MS: u32 = 5_000;
-/// Horizontal padding around the measured text.
 const PAD_PX: i32 = 6;
-/// Extra width slack added when sizing the overlay. Sizing measures text at
-/// 1x with the overlay font, but rendering draws at 2x and downsamples; the
-/// two rounded widths do not match exactly, so without slack the last
-/// characters get clipped.
 const WIDTH_SLACK_PX: i32 = 8;
-/// Font size for the vertical (left/right) taskbar layout, as a fraction
-/// of the system UI size expressed in hundredths. On a vertical taskbar
-/// the bar's *thickness* — not its length — is the width budget: a typical
-/// bar is ~48 logical px wide, so the system size would clip; the stacked
-/// label/value column plus this reduction keeps every line inside the bar.
-/// Horizontal taskbars are limited by height, not width, so they keep the
-/// system size untouched.
-///
-/// 0.75× (was 0.7×): matches the macOS dual-row **floor** (mac starts at 0.8×
-/// and shrinks to 0.75× only when the menu bar is too short), so both
-/// platforms stay within the same reduced-size band without claiming the
-/// effective sizes are always identical.
 const VERTICAL_FONT_HUNDREDTHS: i32 = 75;
-/// Horizontal padding for the vertical layout: the thickness is the binding
-/// constraint, so the text keeps a tighter margin than on horizontal bars.
 const VERTICAL_PAD_PX: i32 = 3;
-/// Width slack for the vertical layout (same rounding compensation as
-/// `WIDTH_SLACK_PX`, trimmed because every pixel counts against the bar).
 const VERTICAL_WIDTH_SLACK_PX: i32 = 4;
 const THEME_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize";
 const THEME_VALUE: &str = "SystemUsesLightTheme";
-/// Per-user Startup-folder shortcut. The link target is our executable path;
-/// the default-off `[startup] auto_start` setting is applied here.
 const STARTUP_LINK_NAME: &str = "SysVitals.lnk";
-/// Launch-at-login entry written by builds before the Startup-folder
-/// shortcut; cleaned up on every apply so an upgrade cannot double-launch.
 const LEGACY_RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 const LEGACY_RUN_VALUE: &str = "SysVitals";
 
 const IDM_SETTINGS: usize = 901;
 const IDM_QUIT: usize = 902;
 const IDM_RESTART: usize = 903;
-/// Right-click menu entry that launches Task Manager. This used to be the
-/// double-click action on the indicator; moving it here is what lets the
-/// left click fire the trend chart immediately (see `WM_LBUTTONUP`).
 const IDM_TASKMGR: usize = 904;
 
-// ----------------------------------------------------------------- statics
-
-/// Cached `SystemUsesLightTheme` (1 = light taskbar). Refreshed on
-/// `WM_SETTINGCHANGE` so a live theme switch repaints correctly.
 static LIGHT_THEME: AtomicU32 = AtomicU32::new(0);
-/// Glyph weight follows the taskbar theme, like the clock: semibold on
-/// the dark taskbar, regular on the light one.
 static TEXT_WEIGHT: AtomicI32 = AtomicI32::new(600);
-/// High-contrast mode flag (0/1). When set, the indicator ignores the
-/// light/dark override and paints with the system high-contrast text color.
 static HIGH_CONTRAST: AtomicU32 = AtomicU32::new(0);
-/// `GetSysColor(COLOR_WINDOWTEXT)` in high-contrast mode (0x00BBGGRR).
 static HC_TEXT: AtomicU32 = AtomicU32::new(0);
 static CONFIG: OnceLock<RwLock<Config>> = OnceLock::new();
-/// True when the initial config read fell back to defaults because the
-/// file was unreadable or malformed. Auto-start is not applied in that
-/// case: a broken file must not silently remove a login item the user
-/// enabled earlier.
 static CONFIG_LOAD_FAILED: AtomicBool = AtomicBool::new(false);
-/// True when the currently loaded config came from an existing file.
-/// A missing file is not an explicit "auto-start off" choice: the login
-/// item is left untouched until the user saves a config through Settings.
 static CONFIG_FROM_FILE: AtomicBool = AtomicBool::new(false);
-/// Cache of the Win11 centered-taskbar preference. `u32::MAX` means
-/// "probe again"; refreshed on WM_SETTINGCHANGE and TaskbarCreated so the
-/// per-tick placement code avoids a registry read.
 static WIN11_CENTERED: AtomicU32 = AtomicU32::new(u32::MAX);
-/// Cache of the shell auto-hide preference. `SHAppBarMessage` is a
-/// synchronous shell call, so probing it on every geometry tick could
-/// block the message thread if Explorer is busy. Invalidate on setting
-/// changes, TaskbarCreated, and the 5s watchdog.
 static AUTO_HIDE: AtomicU32 = AtomicU32::new(u32::MAX);
-/// Job object owning every panel child. Created once at startup with
-/// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`; the handle is deliberately kept
-/// for the process lifetime, so a crash or a quit during a slow
-/// `CreateProcessW` cannot leave an orphan child behind.
+// A kill-on-close job owns every panel child, so a crash or quit cannot leave an orphan.
 static CHILD_JOB: AtomicIsize = AtomicIsize::new(0);
-/// Resident history process handle, stored as a raw `isize` because the
-/// launch happens on a worker thread (`HANDLE` is not `Send`). The UI
-/// thread reaps and closes it.
 static HISTORY_PROCESS: Mutex<Option<isize>> = Mutex::new(None);
-/// True from the moment the background launch is requested until the
-/// worker finishes; a click during startup must not spawn a second child.
 static HISTORY_LAUNCHING: AtomicBool = AtomicBool::new(false);
-/// Settings launch/replace worker in flight. `CreateProcessW` and the
-/// wait for a replaced Settings instance's mutex can take seconds, so
-/// both happen off the message thread.
 static SETTINGS_LAUNCHING: AtomicBool = AtomicBool::new(false);
-/// Monitor (HMONITOR as isize) the live settings window was opened on.
-/// A Settings click on a different indicator moves the window there by
-/// closing and relaunching it; a click on the same screen is a no-op
-/// (there is no IPC to raise an existing GPUI window).
 static SETTINGS_MONITOR: AtomicIsize = AtomicIsize::new(0);
-/// Settings process handle; stored as an `isize` because the launch
-/// happens on a worker thread (`HANDLE` is not `Send`). The UI thread
-/// reaps and closes it.
 static SETTINGS_PROCESS: Mutex<Option<isize>> = Mutex::new(None);
-/// The process is shutting down intentionally: the overlay's `WM_DESTROY`
-/// must quit rather than wait for a shell-driven rebind.
 static QUITTING: AtomicBool = AtomicBool::new(false);
-/// Hidden sentinel window handle. It owns every periodic timer (sample,
-/// move, config poll, history sync, watchdog) and receives the
-/// `TaskbarCreated` broadcast, so the timers survive explorer restarts and
-/// drive every overlay at once instead of one window driving itself.
+// One hidden sentinel owns every timer and the TaskbarCreated broadcast, so timers survive Explorer restarts.
 static SENTINEL_HWND: AtomicIsize = AtomicIsize::new(0);
-/// Monitor (HMONITOR) of the overlay whose indicator currently anchors the
-/// open history popup. A click on the same monitor's indicator closes the
-/// popup (toggle); a click on a different monitor's indicator moves it
-/// there instead.
 static HISTORY_ANCHOR_MONITOR: AtomicIsize = AtomicIsize::new(0);
-/// `RegisterWindowMessageW("TaskbarCreated")`; 0 until registered.
 static TASKBAR_CREATED: OnceLock<u32> = OnceLock::new();
-/// Whether `TIMER_SAMPLE` is currently armed. A failed initial `SetTimer`
-/// leaves the overlay frozen on its startup frame; the watchdog retries it.
 static SAMPLE_TIMER_OK: AtomicBool = AtomicBool::new(false);
 fn sentinel_hwnd() -> HWND {
     HWND(SENTINEL_HWND.load(Ordering::Relaxed) as *mut std::ffi::c_void)
@@ -269,27 +154,12 @@ fn sentinel_hwnd() -> HWND {
 
 thread_local! {
     static SAMPLER: RefCell<Option<Sampler>> = const { RefCell::new(None) };
-    /// Config-file mtime cache and parse-error throttle, message-thread only.
     static CONFIG_WATCHER: RefCell<ConfigWatcher> = RefCell::new(ConfigWatcher::new());
-    /// Raw sample shared by every overlay, so a config/DPI/theme change can
-    /// rebuild each layout without taking another reading (which used to
-    /// inject a millisecond-scale network spike on every save).
     static LAST_SNAPSHOT: RefCell<Option<sysvitals_core::Snapshot>> = const { RefCell::new(None) };
-    /// One entry per visible taskbar; the registry the sentinel drives.
     static OVERLAYS: RefCell<Vec<Overlay>> = const { RefCell::new(Vec::new()) };
-    /// Background SQLite writer. Created on the first enabled sample so a
-    /// missing data dir or a failed spawn never blocks the indicator; the
-    /// slot owns the lazy-spawn retry policy.
     static HISTORY_WRITER: RefCell<HistoryWriterSlot> = const { RefCell::new(HistoryWriterSlot::new()) };
-    /// Last occlusion probe; the diagnostic is throttled to 5 s because
-    /// `WindowFromPoint` is not free and an occluder is not actionable.
     static LAST_OCCLUSION_PROBE: std::cell::Cell<Option<Instant>> =
         const { std::cell::Cell::new(None) };
-    /// Shared command/status block between this overlay and the resident
-    /// history process. The mapping handle is kept alive for the process
-    /// lifetime.
     static HISTORY_STATE: RefCell<Option<(*mut sysvitals_core::HistoryState, HANDLE)>> = const { RefCell::new(None) };
-    // COM virtual-desktop manager, created on demand the first time the
-    // indicator is found cloaked. All access is on the message thread.
     static VD_MANAGER: RefCell<Option<IVirtualDesktopManager>> = const { RefCell::new(None) };
 }
