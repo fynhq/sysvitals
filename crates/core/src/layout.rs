@@ -1,15 +1,5 @@
-//! Pure window-placement math for the GPUI panels.
-//!
-//! The history popup and the settings window both place themselves against
-//! the display's usable work area (taskbar/dock excluded). The arithmetic is
-//! easy to get wrong on a secondary monitor, a narrow work area or a
-//! negative-coordinate display, so it lives here and runs in the Linux
-//! unit-test gate. `panel-support` converts GPUI `Bounds` into [`Rect`] and
-//! the panels only construct their GPUI window bounds from the result.
+//! Pure panel placement math.
 
-/// A rectangle in logical pixels, with the same coordinate space as the work
-/// area the caller measured (global desktop coordinates on Windows,
-/// display-local on macOS).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Rect {
     pub left: f32,
@@ -37,9 +27,6 @@ impl Rect {
     }
 }
 
-/// Clamp a window size into a work area, keeping `margin` on every edge and
-/// never going below `min_size` for either dimension. The minimum only raises
-/// the cap, it does not grow a smaller requested size.
 pub fn fit_size(
     requested_w: f32,
     requested_h: f32,
@@ -52,20 +39,8 @@ pub fn fit_size(
     (requested_w.min(max_w), requested_h.min(max_h))
 }
 
-/// Origin for the history popup. The indicator sits inside the taskbar or
-/// menu bar, which is *outside* the work area, so anchoring to the
-/// indicator's own edge leaves almost no visual gap to the bar. Place the
-/// popup relative to the work-area edge instead, with the same `gap` the
-/// shell's own tray flyouts use. The bar side is inferred from the anchor
-/// lying beyond that edge.
-///
-/// `size_w` and `size_h` are the popup's logical size (already fitted to the
-/// work area by the caller; this function still clamps defensively).
+// Popup origin follows the work-area edge (indicator is outside it), with the tray gap; clamp defensively.
 pub fn anchor_origin(anchor: Rect, size_w: f32, size_h: f32, work: Rect, gap: f32) -> (f32, f32) {
-    // Keep the same gap on the left/right screen edges: with the indicator
-    // anchored at the taskbar's far left the centered popup would otherwise
-    // be clamped flush against the monitor edge (x = 0). The width passed in
-    // is already shrunk to leave room for both gaps on a narrow work area.
     let clamp_x = |x: f32| {
         let min = work.left + gap;
         let max = (work.right - size_w - gap).max(min);
@@ -75,8 +50,6 @@ pub fn anchor_origin(anchor: Rect, size_w: f32, size_h: f32, work: Rect, gap: f3
     let center_x = (anchor.left + anchor.right) * 0.5;
     let center_y = (anchor.top + anchor.bottom) * 0.5;
 
-    // The bar is below/above/left/right of the work area when the indicator
-    // rect lies beyond that edge.
     let bar_below = anchor.top >= work.bottom - 1.0 && anchor.bottom > work.bottom;
     let bar_above = anchor.bottom <= work.top + 1.0 && anchor.top < work.top;
     let bar_left = anchor.right <= work.left + 1.0;
@@ -107,7 +80,6 @@ pub fn anchor_origin(anchor: Rect, size_w: f32, size_h: f32, work: Rect, gap: f3
         );
     }
 
-    // Fallback for a free-floating indicator: prefer below, then above.
     let below = anchor.bottom + gap;
     let above = anchor.top - gap - size_h;
     let y = if below + size_h <= work.bottom {

@@ -1,15 +1,4 @@
-//! SysVitals core layer.
-//!
-//! This crate is the only place where behavior can go wrong: sampling
-//! differentials, counter wrap-around, NIC aggregation, unit selection, prefix
-//! handling, dual-row layout and history persistence are all logic here so
-//! they can be unit tested on any host. The platform display layers are thin
-//! glue over these types.
-//!
-//! Layering contract: no OS-specific windowing or rendering code lives here.
-//! `sysinfo` (sampling) and `rusqlite` (history) are the only system
-//! touchpoints; each is kept behind its own module ([`sampler`], [`store`])
-//! so either can be swapped without changing the public surface.
+//! Pure core layer: sampling, formatting, config, history, and shared memory; no platform windowing or rendering.
 
 pub mod backdrop;
 pub mod chart;
@@ -27,57 +16,22 @@ pub mod resident;
 pub mod sampler;
 pub mod store;
 
-/// Session-local file mapping shared by the Windows indicator and its
-/// resident history process. Both processes must use this exact name.
 pub const HISTORY_STATE_MAP: &str = "Local\\SysVitalsHistoryState";
-/// Layout marker written by the indicator before the history process starts.
 pub const HISTORY_STATE_MAGIC: u32 = 0x5348_5653;
-/// Bumped whenever [`HistoryState`] changes shape.
 pub const HISTORY_STATE_VERSION: u32 = 3;
 
-/// Command/status block mapped by the indicator and the resident history
-/// process.
-///
-/// Ownership:
-/// - the indicator owns `desired_open`, `anchor`, `monitor` and `generation`;
-/// - the history process owns `visible` and `closed_generation`.
-///
-/// `generation` is both the request sequence and a seqlock: the indicator
-/// writes it odd, updates `desired_open`/`anchor`, then writes it even.
-/// Readers take a snapshot, re-read the generation and retry when it changed
-/// or is odd, so a popup can never be placed with a half-updated anchor.
-/// Because the history process never writes `desired_open`, a self-dismissed
-/// popup cannot swallow a click that arrived while it was closing; the
-/// `visible` flag is the actual state the indicator toggles on.
-///
-/// `closed_generation` is written once by the resident process immediately
-/// before it exits from idleness. The indicator compares it with `generation`:
-/// when they differ, a click arrived while the process was shutting down and
-/// the fresh request must be relaunched instead of dropped.
+// Indicator owns desired_open/anchor/monitor/generation; history owns visible/closed_generation; generation is the seqlock.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct HistoryState {
     pub magic: u32,
     pub version: u32,
-    /// 1 while the user wants the popup open (indicator-owned).
     pub desired_open: u32,
-    /// 1 from hidden-window creation until the window is removed
-    /// (history-process-owned).
     pub visible: u32,
-    /// Indicator-owned request sequence; also the anchor seqlock.
     pub generation: u32,
-    /// Request generation the resident process consumed before it exited
-    /// from idleness (history-process-owned). Zero until an idle exit records
-    /// it; cleared together with the rest of the block.
     pub closed_generation: u32,
     pub _reserved: u32,
-    /// Indicator rect in GPUI global logical pixels (left, top, right,
-    /// bottom), the same space the history window is placed in.
     pub anchor: [f32; 4],
-    /// Native display handle (HMONITOR on Windows) hosting the indicator.
-    /// Zero when unknown. The panel needs it to select the target display
-    /// explicitly: GPUI's logical coordinate space is scaled per display, so
-    /// on mixed-DPI setups a rectangle alone is ambiguous between monitors.
     pub monitor: i64,
 }
 
@@ -102,8 +56,6 @@ impl HistoryState {
         }
     }
 
-    /// Whether the shared block can be used and carries a non-degenerate
-    /// anchor. A malformed block falls back to a centered popup.
     pub fn anchor_is_valid(&self) -> bool {
         self.magic == HISTORY_STATE_MAGIC
             && self.version == HISTORY_STATE_VERSION
@@ -112,15 +64,7 @@ impl HistoryState {
             && self.anchor[3] > self.anchor[1]
     }
 
-    /// Whether a pending click raced the resident's clean idle exit and must
-    /// be relaunched instead of dropped.
-    ///
-    /// `desired_open` legitimately stays 1 after a popup dismissed itself,
-    /// so the pending flag alone is not enough. A clean idle exit records the
-    /// generation it consumed in `closed_generation`; only a newer
-    /// `generation` means the click arrived while the process was already
-    /// shutting down. Zero means no idle-exit handshake happened (a startup
-    /// failure or a crash), which must not trigger a relaunch loop.
+    // A clean idle exit records closed_generation; a newer generation means a click raced shutdown and must relaunch.
     pub fn click_raced_idle_exit(&self, clean_exit: bool) -> bool {
         self.desired_open != 0
             && clean_exit
@@ -128,20 +72,10 @@ impl HistoryState {
             && self.generation != self.closed_generation
     }
 
-    /// Read a consistent snapshot from a mapped block.
-    ///
-    /// This is a seqlock read: `generation` is odd while the indicator is
-    /// writing the request, so the caller retries instead of consuming a torn
-    /// anchor. `visible` is written independently by the history process; a
-    /// single 32-bit load is enough for that status flag.
-    ///
-    /// The retry count is bounded so a writer that died mid-update cannot
-    /// wedge the history process forever. After that the best-effort read is
-    /// returned; `anchor_is_valid` still filters degenerate rectangles.
+    /// Seqlock read: retry on odd/changed generation, bounded so a dead writer cannot wedge the reader.
     ///
     /// # Safety
-    /// `ptr` must point to a live, properly aligned `HistoryState` mapping
-    /// shared with the other process.
+    /// `ptr` must point to a live, aligned `HistoryState` mapping shared with the other process.
     pub unsafe fn read_consistent(ptr: *const HistoryState) -> HistoryState {
         use std::ptr::{addr_of, read_volatile};
         use std::sync::atomic::{fence, Ordering};
@@ -152,11 +86,6 @@ impl HistoryState {
                 std::hint::spin_loop();
                 continue;
             }
-            // Acquire after the sequence check so the data loads below cannot
-            // be hoisted above it; the matching fence before the re-read
-            // keeps them from sinking past the second check. Volatile alone
-            // is not a memory barrier on weakly ordered targets (Windows
-            // arm64), where a torn anchor could otherwise pass the check.
             fence(Ordering::Acquire);
             let state = HistoryState {
                 magic: read(addr_of!((*ptr).magic)),
@@ -180,8 +109,6 @@ impl HistoryState {
             }
             std::hint::spin_loop();
         }
-        // Best effort after a stalled writer. The fields are still finite or
-        // rejected by `anchor_is_valid` at the call site.
         fence(Ordering::Acquire);
         HistoryState {
             magic: read(addr_of!((*ptr).magic)),
@@ -201,12 +128,8 @@ impl HistoryState {
         }
     }
 
-    /// Publish one indicator request (`desired_open` plus an optional anchor
-    /// and display handle) under the generation seqlock.
-    ///
     /// # Safety
-    /// `ptr` must point to a live, properly aligned `HistoryState` mapping
-    /// shared with the other process, and only the indicator may call this.
+    /// `ptr` must point to a live, aligned `HistoryState` mapping shared with the other process; only the indicator may write.
     pub unsafe fn write_request(
         ptr: *mut HistoryState,
         desired_open: bool,
@@ -230,37 +153,24 @@ impl HistoryState {
         write_volatile(addr_of_mut!((*ptr).generation), odd.wrapping_add(1));
     }
 
-    /// Publish the history process's actual visibility. This flag is
-    /// single-writer, so it does not participate in the seqlock.
-    ///
     /// # Safety
-    /// `ptr` must point to a live, properly aligned `HistoryState` mapping
-    /// shared with the other process, and only the history process may call
-    /// this.
+    /// `ptr` must point to a live, aligned `HistoryState` mapping shared with the other process; only the history process may write.
     pub unsafe fn write_visible(ptr: *mut HistoryState, visible: bool) {
         use std::ptr::{addr_of_mut, write_volatile};
         write_volatile(addr_of_mut!((*ptr).visible), u32::from(visible));
     }
 
-    /// Record the request generation the history process has finished
-    /// consuming before it exits from idleness. The indicator uses this to
-    /// tell a request that raced the exit apart from a popup that closed
-    /// itself earlier (its `desired_open` legitimately stays 1).
-    ///
     /// # Safety
-    /// `ptr` must point to a live, properly aligned `HistoryState` mapping
-    /// shared with the other process, and only the history process may call
-    /// this.
+    /// `ptr` must point to a live, aligned `HistoryState` mapping shared with the other process; only the history process may write.
     pub unsafe fn write_closed_generation(ptr: *mut HistoryState, generation: u32) {
         use std::ptr::{addr_of_mut, write_volatile};
         write_volatile(addr_of_mut!((*ptr).closed_generation), generation);
     }
 
-    /// Clear both flags after the history process died: a stale `visible`
-    /// would otherwise make the next click a no-op toggle-close.
+    /// Clear both flags after a crash; a stale visible would make the next click a no-op toggle-close.
     ///
     /// # Safety
-    /// Same contract as [`HistoryState::write_request`].
+    /// Same contract as `write_request`.
     pub unsafe fn clear(ptr: *mut HistoryState) {
         unsafe {
             Self::write_request(ptr, false, None, 0);

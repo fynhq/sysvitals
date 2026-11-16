@@ -1,14 +1,4 @@
 //! Cross-check locale keys against Rust source references.
-//!
-//! The locale files are the source of truth for UI strings, while Rust call
-//! sites decide which keys are still needed. This test fails when a key used
-//! in source is missing from the locale files, or when a defined key is no
-//! longer referenced. It runs as part of `cargo test`, so CI enforces the
-//! check without a separate repository script.
-//!
-//! Keys are discovered from literal arguments to `t(...)` and from string
-//! literals sharing a namespace already present in the locale files. Dynamic
-//! construction via `format!` is not supported; add such keys as literals.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -18,8 +8,6 @@ use std::path::{Path, PathBuf};
 const EN: &str = include_str!("../locales/en.conf");
 const ZH: &str = include_str!("../locales/zh.conf");
 
-/// Literals in source that share a translation-key namespace but are not UI
-/// strings.
 const NON_I18N_LITERALS: &[&str] = &["settings.lock"];
 
 #[derive(Default)]
@@ -214,7 +202,6 @@ fn scan_sources(defined: &BTreeSet<String>) -> Scan {
 
     let mut scan = Scan::default();
     for path in files {
-        // The implementation file contains a deliberate unknown-key test.
         if path == i18n_impl {
             continue;
         }

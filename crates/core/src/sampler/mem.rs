@@ -1,13 +1,5 @@
 //! Memory sampling helper.
-//!
-//! Memory is shown as used percentage (`used / total`). `sysinfo` reports
-//! `used_memory()` and `total_memory()` in bytes; the OS-specific definition
-//! of "used" (Windows excludes some cached pages, macOS folds compressed/wired
-//! differently) is sysinfo's concern — we just render the ratio. A zero total
-//! (uninitialized handle) yields NaN so the display shows `--`, never a divide
-//! by zero or a misleading 0%.
 
-/// Used-memory percentage in `[0, 100]`, or NaN when total is not yet known.
 pub fn percent_used(used: u64, total: u64) -> f64 {
     if total == 0 {
         return f64::NAN;
@@ -35,7 +27,6 @@ mod tests {
 
     #[test]
     fn overcommitted_clamps() {
-        // Guard against a driver reporting used > total.
         assert_eq!(percent_used(120, 100), 100.0);
     }
 

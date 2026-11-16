@@ -1,12 +1,4 @@
-//! Terminal harness: run the pure core sampling+format chain in a
-//! terminal loop to prove it works end-to-end with real data, on any host.
-//!
-//! `cargo run -p sysvitals-core --example monitor`
-//!
-//! It samples every 2 s (default), renders the status-bar frame exactly as
-//! a display layer would, and prints it. After a couple of ticks the network
-//! rates become real (the first tick only seeds baselines). This is the headless
-//! stand-in for "run the app" until the Windows/macOS display layers exist.
+//! Headless sampling and formatting harness.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -14,7 +6,7 @@ use sysvitals_core::{format_frame, Config, Sampler};
 
 fn main() {
     let mut cfg = Config::default();
-    cfg.sanitize(); // exercise validation; defaults are already valid
+    cfg.sanitize();
 
     let mut sampler = Sampler::new();
     let tick = Duration::from_millis(cfg.sample.interval_ms);
@@ -28,11 +20,9 @@ fn main() {
             .unwrap_or(0);
         let snap = sampler.sample(now);
 
-        // Single-row rendering.
         let single = format_frame(&snap, &cfg);
         println!("[single] {}", single.lines[0].render());
 
-        // Dual-row rendering (2x2 quadrant).
         cfg.display.dual_row = true;
         let dual = format_frame(&snap, &cfg);
         for line in &dual.lines {

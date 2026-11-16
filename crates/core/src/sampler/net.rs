@@ -1,32 +1,10 @@
-//! Network sampling helper.
-//!
-//! The tricky, bug-prone part of a taskbar monitor lives here, so it is split
-//! into two pieces:
-//!
-//! 1. [`compute_rates`] is pure: it takes the previous baseline plus a vector
-//!    of `(name, rx_total, tx_total)` cumulative counters and an elapsed time,
-//!    and returns bytes/second. It encodes wrap-around handling, adapter
-//!    add/remove reconciliation and the divide-by-zero/first-frame rules. It is
-//!    unit-tested against synthetic counter feeds — no real NIC required.
-//! 2. [`NetSampler::poll`] adapts either the native Windows interface table or
-//!    `sysinfo::Networks` (real cumulative counters) into that
-//!    `(name, rx, tx)` vector after filtering to physical adapters, then calls
-//!    `compute_rates`. The native path exists because sysinfo's Windows
-//!    refresh also re-enumerates every adapter's addresses, which a counter
-//!    sampler does not need; macOS keeps sysinfo.
-//!
-//! We use cumulative counters rather than sysinfo's own per-refresh diff so the
-//! differential policy is entirely ours and is testable in isolation.
+//! Network sampling, counters, and interface selection.
 
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use sysinfo::Networks;
 
-/// Auto-mode decision: the NDIS hardware set is authoritative when available;
-/// otherwise the name heuristic decides. Virtual switches and VPN tunnels
-/// mirror traffic that the physical NIC already counts, so they never count
-/// toward the link rate.
 fn auto_matches(name: &str, hardware: Option<&HashSet<String>>) -> bool {
     match hardware {
         Some(names) => names.contains(name),
@@ -34,20 +12,12 @@ fn auto_matches(name: &str, hardware: Option<&HashSet<String>>) -> bool {
     }
 }
 
-/// Whether an interface name is a loopback alias. Loopback traffic never
-/// leaves the machine. The `lo0` prefix covers the macOS slice variants.
 pub fn is_loopback(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     lower.is_empty() || lower == "lo" || lower.starts_with("lo0") || lower.starts_with("loopback")
 }
 
-/// Name-based physical-adapter heuristic. Used on macOS/Linux, and on Windows
-/// until the NDIS hardware table is readable.
-///
-/// macOS/Linux physical NICs use well-known prefixes (`en*`, `eth*`, `wl*`,
-/// `wwan*`), so virtual interfaces (`utun*`, `awdl*`, `bridge*`, `docker*`, ...)
-/// never match. Windows adapters can be renamed to arbitrary localized names,
-/// so there the heuristic excludes known virtual prefixes instead.
+// Virtual switches and VPN tunnels mirror physical-NIC traffic, so they never count toward the link rate.
 pub fn is_physical_name(name: &str) -> bool {
     if is_loopback(name) {
         return false;
@@ -63,8 +33,6 @@ pub fn is_physical_name(name: &str) -> bool {
     }
 }
 
-/// Virtual adapter name prefixes on Windows (fallback only — the NDIS
-/// `HardwareInterface` flag is the primary source of truth).
 #[cfg(windows)]
 const VIRTUAL_PREFIXES: &[&str] = &[
     "veth",
@@ -75,19 +43,19 @@ const VIRTUAL_PREFIXES: &[&str] = &[
     "tap",
     "tun",
     "utun",
-    "zt",  // zerotier
-    "wg",  // wireguard
-    "gif", // BSD tunnel
+    "zt",
+    "wg",
+    "gif",
     "stf",
     "isatap",
     "teredo",
-    "vethernet", // Hyper-V virtual
-    "hapas",     // Wi-Fi Direct
+    "vethernet",
+    "hapas",
     "wsl",
     "vpn",
-    "vmnet", // VMware
+    "vmnet",
     "vmware",
-    "vbox", // VirtualBox
+    "vbox",
     "virtual",
     "tailscale",
     "zerotier",
@@ -97,77 +65,45 @@ const VIRTUAL_PREFIXES: &[&str] = &[
     "proton",
 ];
 
-/// Physical adapter name prefixes on macOS/Linux.
 #[cfg(not(windows))]
 const PHYSICAL_PREFIXES: &[&str] = &["en", "eth", "wl", "wwan", "usb"];
 
-/// One interface's cumulative counters in a frame: `(name, rx_total, tx_total)`.
 pub type Counters = (String, u64, u64);
 
-/// An owned counter frame (what `collect_frame` produces from real sysinfo).
-/// Kept as plain data so tests can build it directly.
 pub type CounterFrame = Vec<Counters>;
 
-/// Diff a new counter frame against `baseline`, updating `baseline` in place.
-///
-/// Rules:
-/// - `elapsed_secs <= 0` → `(NaN, NaN)` (no time to measure), but the baseline
-///   is still refreshed so the next tick is correct.
-/// - A gap larger than [`STALE_GAP_SECS`] (sleep / stalled process) → same
-///   `(NaN, NaN)` drop: averaging bytes accumulated across a multi-minute
-///   freeze into one instantaneous rate would be a lie; the baseline re-seeds
-///   so the next normal tick is accurate.
-/// - First frame (empty baseline) → `(NaN, NaN)`: seed the baseline only.
-/// - Per interface: a counter that went *down* (wrap or driver reset) makes
-///   that interface contribute nothing this frame and re-baselines it, instead
-///   of producing a negative or absurd spike.
-/// - Interfaces newly present contribute nothing (no prior to diff) but enter
-///   the baseline for next time.
-/// - Interfaces that disappeared (unplug / VPN off) are dropped from baseline.
-/// - Final rate = summed byte deltas / `elapsed_secs`, never negative.
+// Diff cumulative counters against the baseline, drop vanished interfaces, and skip virtual/VPN adapters.
 pub fn compute_rates(
     baseline: &mut HashMap<String, (u64, u64)>,
     frame: &[Counters],
     elapsed_secs: f64,
 ) -> (f64, f64) {
     let had_baseline = !baseline.is_empty();
-    // Rebuild the baseline map from the current frame each call; first we
-    // compute deltas against the *previous* baseline.
     let mut rx_delta: u128 = 0;
     let mut tx_delta: u128 = 0;
     let mut valid_any = false;
 
     for (name, rx, tx) in frame {
         match baseline.get(name) {
-            // Wrap/reset protection: only accumulate if monotonic.
             Some((prev_rx, prev_tx)) if *rx >= *prev_rx && *tx >= *prev_tx => {
                 rx_delta += (*rx - *prev_rx) as u128;
                 tx_delta += (*tx - *prev_tx) as u128;
                 valid_any = true;
             }
-            // Newly seen interface (no prior to diff) OR one whose counter
-            // wrapped/reset this frame: contributes nothing, but is re-baselined
-            // below.
             Some(_) | None => {}
         }
     }
 
-    // Refresh baseline to the current frame.
     baseline.clear();
     for (name, rx, tx) in frame {
         baseline.insert(name.clone(), (*rx, *tx));
     }
 
     if elapsed_secs <= 0.0 || elapsed_secs > super::cpu::STALE_GAP_SECS {
-        // No usable interval, or a stale sleep-spanning gap → "no data".
         return (f64::NAN, f64::NAN);
     }
     if !valid_any {
-        // No selected interface had a prior counter. With a previous baseline
-        // this means every adapter disappeared (unplug / VPN off) and must
-        // read as 0 rather than a stale value or a placeholder. A first frame
-        // with no baseline, or a frame containing only new/wrapped
-        // interfaces, still has no measurable rate.
+        // No selected interface had a prior counter: with a previous baseline this reads 0 (unplug/VPN off), not a stale value.
         if frame.is_empty() && had_baseline {
             return (0.0, 0.0);
         }
@@ -179,13 +115,8 @@ pub fn compute_rates(
     (up.max(0.0), down.max(0.0))
 }
 
-/// Stateful NIC sampler wrapping [`compute_rates`] plus physical-adapter
-/// filtering.
 pub struct NetSampler {
     baseline: HashMap<String, (u64, u64)>,
-    /// Alias set of NDIS hardware interfaces (Windows only). Refreshed on the
-    /// sysinfo fallback path so plug/unplug is picked up; `None` until the
-    /// first successful table read.
     #[cfg(windows)]
     hardware: crate::sampler::net_win::HardwareInterfaces,
 }
@@ -205,16 +136,6 @@ impl NetSampler {
         }
     }
 
-    /// Read cumulative counters, apply selection, and diff against the internal
-    /// baseline using the measured `elapsed`. Returns `(up_bps, down_bps)`
-    /// (NaN on the first frame / after a reset).
-    ///
-    /// On Windows this first tries the native interface table: one
-    /// `GetIfTable2` call yields names, counters and the hardware-interface
-    /// flag together, so the steady path never pays for sysinfo's adapter and
-    /// address enumeration. A read failure falls back to sysinfo; the caller
-    /// passes the handle mutably because the fallback is the only path that
-    /// refreshes it.
     pub fn poll(&mut self, networks: &mut Networks, elapsed: Option<Duration>) -> (f64, f64) {
         let elapsed_secs = match elapsed {
             Some(d) => d.as_secs_f64(),
@@ -226,9 +147,6 @@ impl NetSampler {
             if let Some(frame) = crate::sampler::net_win::native_counters() {
                 return compute_rates(&mut self.baseline, &frame, elapsed_secs);
             }
-            // `false` keeps interfaces that momentarily disappear from the list
-            // so a transient unplug doesn't destroy the baseline; reconciliation
-            // lives in `compute_rates`.
             networks.refresh(false);
             self.hardware.refresh();
             let frame = collect_frame(networks, self.hardware.names());
@@ -237,9 +155,6 @@ impl NetSampler {
 
         #[cfg(not(windows))]
         {
-            // `false` keeps interfaces that momentarily disappear from the list
-            // so a transient unplug doesn't destroy the baseline; reconciliation
-            // lives in `compute_rates`.
             networks.refresh(false);
             let frame = collect_frame(networks, None);
             compute_rates(&mut self.baseline, &frame, elapsed_secs)
@@ -247,17 +162,10 @@ impl NetSampler {
     }
 }
 
-/// Extract a filtered counter frame from a `sysinfo::Networks` handle:
-/// physical adapters only. `hardware` is the native Windows hardware set when
-/// readable; the native Windows counter path produces the same shape directly.
 fn collect_frame(networks: &Networks, hardware: Option<&HashSet<String>>) -> CounterFrame {
     networks
         .iter()
         .filter_map(|(name, data)| {
-            // Interface names are `OsString` since sysinfo 0.40; the release
-            // platforms (Windows/macOS) provide Unicode names, so the lossy
-            // form is exact in practice and keeps matching against the
-            // hardware set stable.
             let name = name.to_string_lossy();
             let selected = auto_matches(name.as_ref(), hardware);
             if selected {
@@ -287,16 +195,13 @@ mod tests {
         let frame = vec![("eth0".to_string(), 1000u64, 500u64)];
         let (up, down) = compute_rates(&mut base, &frame, secs(2000));
         assert!(up.is_nan() && down.is_nan());
-        // baseline now seeded
         assert_eq!(base.get("eth0"), Some(&(1000, 500)));
     }
 
     #[test]
     fn steady_increment_produces_expected_bps() {
         let mut base = HashMap::new();
-        // seed
         compute_rates(&mut base, &[("eth0".to_string(), 0, 0)], secs(2000));
-        // +2048 down, +1024 up over 2s => 1024 B/s down, 512 B/s up
         let (up, down) = compute_rates(&mut base, &[("eth0".to_string(), 2048, 1024)], secs(2000));
         assert_eq!(up, 512.0);
         assert_eq!(down, 1024.0);
@@ -310,7 +215,6 @@ mod tests {
             &[("eth0".to_string(), 0, 0), ("wlan0".to_string(), 0, 0)],
             secs(1000),
         );
-        // eth0 +1000 down, wlan0 +500 down => 1500 total over 1s
         let (_, down) = compute_rates(
             &mut base,
             &[("eth0".to_string(), 1000, 0), ("wlan0".to_string(), 500, 0)],
@@ -323,11 +227,8 @@ mod tests {
     fn counter_wrap_produces_no_negative_and_rebaselines() {
         let mut base = HashMap::new();
         compute_rates(&mut base, &[("eth0".to_string(), 5000, 5000)], secs(1000));
-        // counters dropped to 100 (reset): contribution discarded, NaN because
-        // no interface had a valid diff this frame.
         let (up, down) = compute_rates(&mut base, &[("eth0".to_string(), 100, 100)], secs(1000));
         assert!(up.is_nan() && down.is_nan());
-        // baseline re-primed to the new lower value; next increment is valid.
         assert_eq!(base.get("eth0"), Some(&(100, 100)));
         let (up, down) = compute_rates(
             &mut base,
@@ -349,7 +250,6 @@ mod tests {
             ],
             secs(1000),
         );
-        // eth0 wraps (1000 -> 10): skipped; wlan0 +700 valid. Only wlan0 counts.
         let (_, down) = compute_rates(
             &mut base,
             &[("eth0".to_string(), 10, 5), ("wlan0".to_string(), 700, 0)],
@@ -367,7 +267,6 @@ mod tests {
             secs(1000),
         );
         assert_eq!(base.len(), 2);
-        // vpn0 unplugged: frame has only eth0.
         compute_rates(&mut base, &[("eth0".to_string(), 500, 500)], secs(1000));
         assert_eq!(base.len(), 1);
         assert!(base.contains_key("eth0"));
@@ -378,7 +277,6 @@ mod tests {
     fn new_interface_contributes_zero_first_frame_it_appears() {
         let mut base = HashMap::new();
         compute_rates(&mut base, &[("eth0".to_string(), 100, 100)], secs(1000));
-        // wlan0 just appeared with nonzero counters: no prior => not counted.
         let (up, down) = compute_rates(
             &mut base,
             &[
@@ -387,7 +285,6 @@ mod tests {
             ],
             secs(1000),
         );
-        // only eth0's +100 counts.
         assert_eq!(down, 100.0);
         assert_eq!(up, 100.0);
     }
@@ -402,14 +299,11 @@ mod tests {
 
     #[test]
     fn stale_gap_is_dropped_as_no_data() {
-        // A gap beyond STALE_GAP_SECS (the machine slept) must not divide the
-        // bytes accumulated across the freeze into a bogus instantaneous rate.
         let mut base = HashMap::new();
         compute_rates(&mut base, &[("eth0".to_string(), 0, 0)], secs(1000));
         let stale = super::super::cpu::STALE_GAP_SECS + 30.0;
         let (up, down) = compute_rates(&mut base, &[("eth0".to_string(), 100000, 100000)], stale);
         assert!(up.is_nan() && down.is_nan(), "stale gap → no data");
-        // Baseline still re-seeded so the next normal tick is correct.
         assert_eq!(base.get("eth0"), Some(&(100000, 100000)));
         let (up, down) = compute_rates(
             &mut base,
@@ -422,17 +316,12 @@ mod tests {
 
     #[test]
     fn link_down_after_baseline_reports_zero_not_nan() {
-        // A frame with no interfaces after a seeded baseline (all adapters
-        // vanished, e.g. unplugged) must read as 0, not as the first-frame
-        // "--". This state is now reached only when the platform stops
-        // enumerating an interface entirely.
         let mut base = HashMap::new();
         compute_rates(&mut base, &[("eth0".to_string(), 1000, 1000)], secs(1000));
         let (up, down) = compute_rates(&mut base, &[], secs(2000));
         assert_eq!(up, 0.0);
         assert_eq!(down, 0.0);
         assert!(base.is_empty());
-        // A first frame with no interfaces still has no rate to report.
         let mut fresh = HashMap::new();
         let (up, down) = compute_rates(&mut fresh, &[], secs(1000));
         assert!(up.is_nan() && down.is_nan());
@@ -440,12 +329,10 @@ mod tests {
 
     #[test]
     fn physical_name_heuristic() {
-        // Physical adapters pass on every platform's heuristic.
         assert!(is_physical_name("eth0"));
         assert!(is_physical_name("en0"));
         assert!(is_physical_name("wlan0"));
         assert!(is_physical_name("wwan0"));
-        // Loopback and virtual adapters never count toward the link rate.
         assert!(!is_physical_name("lo"));
         assert!(!is_physical_name("lo0"));
         assert!(!is_physical_name("Loopback Pseudo-Interface 1"));
@@ -457,8 +344,6 @@ mod tests {
 
     #[test]
     fn hardware_set_is_authoritative_in_auto_mode() {
-        // The native Windows table decides even when the name would fool the
-        // heuristic (renamed physical NIC / vendor virtual adapter).
         let mut names = HashSet::new();
         names.insert("Corp NIC".to_string());
         names.insert("eth0".to_string());
@@ -466,7 +351,6 @@ mod tests {
         assert!(auto_matches("Corp NIC", hardware));
         assert!(auto_matches("eth0", hardware));
         assert!(!auto_matches("vEthernet (WSL)", hardware));
-        // Without the native set the heuristic decides.
         assert!(auto_matches("eth0", None));
         assert!(!auto_matches("docker0", None));
     }

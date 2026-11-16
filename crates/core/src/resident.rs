@@ -1,131 +1,66 @@
-//! Pure lifecycle state machine for the Windows resident history process.
-//!
-//! The resident process is a GPUI child that lives without a window, opens a
-//! popup only while the indicator's shared-memory block asks for one, and
-//! exits after ten idle minutes. The interesting part is not the GPUI calls
-//! but *when* to make them: open/close/reopen decisions, the activation retry
-//! schedule, the 3 s fallback that shows a window the foreground lock keeps
-//! refusing, the idle-exit handshake, and the GPU detach/re-attach cycle.
-//!
-//! Those decisions used to live inline in the resident loop, mixed with
-//! `App`/window calls, so none of them could run in the Linux unit-test gate.
-//! This module keeps the same policy as plain data: [`Resident::tick`] takes
-//! a [`Request`] (the indicator-owned block), an [`Observation`] (what the
-//! platform reports), and appends [`Action`] values for the caller to execute.
-//! The caller owns the window handle, the GPU switch and the shared-memory
-//! writes; everything here is deterministic and time-injected.
-//!
-//! Behavior contract (kept identical to the previous inline loop):
-//! - A request generation that already dismissed itself is not reopened.
-//! - A changed anchor while the window is still hidden rebuilds the window;
-//!   the same anchor only re-arms the generation.
-//! - Activation is attempted at most three times, one every 500 ms, once the
-//!   first chart load is ready or 1.5 s have passed; after 3 s the popup is
-//!   shown without activation (click-away stays unarmed).
-//! - A closed popup releases the GPU device immediately; the idle process
-//!   exits after ten quiet minutes and records the consumed generation.
-//! - The working set is trimmed 2 s after going idle and then every 30 s.
+//! Pure resident-popup lifecycle state machine.
 
 use std::time::Duration;
 
 use crate::layout::Rect;
 
-/// How long the resident may stay without a window before it exits entirely.
-/// The indicator relaunches it on the next click; staying warm across a short
-/// gap keeps repeated opens instant.
+// Idle exit at 10 min; first trim 2 s after close, then every 30 s.
 pub const IDLE_EXIT: Duration = Duration::from_secs(10 * 60);
 
-/// How long the hidden popup waits for its first chart load before activation
-/// is attempted anyway.
 pub const FIRST_LOAD_TIMEOUT: Duration = Duration::from_millis(1_500);
 
-/// Spacing between activation attempts. GPUI's Windows `activate()` injects a
-/// synthetic Alt press; retrying every poll would spam the foreground app.
+// Activation: 3 attempts at 500 ms, then show unactivated after 3 s; a dismissed generation is never reopened.
 pub const ACTIVATION_RETRY: Duration = Duration::from_millis(500);
 
-/// Give up on activation after this long and show the window anyway.
 pub const ACTIVATION_FALLBACK: Duration = Duration::from_secs(3);
 
-/// Maximum activation attempts before the fallback takes over.
 pub const MAX_ACTIVATION_ATTEMPTS: u32 = 3;
 
-/// First working-set trim after the window goes away.
 pub const FIRST_TRIM: Duration = Duration::from_secs(2);
 
-/// Working-set trim cadence while idle.
 pub const TRIM_EVERY: Duration = Duration::from_secs(30);
 
-/// One snapshot of the command block, already decoded.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Request {
-    /// The indicator wants the popup open.
     pub desired_open: bool,
-    /// Request sequence. Doubles as the anchor seqlock; a newer value is a
-    /// new click, a moved indicator or a toggle.
     pub generation: u32,
-    /// The history process's own status flag: nonzero while a window exists.
     pub visible: bool,
-    /// Non-degenerate indicator rectangle, if the block carried one.
     pub anchor: Option<Rect>,
-    /// Native display handle hosting the indicator, if known.
     pub monitor: Option<u64>,
 }
 
-/// What the platform reports for this tick.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Observation {
-    /// The window this process opened is still in the app's window list.
     pub window_present: bool,
-    /// Any window is still alive. During teardown a dismissed view can own a
-    /// window for a frame after our handle is gone; opening a new one then
-    /// would race the removal.
     pub any_window: bool,
-    /// The popup is the foreground window.
     pub window_active: bool,
-    /// The first chart load has finished (or no load flag was installed).
     pub first_load_ready: bool,
 }
 
-/// One side effect the caller must perform, in order.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Action {
-    /// Create the hidden popup, then report back through
-    /// [`Resident::opened`] or [`Resident::open_failed`].
     Open {
         anchor: Option<Rect>,
         monitor: Option<u64>,
         generation: u32,
     },
-    /// Remove the current window and create a new hidden one at the request's
-    /// anchor. Used when the indicator moved.
     Reopen {
         anchor: Option<Rect>,
         monitor: Option<u64>,
         generation: u32,
     },
-    /// Remove the window because the indicator asked to close it.
     RemoveWindow,
-    /// Ask the platform to bring the popup to the foreground.
     ActivateWindow,
-    /// Publish `visible = 1`.
     Show,
-    /// Publish `visible = 1` without an activation edge; the caller must also
-    /// restore the stored popup size because the view's activation observer
-    /// never ran.
     ShowWithoutActivation,
-    /// Restore the pre-move popup size (only after a fallback show).
     ResizeToStored,
-    /// Publish `visible = 0`.
     Hide,
-    /// Re-attach the GPU (`request_windowing(Windowed)`).
     AttachGpu,
-    /// Release the GPU (`request_windowing(Headless)`).
     ReleaseGpu,
-    /// Trim the process working set.
     TrimWorkingSet,
-    /// Record the consumed generation and quit; the indicator relaunches a
-    /// newer request.
-    IdleExit { generation: u32 },
+    IdleExit {
+        generation: u32,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -136,42 +71,27 @@ struct WindowMeta {
     size: Option<(f32, f32)>,
     opened_at: Duration,
     activated: bool,
-    /// The close request has already emitted its one-time observations
-    /// (hide/trim); later ticks only retry the removal until the window goes.
     closing: bool,
 }
 
-/// Deterministic resident policy. Construct once per process, call
-/// [`Resident::tick`] on every loop pass, and feed the platform results back
-/// through the `on_*` methods.
 #[derive(Debug)]
 pub struct Resident {
     window: Option<WindowMeta>,
     gpu_attached: bool,
-    /// An `AttachGpu` action is in flight; do not open or re-issue it.
     gpu_pending: bool,
-    /// Request generation that dismissed a popup. The same request must not
-    /// reopen it; a newer click advances the generation and gets through.
     dismissed_generation: Option<u32>,
-    /// Generation of an indicator-requested close, used when the window is
-    /// actually gone (the indicator may have moved on by then).
     pending_close_generation: Option<u32>,
     idle_since: Duration,
     next_trim: Option<Duration>,
-    /// The startup release has been requested. A failed release is retried by
-    /// the trim cadence, not on every idle poll.
     startup_release_attempted: bool,
     activation_attempts: u32,
     last_activation_attempt: Option<Duration>,
 }
 
 impl Resident {
-    /// `now` is the process' monotonic clock at construction.
     pub fn new(now: Duration) -> Self {
         Self {
             window: None,
-            // The app starts windowed, so GPUI has already created the
-            // DirectX device. The first idle tick releases it.
             gpu_attached: true,
             gpu_pending: false,
             dismissed_generation: None,
@@ -184,37 +104,29 @@ impl Resident {
         }
     }
 
-    /// Generation of the currently open window, if any.
     pub fn window_generation(&self) -> Option<u32> {
         self.window.map(|w| w.generation)
     }
 
-    /// Whether the current window has been activated (and `visible` published).
     pub fn is_activated(&self) -> bool {
         self.window.is_some_and(|w| w.activated)
     }
 
-    /// Whether the GPU device is believed to be attached.
     pub fn gpu_attached(&self) -> bool {
         self.gpu_attached
     }
 
-    /// Activation attempts spent on the current window (diagnostics).
     pub fn activation_attempts(&self) -> u32 {
         self.activation_attempts
     }
 
-    /// How long the process has been idle at `now` (diagnostics).
     pub fn idle_for(&self, now: Duration) -> Duration {
         now.saturating_sub(self.idle_since)
     }
 
-    /// Consume one loop pass. Appends zero or more actions to `out`.
     pub fn tick(&mut self, now: Duration, req: Request, obs: Observation, out: &mut Vec<Action>) {
         if let Some(meta) = self.window {
             if !obs.window_present {
-                // The window went away behind our back (blur/Esc, a failed
-                // activation, or a removal we asked for).
                 self.window = None;
                 let generation = self
                     .pending_close_generation
@@ -229,8 +141,6 @@ impl Resident {
                     out.push(Action::Hide);
                     out.push(Action::TrimWorkingSet);
                 }
-                // The device is only released once the window is really gone;
-                // a lingering hidden window still renders through it.
                 self.gpu_attached = false;
                 out.push(Action::ReleaseGpu);
                 return;
@@ -239,13 +149,8 @@ impl Resident {
             let mut meta = meta;
             if !req.desired_open {
                 if req.visible || !meta.activated {
-                    // A visible window, or one still waiting for its first
-                    // activation, was asked to close by the indicator.
                     out.push(Action::RemoveWindow);
                 }
-                // A view that dismissed itself already published `visible=0`
-                // and is removing its own window; calling remove again could
-                // double-remove it. The window-gone branch finishes cleanup.
                 if !meta.closing {
                     meta.closing = true;
                     self.pending_close_generation = Some(req.generation);
@@ -259,15 +164,10 @@ impl Resident {
                 return;
             }
 
-            // A new request arrived while the window exists: the indicator
-            // was clicked on another taskbar/monitor, or a second click
-            // arrived while the hidden window was still loading.
             if Some(req.generation) != Some(meta.generation) {
                 if let Some(anchor) = req.anchor {
                     let anchor_changed = Some(anchor) != meta.anchor || req.monitor != meta.monitor;
                     if !meta.activated && !anchor_changed {
-                        // Same anchor while still hidden: only re-arm the
-                        // generation; the pending activation will show it.
                         meta.generation = req.generation;
                         self.window = Some(meta);
                         self.dismissed_generation = None;
@@ -280,7 +180,6 @@ impl Resident {
                     });
                     return;
                 }
-                // No valid anchor: ignore, like the previous loop did.
             }
 
             if !meta.activated {
@@ -304,9 +203,6 @@ impl Resident {
                     return;
                 }
                 if now.saturating_sub(meta.opened_at) > ACTIVATION_FALLBACK {
-                    // The foreground lock kept refusing activation. Show
-                    // anyway so the chart is usable; Esc or an indicator
-                    // click still closes it, but click-away cannot be armed.
                     meta.activated = true;
                     let has_size = meta.size.is_some();
                     self.window = Some(meta);
@@ -321,7 +217,6 @@ impl Resident {
             return;
         }
 
-        // No window from here on.
         if req.desired_open && Some(req.generation) != self.dismissed_generation {
             if !obs.any_window {
                 if !self.gpu_attached {
@@ -341,21 +236,16 @@ impl Resident {
             return;
         }
 
-        // Idle: release the startup device, exit after ten quiet minutes, and
-        // trim the working set on a slowing cadence.
         if !self.startup_release_attempted {
             self.startup_release_attempted = true;
             if self.gpu_attached {
-                // The app starts windowed; a resident launched without a
-                // pending click releases the device right away.
                 self.gpu_attached = false;
                 out.push(Action::ReleaseGpu);
             }
         }
         let idle_for = now.saturating_sub(self.idle_since);
         if idle_for > IDLE_EXIT {
-            // A view that is removing itself may still own a window for a
-            // frame; never tear the process down underneath it.
+            // A view that is removing itself may still own a window for a frame; never tear the process down underneath it.
             if !obs.any_window {
                 out.push(Action::TrimWorkingSet);
                 out.push(Action::IdleExit {
@@ -375,7 +265,6 @@ impl Resident {
         }
     }
 
-    /// Report a successful window creation.
     pub fn opened(
         &mut self,
         now: Duration,
@@ -400,8 +289,6 @@ impl Resident {
         self.next_trim = None;
     }
 
-    /// Report a failed window creation. The same request must not be retried
-    /// on every poll; the next click advances the generation.
     pub fn open_failed(&mut self, now: Duration, generation: u32) {
         self.window = None;
         self.dismissed_generation = Some(generation);
@@ -412,15 +299,11 @@ impl Resident {
         self.last_activation_attempt = None;
     }
 
-    /// Report the result of an `AttachGpu` action. A failure dismisses the
-    /// request that needed the device; the caller also publishes `Hide`.
     pub fn gpu_result(&mut self, attached: bool) {
         self.gpu_pending = false;
         self.gpu_attached = attached;
     }
 
-    /// Record an attach failure for `generation` so the request is not
-    /// retried every poll.
     pub fn gpu_failed(&mut self, now: Duration, generation: u32) {
         self.gpu_result(false);
         self.dismissed_generation = Some(generation);
@@ -496,9 +379,7 @@ mod tests {
     #[test]
     fn idle_startup_attaches_the_device_before_opening() {
         let mut m = Resident::new(at(0));
-        // The idle tick released the device first.
         run(&mut m, at(0), req(false, 1, None), obs(false));
-        // A click arrives while idle.
         let actions = run(
             &mut m,
             at(250),
@@ -528,7 +409,6 @@ mod tests {
         m.gpu_failed(at(120), 2);
         let actions = run(&mut m, at(250), req(true, 2, None), obs(false));
         assert!(actions.is_empty(), "the failed request must not retry");
-        // A newer click gets through.
         let actions = run(&mut m, at(500), req(true, 3, None), obs(false));
         assert!(matches!(actions.as_slice(), [Action::AttachGpu]));
     }
@@ -545,16 +425,12 @@ mod tests {
         let actions = run(&mut m, at(10), req(true, 1, None), loaded);
         assert_eq!(actions, vec![Action::ActivateWindow]);
 
-        // Too early for the next attempt.
         let actions = run(&mut m, at(200), req(true, 1, None), loaded);
         assert!(actions.is_empty());
-        // 500 ms after the first attempt.
         let actions = run(&mut m, at(520), req(true, 1, None), loaded);
         assert_eq!(actions, vec![Action::ActivateWindow]);
-        // Third attempt.
         let actions = run(&mut m, at(1_030), req(true, 1, None), loaded);
         assert_eq!(actions, vec![Action::ActivateWindow]);
-        // Cap reached; the 3 s fallback shows it without activation.
         let actions = run(&mut m, at(3_100), req(true, 1, None), loaded);
         assert_eq!(
             actions,
@@ -610,7 +486,6 @@ mod tests {
         let mut m = Resident::new(at(0));
         run(&mut m, at(0), req(true, 5, None), obs(false));
         m.opened(at(0), 5, None, None, None);
-        // Blur/Esc removed the window without an indicator close.
         let actions = run(&mut m, at(100), req(true, 5, None), obs(false));
         assert_eq!(
             actions,
@@ -621,7 +496,6 @@ mod tests {
             actions.is_empty(),
             "the consumed generation must stay closed"
         );
-        // The next click opens again.
         let actions = run(&mut m, at(400), req(true, 6, None), obs(false));
         assert!(matches!(actions.as_slice(), [Action::AttachGpu]));
     }
@@ -631,7 +505,6 @@ mod tests {
         let mut m = Resident::new(at(0));
         run(&mut m, at(0), req(true, 9, None), obs(false));
         m.opened(at(0), 9, None, None, None);
-        // Make it visible first.
         run(
             &mut m,
             at(10),
@@ -661,8 +534,6 @@ mod tests {
         );
         let actions = run(&mut m, at(300), req(false, 10, None), obs(false));
         assert_eq!(actions, vec![Action::ReleaseGpu]);
-        // The indicator's request generation is dismissed even though the
-        // window was opened by generation 9.
         let actions = run(&mut m, at(400), req(true, 10, None), obs(false));
         assert!(actions.is_empty());
     }
@@ -690,7 +561,6 @@ mod tests {
                 ..obs(true)
             },
         );
-        // visible already 0 and activated: the view is removing itself.
         let actions = run(
             &mut m,
             at(200),
@@ -783,7 +653,6 @@ mod tests {
     fn idle_exit_records_the_generation_after_ten_minutes() {
         let mut m = Resident::new(at(0));
         run(&mut m, at(0), req(false, 1, None), obs(false));
-        // Keep the trim cadence fed so the idle exit check is what fires.
         run(&mut m, at(590_000), req(false, 1, None), obs(false));
         let actions = run(&mut m, at(599_000), req(false, 1, None), obs(false));
         assert!(actions.is_empty());
@@ -824,10 +693,8 @@ mod tests {
         let mut m = Resident::new(at(0));
         run(&mut m, at(0), req(true, 5, None), obs(false));
         m.open_failed(at(50), 5);
-        // The first idle pass releases the startup device …
         let actions = run(&mut m, at(250), req(true, 5, None), obs(false));
         assert_eq!(actions, vec![Action::ReleaseGpu]);
-        // … and the failed request itself is not retried.
         let actions = run(&mut m, at(500), req(true, 5, None), obs(false));
         assert!(actions.is_empty());
         let actions = run(&mut m, at(750), req(true, 6, None), obs(false));

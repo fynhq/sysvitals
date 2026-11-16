@@ -1,21 +1,4 @@
-//! Background history writer shared by the platform display layers.
-//!
-//! SQLite work is deliberately kept off the UI thread: opening an old
-//! database may run a one-time rollup backfill, and `store::prune` may run a
-//! `VACUUM`. Either can take seconds on a slow disk, which would freeze a
-//! taskbar/menu-bar message loop. The platform layers only enqueue samples
-//! through [`HistoryWriter::record`]; this worker owns the connection and
-//! performs the open/insert/prune cycle.
-//!
-//! Failure policy:
-//! - a failed open is retried on a short cooldown, and a corrupt database is
-//!   moved aside before a fresh one is created;
-//! - a few consecutive insert/prune failures drop the connection so the next
-//!   open can recover from a database replaced or left read-only underneath
-//!   the process;
-//! - a non-finite sample is skipped by `Store::insert` and is not an error;
-//! - failures are logged once per streak, and the flag is cleared after a
-//!   later success so a new failure is visible again.
+//! Background history writer and database recovery.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -27,28 +10,14 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use crate::config::history_path;
 use crate::store::{is_corruption_error, Store};
 
-/// How many consecutive insert/prune failures drop the connection. A single
-/// transient busy/locked error should not throw away a healthy connection;
-/// a persistent failure must not keep the writer stuck on it forever.
 const WRITE_FAILURE_LIMIT: u32 = 3;
 
-/// How long the worker waits before retrying an open after a failure. Opening
-/// a corrupt database can itself be slow, so this is a time-based cooldown
-/// rather than one retry per sample burst.
 const OPEN_RETRY_COOLDOWN: Duration = Duration::from_secs(60);
 
-/// How long a failed worker spawn waits before trying again. Thread creation
-/// or path resolution can fail transiently (resource pressure, data directory
-/// not ready); do not disable history for the rest of the process lifetime.
 const SPAWN_RETRY_COOLDOWN: Duration = Duration::from_secs(300);
 
-/// Log sink used by the worker. The platform layers pass their own
-/// `log_event` wrapper; tests can pass a no-op.
 pub type LogFn = Arc<dyn Fn(&str, &str) + Send + Sync + 'static>;
 
-/// One queued sample. `ts` is the local wall-clock second stamped by the
-/// sampler; `retention_days` is read from the config that produced the
-/// sample so a config change takes effect on the next prune.
 #[derive(Debug, Clone, Copy)]
 struct HistorySample {
     ts: i64,
@@ -57,16 +26,11 @@ struct HistorySample {
     retention_days: u32,
 }
 
-/// Handle used by the UI thread to enqueue history samples. Dropping it
-/// closes the channel and lets the worker exit.
 pub struct HistoryWriter {
     tx: Sender<HistorySample>,
 }
 
 impl HistoryWriter {
-    /// Spawn the worker for the standard history database. A path resolution
-    /// failure or thread spawn failure is returned so the caller can log it
-    /// and retry later rather than blocking the UI.
     pub fn spawn(log: LogFn) -> std::io::Result<Self> {
         let path = history_path().map_err(|e| {
             std::io::Error::new(
@@ -77,8 +41,6 @@ impl HistoryWriter {
         Self::spawn_at(log, path)
     }
 
-    /// Spawn the worker against an explicit database path. Exposed so the
-    /// open/insert/prune policy can be exercised against a temporary store.
     pub fn spawn_at(log: LogFn, path: PathBuf) -> std::io::Result<Self> {
         let (tx, rx) = mpsc::channel();
         thread::Builder::new()
@@ -87,9 +49,6 @@ impl HistoryWriter {
         Ok(Self { tx })
     }
 
-    /// Queue one sample. Returns `false` when the worker has stopped (for
-    /// example after a panic); the caller can then drop this handle and let
-    /// the lazy spawn policy start a fresh worker.
     pub fn record(&self, ts: i64, cpu: f64, mem: f64, retention_days: u32) -> bool {
         self.tx
             .send(HistorySample {
@@ -102,9 +61,6 @@ impl HistoryWriter {
     }
 }
 
-/// Per-process handle state shared by the two indicator layers. Keeping the
-/// lazy spawn/retry policy here removes the copy that used to live in
-/// `app-win` and `app-mac`.
 pub struct HistoryWriterSlot {
     writer: Option<HistoryWriter>,
     failed_at: Option<Instant>,
@@ -124,9 +80,6 @@ impl HistoryWriterSlot {
         }
     }
 
-    /// Enqueue one sample, starting the worker lazily. Returns `false` when
-    /// the worker could not be started or its channel is closed; the caller
-    /// has already been logged in that case.
     pub fn record(&mut self, ts: i64, cpu: f64, mem: f64, retention_days: u32, log: LogFn) -> bool {
         let retry_due = self
             .failed_at
@@ -156,8 +109,6 @@ impl HistoryWriterSlot {
         };
         let send_ok = writer.record(ts, cpu, mem, retention_days);
         if !send_ok {
-            // The worker thread stopped (for example after a panic). Drop the
-            // handle and let the cooldown start a fresh one.
             self.writer = None;
             self.failed_at = Some(Instant::now());
             log(
@@ -172,14 +123,7 @@ impl HistoryWriterSlot {
     }
 }
 
-/// Move a corrupt database and its sidecars aside. Sidecars are moved first
-/// so a failed main-file rename leaves the original database intact and the
-/// next retry can try again; the caller only opens a fresh database after the
-/// main file has moved (or was already absent).
-///
-/// Returns the backup path when the main file was moved, `None` when no main
-/// file existed. A permission/lock error is returned so the worker can retry
-/// instead of silently creating a second database beside an open handle.
+// Corrupt database: move the DB and its -wal/-shm sidecars aside (sidecars first), then retry with a fresh file.
 fn quarantine_corrupt_db(path: &Path) -> std::io::Result<Option<PathBuf>> {
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -209,9 +153,6 @@ fn quarantine_corrupt_db(path: &Path) -> std::io::Result<Option<PathBuf>> {
     Ok(main_moved.then_some(backup))
 }
 
-/// Open the store, quarantining a corrupt database once before retrying.
-/// `error_logged` throttles open failures so a permanently unavailable path
-/// does not produce one WARN per cooldown window.
 fn open_store(path: &Path, log: &LogFn, error_logged: &mut bool) -> Option<Store> {
     match Store::open(path) {
         Ok(opened) => {

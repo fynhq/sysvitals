@@ -1,39 +1,16 @@
-//! Pure formatting logic: percentage and rate rendering, prefix handling and
-//! the status-bar layout (single-row, the 2x2 dual-row quadrant with CPU/MEM
-//! over U/D, and a vertical one-metric-per-line column for vertical taskbars).
-//! All functions are string-level and host-independent so they can be unit
-//! tested anywhere.
-//!
-//! Width-stability: within one frame, dual-row columns are padded
-//! to equal widths so the two lines line up. Across frames the rendered text
-//! can still differ by a character (e.g. `9%` -> `100%`); each display layer
-//! sizes its indicator surface to the maximum width it has seen and never
-//! shrinks it for live values. The renderer should apply the OpenType `tnum`
-//! feature so digits align visually.
+//! Pure percentage/rate formatting and layout strings.
 
 use crate::config::Config;
 use crate::model::{Metric, Snapshot};
 
-/// Bytes-per-second unit thresholds on the 1024 base. Four adaptive tiers:
-/// `B/s` below 1 KB/s, `K/s` below 1 MB/s, `M/s` below 1 GB/s, `G/s` above.
-/// The vertical taskbar layout uses the same four tiers without the `/s`
-/// suffix (see [`format_rate_compact`]), because there the bar's thickness
-/// rather than its length is the width budget.
 pub const KB: f64 = 1024.0;
 pub const MB: f64 = 1024.0 * KB;
 pub const GB: f64 = 1024.0 * MB;
 
-/// Worst-case formatted value for a percentage cell. Used by fixed-slot
-/// renderers (macOS menu bar) to reserve a width that never changes between
-/// samples.
 pub const PERCENT_RESERVE: &str = "100%";
 
-/// Worst-case formatted value for a network-rate cell: a four-character
-/// numeric field plus the widest tier letter and the `/s` suffix. Keep in
-/// sync with [`format_rate`]'s four-character cap.
 pub const RATE_RESERVE: &str = "8888 M/s";
 
-/// Render a CPU/MEM percentage as an integer percent string.
 pub fn format_percent(value: f64) -> String {
     if !value.is_finite() {
         return "--%".to_string();
@@ -42,37 +19,16 @@ pub fn format_percent(value: f64) -> String {
     format!("{v:.0}%")
 }
 
-/// Render a rate in bytes/second on the 1024 base, adapting the unit to
-/// magnitude across four tiers: `B/s` below 1 KB/s, `K/s` below 1 MB/s,
-/// `M/s` below 1 GB/s, `G/s` at or above. Decimal places depend on the
-/// integer-part width so the field stays roughly the same size:
-///
-/// ```text
-///   314 B/s    (>=100 integer part -> 0 decimals)
-///   12.5 K/s   (>=10  -> 1 decimal)
-///   1.20 M/s   (<10   -> 2 decimals)
-/// ```
-///
-/// The numeric field is capped at four characters. Values that round up
-/// across a decimal boundary (`9.996 K/s`, `99.96 K/s`) would otherwise
-/// produce a five-character `10.00`/`100.0`; one decimal is dropped in that
-/// case so a fixed-width display slot never has to grow for a sample.
+// Rate field is fixed width: 4 chars, adapt unit/decimals so rounding to 10.00/100.0 never widens the slot.
 pub fn format_rate(bps: f64) -> String {
     format_rate_with(bps, true)
 }
 
-/// Same tiering and decimal rules as [`format_rate`], but the unit is only
-/// the tier letter with no `/s` suffix (`314 B`, `12.5 K`, `1.20 M`). Used by
-/// the vertical taskbar layout, where the bar's thickness caps the width and
-/// the direction is already implied by the metric label above the value.
 pub fn format_rate_compact(bps: f64) -> String {
     format_rate_with(bps, false)
 }
 
 fn format_rate_with(bps: f64, with_per_sec: bool) -> String {
-    // Match the frame path's "no reading yet" marker. A direct caller
-    // formatting a first/wake sample must not print a plausible `0.00 B/s`
-    // for a value that does not exist.
     if !bps.is_finite() {
         return "--".to_string();
     }
@@ -94,9 +50,6 @@ fn format_rate_with(bps: f64, with_per_sec: bool) -> String {
         2
     };
     let mut value = format!("{scaled:.decimals$}");
-    // Rounding can cross the next power of ten (`9.996 -> 10.00`). Drop a
-    // decimal in that case: the fixed-width slots reserve four characters
-    // and must never see a fifth one for a live sample.
     while decimals > 0 && value.len() > 4 {
         decimals -= 1;
         value = format!("{scaled:.decimals$}");
@@ -108,8 +61,6 @@ fn format_rate_with(bps: f64, with_per_sec: bool) -> String {
     }
 }
 
-/// Combine a user prefix with an already-formatted value, inserting exactly
-/// one space. An empty prefix shows the value alone (no leading space).
 pub fn join_prefix(prefix: &str, value: &str) -> String {
     if prefix.is_empty() {
         value.to_string()
@@ -118,17 +69,10 @@ pub fn join_prefix(prefix: &str, value: &str) -> String {
     }
 }
 
-/// Visual column width for proportional text with CJK and emoji. Uses the
-/// Unicode width tables instead of a hand-maintained range list, so newer
-/// emoji, flags, variation selectors and ZWJ sequences do not drift from the
-/// actual glyph width.
 pub fn display_width(s: &str) -> usize {
     unicode_width::UnicodeWidthStr::width(s)
 }
 
-/// Pad a cell's text with trailing spaces so the cell occupies `width`
-/// columns; the next column can then start at the same pixel offset on every
-/// row. Used only by the 2x2 quadrant builder.
 fn pad_to_width(s: &str, width: usize) -> String {
     let cur = display_width(s);
     if cur >= width {
@@ -143,9 +87,6 @@ fn pad_to_width(s: &str, width: usize) -> String {
     }
 }
 
-/// One horizontal band of the status-bar widget. A row contains up to two
-/// columns (the 2x2 dual-row quadrant fills `left` and `right`; single-row
-/// puts everything in `left` and leaves `right` empty).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Line {
     pub left: String,
@@ -160,7 +101,6 @@ impl Line {
         }
     }
 
-    /// The full rendered text of the row, including the inter-column gap.
     pub fn render(&self) -> String {
         if self.right.is_empty() {
             self.left.clone()
@@ -170,18 +110,12 @@ impl Line {
     }
 }
 
-/// The complete frame the display layer draws for one sample.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FormattedRow {
     pub lines: Vec<Line>,
-    /// Individual metric strings for the single-row layout. When non-empty the
-    /// display layer lays these out with a pixel gap (`item_spacing`) instead
-    /// of using the pre-joined text in `lines[0]`. Empty for dual-row and
-    /// vertical layouts where the column/line structure handles spacing.
     pub items: Vec<String>,
 }
 
-/// The configured label prefix for one metric.
 pub fn metric_prefix(metric: Metric, cfg: &Config) -> &str {
     match metric {
         Metric::Cpu => &cfg.display.prefix.cpu,
@@ -191,14 +125,10 @@ pub fn metric_prefix(metric: Metric, cfg: &Config) -> &str {
     }
 }
 
-/// Whether one metric is visible under the paired show toggles.
 pub fn metric_visible(metric: Metric, cfg: &Config) -> bool {
     cfg.display.metric_visible(metric)
 }
 
-/// The enabled metrics in `Metric::ALL` order. Shared by the formatter and
-/// the platform renderers that reserve fixed slots for each metric, so the
-/// visible set cannot drift between the text and its layout.
 pub fn visible_metrics(cfg: &Config) -> Vec<Metric> {
     Metric::ALL
         .into_iter()
@@ -206,18 +136,11 @@ pub fn visible_metrics(cfg: &Config) -> Vec<Metric> {
         .collect()
 }
 
-/// The metrics that belong to the dual-row left and right columns, honoring
-/// the paired show toggles. This is the single source for both the formatter
-/// and the platform renderers' fixed-slot reservations: CPU/MEM are the left
-/// column, U/D the right; when only one group is enabled it occupies the left
-/// column so the two-line layout keeps its shape.
 pub fn column_metrics(cfg: &Config) -> (Vec<Metric>, Vec<Metric>) {
     let resources = [Metric::Cpu, Metric::Mem];
     let network = [Metric::Up, Metric::Down];
     let show_resources = cfg.display.show_resources;
     let show_network = cfg.display.show_network;
-    // When only one group is enabled it occupies the left column, matching
-    // `format_frame`'s "keep two lines, populated column on the left" rule.
     if show_resources && show_network {
         (resources.to_vec(), network.to_vec())
     } else if show_resources {
@@ -229,13 +152,10 @@ pub fn column_metrics(cfg: &Config) -> (Vec<Metric>, Vec<Metric>) {
     }
 }
 
-/// Format a single metric value to its display string (no prefix).
 pub fn format_value(metric: Metric, snapshot: &Snapshot) -> String {
     format_value_impl(metric, snapshot, true)
 }
 
-/// The same value rendered without the `/s` suffix on network rates. Used by
-/// the vertical taskbar layout, where the bar thickness caps the width.
 pub fn format_value_compact(metric: Metric, snapshot: &Snapshot) -> String {
     format_value_impl(metric, snapshot, false)
 }
@@ -261,7 +181,6 @@ fn format_value_impl(metric: Metric, snapshot: &Snapshot, with_per_sec: bool) ->
     }
 }
 
-/// Format one column's metrics into `(metric, padded-cell-text)` pairs.
 fn metric_cells(metrics: Vec<Metric>, cfg: &Config, snapshot: &Snapshot) -> Vec<(Metric, String)> {
     metrics
         .into_iter()
@@ -274,21 +193,14 @@ fn metric_cells(metrics: Vec<Metric>, cfg: &Config, snapshot: &Snapshot) -> Vec<
         .collect()
 }
 
-/// Build the full status-bar frame from a snapshot and config, honoring the
-/// per-metric show toggles and the dual-row layout choice.
 pub fn format_frame(snapshot: &Snapshot, cfg: &Config) -> FormattedRow {
     let enabled = visible_metrics(cfg);
 
     if cfg.display.dual_row {
-        // 2x2 quadrant: left column CPU over MEM, right column U over D.
-        // `column_metrics` is the shared source for this grouping; the
-        // platform renderers use the same function for slot reservations.
         let (left_metrics, right_metrics) = column_metrics(cfg);
         let left = metric_cells(left_metrics, cfg, snapshot);
         let right = metric_cells(right_metrics, cfg, snapshot);
 
-        // Column widths are computed from the two cells in each column so the
-        // numbers stay aligned across the two rows.
         let left_w = left
             .iter()
             .map(|(_, s)| display_width(s))
@@ -300,9 +212,6 @@ pub fn format_frame(snapshot: &Snapshot, cfg: &Config) -> FormattedRow {
             .max()
             .unwrap_or(0);
 
-        // If one column has no enabled metric, keep the two-line layout
-        // with only the populated column (the user chose dual-row; collapsing
-        // to a single line would silently override that choice).
         if left.is_empty() || right.is_empty() {
             let cells = if left.is_empty() { &right } else { &left };
             let w = cells
@@ -319,8 +228,6 @@ pub fn format_frame(snapshot: &Snapshot, cfg: &Config) -> FormattedRow {
             };
         }
 
-        // Fill missing rows in a column with a blank of the same width so the
-        // grid stays rectangular.
         let row0_left = cell_at(&left, 0, left_w);
         let row1_left = cell_at(&left, 1, left_w);
         let row0_right = cell_at(&right, 0, right_w);
@@ -339,16 +246,10 @@ pub fn format_frame(snapshot: &Snapshot, cfg: &Config) -> FormattedRow {
             items: Vec::new(),
         }
     } else {
-        // Single row: all enabled metrics. The display layer lays these out
-        // with a pixel gap (`item_spacing`), so we expose the individual items
-        // and also keep a space-joined fallback in `lines[0]` for consumers
-        // that only want a single string (e.g. the terminal example).
         let items: Vec<String> = enabled
             .iter()
             .map(|m| join_prefix(metric_prefix(*m, cfg), &format_value(*m, snapshot)))
             .collect();
-        // Space-joined fallback for string-only consumers (terminal example).
-        // The display layer ignores this and uses `items` with a pixel gap.
         let text = items.join("  ");
         FormattedRow {
             lines: vec![Line::single(text)],
@@ -364,24 +265,6 @@ fn cell_at(cells: &[(Metric, String)], idx: usize, width: usize) -> String {
     }
 }
 
-/// Build a vertical frame for a vertical taskbar (left or right edge), where
-/// the bar's thickness — not its length — limits the usable width.
-///
-/// Layout: one metric per block, and inside a block the label and the value
-/// each occupy their own line so the widest line is only as wide as the label
-/// or the value, never their concatenation. Blocks are separated by one blank
-/// line. A metric whose prefix is empty gets just its value line (an empty
-/// label would be indistinguishable from a block separator).
-///
-/// Network rates drop the `/s` suffix here: the block label already names the
-/// direction and the thickness budget is tight, so the shorter unit buys
-/// room for a larger font. The display layer renders the blank separator line
-/// at the configured `item_spacing` height rather than a full text line, so
-/// the vertical block gap matches the horizontal metric gap.
-///
-/// The prefix is emitted verbatim: it already carries whatever punctuation the
-/// user configured (the built-in defaults end with `:`), and it stays
-/// independent of the UI language.
 pub fn format_frame_vertical(snapshot: &Snapshot, cfg: &Config) -> FormattedRow {
     let enabled = visible_metrics(cfg);
     let mut lines: Vec<Line> = Vec::with_capacity(enabled.len() * 2);
@@ -395,8 +278,6 @@ pub fn format_frame_vertical(snapshot: &Snapshot, cfg: &Config) -> FormattedRow 
         }
         lines.push(Line::single(format_value_compact(*m, snapshot)));
     }
-    // Vertical layout stacks lines and blanks; pixel item spacing does not
-    // apply, so `items` stays empty.
     FormattedRow {
         lines,
         items: Vec::new(),
@@ -430,22 +311,17 @@ mod tests {
 
     #[test]
     fn rate_uses_binary_units_and_decimal_rules() {
-        // B/s tier: below 1 KB/s.
         assert_eq!(format_rate(314.0), "314 B/s");
         assert_eq!(format_rate(0.0), "0.00 B/s");
         assert_eq!(format_rate(1023.0), "1023 B/s");
-        // K/s tier: 1 KB/s .. 1 MB/s.
         assert_eq!(format_rate(1024.0), "1.00 K/s");
         assert_eq!(format_rate(314.0 * KB), "314 K/s");
         assert_eq!(format_rate(12.0 * KB + 512.0), "12.5 K/s");
-        // M/s tier: 1 MB/s .. 1 GB/s.
         assert_eq!(format_rate(1.2 * MB), "1.20 M/s");
         assert_eq!(format_rate(100.0 * MB), "100 M/s");
-        // G/s tier: 1 GB/s and above.
         assert_eq!(format_rate(1.5 * GB), "1.50 G/s");
         assert_eq!(format_rate(1024.0 * MB), "1.00 G/s");
         assert_eq!(format_rate(120.0 * GB), "120 G/s");
-        // No reading yet / invalid: the same marker the frame path uses.
         assert_eq!(format_rate(f64::NAN), "--");
         assert_eq!(format_rate(f64::INFINITY), "--");
         assert_eq!(format_rate_compact(f64::NAN), "--");
@@ -453,9 +329,6 @@ mod tests {
 
     #[test]
     fn rate_numeric_field_never_exceeds_four_chars() {
-        // Values just below a decimal boundary used to round to "10.00" /
-        // "100.0" (five characters), which overflowed the fixed-width slot
-        // reserved by the macOS status item.
         for bps in [
             9.996 * KB,
             99.96 * KB,
@@ -493,9 +366,6 @@ mod tests {
 
     #[test]
     fn rate_compact_drops_per_sec_suffix() {
-        // Same tiering and decimal rules as `format_rate`, only the unit
-        // differs: no `/s` suffix. This is what the vertical taskbar layout
-        // renders, where the bar thickness caps the width.
         assert_eq!(format_rate_compact(314.0), "314 B");
         assert_eq!(format_rate_compact(0.0), "0.00 B");
         assert_eq!(format_rate_compact(1024.0), "1.00 K");
@@ -521,8 +391,6 @@ mod tests {
 
     #[test]
     fn display_width_handles_emoji_and_variation_selectors() {
-        // These were outside the old hand-written ranges and made a custom
-        // prefix pad to the wrong number of columns.
         assert_eq!(display_width("🚀"), 2);
         assert_eq!(display_width("⌚"), 2);
         assert_eq!(display_width("☀️"), 2);
@@ -544,9 +412,6 @@ mod tests {
 
     #[test]
     fn single_row_exposes_items_for_pixel_spacing() {
-        // Item spacing is now a pixel value applied by the display layer, so
-        // the core exposes the individual metric strings (`items`) for the
-        // single-row layout instead of baking a space count into the text.
         let mut cfg = Config::default();
         cfg.display.dual_row = false;
         let f = format_frame(&snap(29.0, 68.0, 1024.0, 2048.0), &cfg);
@@ -554,7 +419,6 @@ mod tests {
             f.items,
             vec!["CPU: 29%", "MEM: 68%", "U: 1.00 K/s", "D: 2.00 K/s"]
         );
-        // The fallback joined string is stable regardless of item_spacing.
         let mut cfg2 = Config::default();
         cfg2.display.dual_row = false;
         cfg2.display.item_spacing = 24;
@@ -565,8 +429,6 @@ mod tests {
 
     #[test]
     fn dual_row_has_no_items() {
-        // Dual-row layout relies on column structure, not pixel item spacing,
-        // so `items` stays empty there.
         let mut cfg = Config::default();
         cfg.display.dual_row = true;
         let f = format_frame(&snap(29.0, 68.0, 1024.0, 2048.0), &cfg);
@@ -576,8 +438,6 @@ mod tests {
 
     #[test]
     fn paired_toggles_hide_groups() {
-        // Resources and network are each one toggle: turning off a group hides
-        // both of its metrics at once.
         let mut cfg = Config::default();
         cfg.display.dual_row = false;
         cfg.display.show_resources = false;
@@ -599,12 +459,8 @@ mod tests {
         cfg.display.dual_row = true;
         let f = format_frame(&snap(29.0, 68.0, 1.2 * MB, 314.0 * KB), &cfg);
         assert_eq!(f.lines.len(), 2);
-        // Left column width fixed by max(CPU.., MEM..) so right column starts
-        // at the same offset in both rows.
         assert_eq!(f.lines[0].left.len(), f.lines[1].left.len());
         assert_eq!(f.lines[0].render(), "CPU: 29%  U: 1.20 M/s");
-        // "D: 314 K/s" is one col narrower, padded to the column width -> the
-        // trailing space is the alignment, matching the row above.
         assert_eq!(f.lines[1].render(), "MEM: 68%  D: 314 K/s ");
     }
 
@@ -612,8 +468,6 @@ mod tests {
     fn dual_row_columns_align_within_frame() {
         let mut cfg = Config::default();
         cfg.display.dual_row = true;
-        // CPU and MEM have different natural widths; MEM's row is padded so
-        // both right-column cells start at the same offset.
         let f = format_frame(&snap(9.0, 68.0, 1024.0, 1024.0 * 1024.0), &cfg);
         assert_eq!(
             display_width(&f.lines[0].left),
@@ -631,7 +485,6 @@ mod tests {
         cfg.display.dual_row = false;
         let f = format_frame(&snap(f64::NAN, f64::NAN, f64::NAN, f64::NAN), &cfg);
         assert_eq!(f.lines[0].render(), "CPU: --%  MEM: --%  U: --  D: --");
-        // And the whole group disappears when its paired toggle is off.
         let mut c2 = Config::default();
         c2.display.dual_row = false;
         c2.display.show_network = false;
@@ -645,7 +498,6 @@ mod tests {
         cfg.display.dual_row = true;
         cfg.display.show_network = false;
         let f = format_frame(&snap(29.0, 68.0, 0.0, 0.0), &cfg);
-        // Right column has nothing -> still two lines, left column only.
         assert_eq!(f.lines.len(), 2);
         assert_eq!(f.lines[0].render(), "CPU: 29%");
         assert_eq!(f.lines[1].render(), "MEM: 68%");
@@ -678,11 +530,6 @@ mod tests {
 
     #[test]
     fn vertical_layout_keeps_widest_line_below_joined_width() {
-        // The whole point of the stacked layout: on a vertical taskbar the bar
-        // thickness limits the width, so no line may be wider than the value
-        // alone (the old joined "U: 1.20 M/s" line was the cause of clipping).
-        // The value is now the compact form (no `/s`), so the width bound
-        // tightens accordingly.
         let cfg = Config::default();
         let f = format_frame_vertical(&snap(90.0, 60.0, 1.56 * MB, 100.0 * KB), &cfg);
         for l in &f.lines {
@@ -715,8 +562,6 @@ mod tests {
             column_metrics(&cfg),
             (vec![Metric::Up, Metric::Down], Vec::new())
         );
-        // `sanitize` prevents both groups from being off; the function still
-        // returns an empty pair rather than inventing a metric.
         let mut cfg = Config::default();
         cfg.display.show_resources = false;
         cfg.display.show_network = false;
@@ -740,8 +585,6 @@ mod tests {
     fn fixed_slot_reserve_strings_cover_the_formatter() {
         assert_eq!(format_percent(100.0), PERCENT_RESERVE);
         assert_eq!(format_rate(8888.0 * MB), "8.68 G/s");
-        // The reserve's numeric field width is the same four-character cap
-        // used by format_rate; the unit placeholder is the widest tier.
         let numeric = RATE_RESERVE.split(' ').next().unwrap();
         assert_eq!(numeric.len(), 4);
         assert!(RATE_RESERVE.split(' ').nth(1).unwrap().len() >= 3);
@@ -758,8 +601,6 @@ mod tests {
 
     #[test]
     fn vertical_layout_empty_prefix_shows_value_only() {
-        // An empty prefix must not produce an extra blank line that would be
-        // indistinguishable from the inter-metric separator.
         let mut cfg = Config::default();
         cfg.display.prefix.cpu = "".to_string();
         let f = format_frame_vertical(&snap(29.0, 68.0, 1024.0, 2048.0), &cfg);
@@ -772,17 +613,13 @@ mod tests {
 
     #[test]
     fn format_value_compact_matches_vertical_frame_values() {
-        // The compact value helper is what the vertical frame uses for the
-        // numeric line; keep the two entry points consistent.
         let s = snap(37.0, 61.0, 2.0 * KB, 3.0 * MB);
         assert_eq!(format_value_compact(Metric::Cpu, &s), "37%");
         assert_eq!(format_value_compact(Metric::Mem, &s), "61%");
         assert_eq!(format_value_compact(Metric::Up, &s), "2.00 K");
         assert_eq!(format_value_compact(Metric::Down, &s), "3.00 M");
-        // Full-suffix path is unchanged for the horizontal layout.
         assert_eq!(format_value(Metric::Up, &s), "2.00 K/s");
         assert_eq!(format_value(Metric::Down, &s), "3.00 M/s");
-        // NaN still shows the placeholder, identical to the full form.
         let nan = snap(f64::NAN, f64::NAN, f64::NAN, f64::NAN);
         assert_eq!(format_value_compact(Metric::Up, &nan), "--");
         assert_eq!(format_value_compact(Metric::Cpu, &nan), "--%");

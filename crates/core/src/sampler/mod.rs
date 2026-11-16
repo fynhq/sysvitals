@@ -1,32 +1,4 @@
-//! Sampling layer.
-//!
-//! All OS-specific calls live in this module tree (sysinfo plus three
-//! Windows-only helpers: the PDH CPU counter, the NDIS interface table-based
-//! network counters, and the hardware-interface filter used by the sysinfo
-//! fallback); everything else consumes the pure [`Snapshot`] it produces, so
-//! each metric can later be swapped for a native call (`GetSystemTimes`,
-//! `host_statistics`, ...) without changing any caller.
-//!
-//! Correctness rules baked in here, each unit-testable via a
-//! fake counter feed (see `net` tests — they do not need a real NIC):
-//! - Rates are differentials of monotonically increasing cumulative byte
-//!   counters. A counter below its baseline (wrap-around or driver reset)
-//!   yields "no data" (NaN) for that frame rather than a negative rate.
-//! - Interface set changes (add/remove/unplug) rebuild the baseline instead
-//!   of panicking.
-//! - A tick gap far larger than any configured interval means the machine
-//!   slept or the process was stalled: the frame is dropped as stale (CPU
-//!   re-primes from raw, network reports NaN) so no sleep-spanning rate
-//!   reaches the display or the history ([`STALE_GAP_SECS`]).
-//! - Only physical NICs are aggregated: virtual switches and VPN tunnels
-//!   mirror traffic the physical link already counts, so they are excluded
-//!   (Windows uses the NDIS `HardwareInterface` flag, elsewhere a name
-//!   heuristic).
-//! - CPU percent follows Task Manager on Windows (the PDH counter is chosen
-//!   per OS build: frequency-weighted `% Processor Utility` below Windows 11
-//!   24H2, time-based `% Processor Time` from 24H2 on, where Task Manager
-//!   switched formulas) and the OS monitor on macOS (time-based), then is
-//!   exponentially smoothed with a fixed history weight (0.3) and clamped.
+//! Sampling layer facade.
 
 mod cpu;
 mod mem;
@@ -48,22 +20,13 @@ use sysinfo::{CpuRefreshKind, MemoryRefreshKind, Networks, RefreshKind, System};
 
 use crate::model::Snapshot;
 
-/// Owns the `sysinfo` handles and the inter-frame state needed to turn raw
-/// cumulative counters into instantaneous rates. Construct once, call
-/// [`Sampler::sample`] on every tick.
 pub struct Sampler {
     system: System,
     networks: Networks,
     net: NetSampler,
     cpu: CpuSampler,
-    /// Task Manager-equivalent CPU percent on Windows. The concrete PDH
-    /// counter follows the OS build (see `cpu_win`); `None` when PDH is
-    /// unavailable, in which case the time-based sysinfo value is used.
     #[cfg(windows)]
     cpu_counter: Option<cpu_win::CpuCounter>,
-    /// Monotonic clock for real elapsed-time deltas, immune to wall-clock
-    /// jumps (DST/NTP/sleep). The divisor for every differential is this, not
-    /// the nominal interval, so a late tick still yields an accurate rate.
     last_tick: Option<Instant>,
 }
 
@@ -74,26 +37,13 @@ impl Default for Sampler {
 }
 
 impl Sampler {
-    /// Build a sampler and seed the first CPU / memory baseline. The network
-    /// baseline is seeded by the first [`Sampler::sample`] call; on Windows a
-    /// successful native counter read never needs sysinfo's interface list.
-    /// CPU smoothing uses the fixed default weight (0.3, see
-    /// [`CpuSampler`]); the network layer always aggregates physical adapters.
     pub fn new() -> Self {
-        // sysinfo 0.40 made both constructors fallible for platforms without
-        // the required backends. They only fail on targets this workspace
-        // does not build for (Windows and macOS always succeed), and the
-        // indicator has nothing to show without them, so surface a failure
-        // at startup instead of silently painting `--` forever.
         let system = System::new_with_specifics(
             RefreshKind::nothing()
                 .with_cpu(CpuRefreshKind::everything())
                 .with_memory(MemoryRefreshKind::nothing().with_ram()),
         )
         .expect("sysinfo system information is supported on this platform");
-        // Empty by design: the fallback path refreshes it on first use, and
-        // refreshing here would pay sysinfo's Windows interface/address
-        // enumeration even when the native counter path succeeds.
         let networks =
             Networks::new().expect("sysinfo network enumeration is supported on this platform");
         Sampler {
@@ -107,21 +57,8 @@ impl Sampler {
         }
     }
 
-    /// Take one reading. The first call seeds CPU/network baselines and
-    /// therefore reports NaN for CPU and network rates; memory is valid
-    /// immediately. From the second call on, CPU and network rates are real.
-    /// `now_unix` is the local wall-clock timestamp to stamp the sample.
+    // First sample seeds baselines and reports NaN for CPU/network; memory is valid immediately.
     pub fn sample(&mut self, now_unix: i64) -> Snapshot {
-        // Whole-machine CPU percent. On Windows the PDH counter follows
-        // Task Manager's formula for the running OS build (frequency-weighted
-        // utility below Windows 11 24H2, time-based from 24H2 on); sysinfo's
-        // time-based `global_cpu_usage()` is the fallback and the source on
-        // macOS, where Activity Monitor is time-based as well.
-        //
-        // Read PDH before refreshing sysinfo so a successful Windows counter
-        // does not pay for an all-core sysinfo refresh every tick. Only the
-        // fallback path refreshes sysinfo; the first PDH read primes the
-        // counter and therefore takes the fallback once.
         #[cfg(windows)]
         let pdh_cpu = self.cpu_counter.as_mut().and_then(|c| c.read());
         #[cfg(windows)]
@@ -133,8 +70,6 @@ impl Sampler {
         self.system.refresh_memory();
 
         let now = Instant::now();
-        // On the very first tick there is no prior tick; elapsed is 0, and the
-        // sub-samplers treat a 0 gap as "no rate yet".
         let elapsed = self.last_tick.map(|prev| now.duration_since(prev));
         self.last_tick = Some(now);
 
@@ -144,9 +79,6 @@ impl Sampler {
         let cpu_raw = self.system.global_cpu_usage() as f64;
         let cpu_pct = self.cpu.update(cpu_raw, elapsed);
         let mem_pct = mem::percent_used(self.system.used_memory(), self.system.total_memory());
-        // `NetSampler` chooses the native Windows counters when available and
-        // only refreshes the sysinfo list on the fallback path. Passing the
-        // handle mutably keeps that decision in one place.
         let (up, down) = self.net.poll(&mut self.networks, elapsed);
 
         Snapshot {

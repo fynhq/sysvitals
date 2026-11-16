@@ -1,52 +1,33 @@
 //! GPUI-free shared helpers for every SysVitals process.
-//!
-//! The indicator processes (`app-win` / `app-mac`) and the GPUI panels all
-//! log to the same daily file, install the same crash hook and — on Windows
-//! — read the same HKCU probes. Keeping that plumbing here removes three
-//! drifting copies; the GPUI theme layer (`sysvitals-panel`) re-exports
-//! these so panel call sites stay unchanged.
 
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-/// Build stamp emitted by `build.rs`: `v{semver}` on a tagged commit,
-/// `v{semver}_{short-hash} (dev)` otherwise. One definition keeps the
-/// indicator startup logs and the settings footer on the same value.
 pub const SV_BUILD_ID: &str = match option_env!("SV_BUILD_ID") {
     Some(id) => id,
     None => concat!("v", env!("CARGO_PKG_VERSION")),
 };
 
-/// Process arguments without the binary name. Panels share the CLI contract
-/// in `core::cli`; this is the single place that reads `std::env::args`.
 pub fn command_args() -> Vec<String> {
     std::env::args().skip(1).collect()
 }
 
-/// `--parent-pid <pid>` from the process arguments.
 pub fn parent_pid_arg() -> Option<u32> {
     sysvitals_core::cli::parse_parent_pid(&command_args())
 }
 
-/// `--anchor L T R B` from the process arguments.
 pub fn anchor_arg() -> Option<sysvitals_core::cli::AnchorRect> {
     sysvitals_core::cli::parse_anchor(&command_args())
 }
 
-/// `--anchor-monitor <handle>` from the process arguments.
 pub fn anchor_monitor_arg() -> Option<u64> {
     sysvitals_core::cli::parse_anchor_monitor(&command_args())
 }
 
-/// `--ready-file <path>` from the process arguments.
 pub fn ready_file_arg() -> Option<std::path::PathBuf> {
     sysvitals_core::cli::parse_ready_file(&command_args())
 }
 
-/// Local date (`YYYY-MM-DD`) and time (`HH:MM:SS.mmm`) for log stamps, from
-/// chrono's local clock. The display layers used to format these per
-/// platform (`GetLocalTime` on Windows, `NSDate` on macOS); one clock keeps
-/// every process's lines comparable.
 pub fn local_now() -> (String, String) {
     let now = chrono::Local::now();
     (
@@ -55,8 +36,6 @@ pub fn local_now() -> (String, String) {
     )
 }
 
-/// Append one line to today's log file under the data dir. Logging must
-/// never break an indicator or panel, so failures are silently ignored.
 pub fn log_event(level: &str, message: &str) {
     let Ok(dir) = sysvitals_core::config::data_dir() else {
         return;
@@ -65,9 +44,6 @@ pub fn log_event(level: &str, message: &str) {
     sysvitals_core::logger::log_line(&dir, &date, &time, level, message);
 }
 
-/// Log sanitized-config repairs with one stable prefix shared by the
-/// indicator, settings and history processes. `prefix` is the complete message
-/// prefix (for example `"config repair"` or `"settings: config merge repair"`).
 pub fn log_sanitize_issues(prefix: &str, issues: &[sysvitals_core::config::SanitizeIssue]) {
     for issue in issues {
         log_event(
@@ -77,9 +53,6 @@ pub fn log_sanitize_issues(prefix: &str, issues: &[sysvitals_core::config::Sanit
     }
 }
 
-/// Queue one sample for the background history writer. Both platform
-/// indicators used to carry an identical copy of this closure/slot plumbing;
-/// the log sink is cached here so each sample costs only an `Arc` clone.
 pub fn record_history_sample(
     slot: &mut sysvitals_core::HistoryWriterSlot,
     cfg: &sysvitals_core::Config,
@@ -99,9 +72,6 @@ pub fn record_history_sample(
     );
 }
 
-/// Shared failure line for a platform login-startup apply. The platform owns
-/// the retry cooldown and the side effect; this only keeps the message and
-/// wording identical on Windows and macOS.
 pub fn log_auto_start_failure(desired: bool, error: &str) {
     log_event(
         "WARN",
@@ -112,28 +82,15 @@ pub fn log_auto_start_failure(desired: bool, error: &str) {
     );
 }
 
-/// A failed auto-start apply is retried without waiting for the user to touch
-/// the setting again. The cooldown keeps a permanently unavailable system
-/// login item from producing one warning per config poll.
 const AUTO_START_RETRY_COOLDOWN: Duration = Duration::from_secs(300);
 
-/// Result of one platform auto-start apply.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AutoStartOutcome {
-    /// The system state already matched; nothing changed.
     Unchanged,
-    /// The system state changed. `detail` carries platform status text.
     Changed { detail: Option<String> },
-    /// macOS `SMAppService` is waiting for the user's approval.
     PendingApproval,
 }
 
-/// Shared login-startup policy for both indicators.
-///
-/// The platform owns the side effect and the durable state (Startup shortcut
-/// or `SMAppService`); this controller owns the rules that must not drift:
-/// an inherited `false` is not a user choice, the value is applied once per
-/// change, and a failure retries after [`AUTO_START_RETRY_COOLDOWN`].
 #[derive(Debug, Default)]
 pub struct AutoStartController {
     applied: Option<bool>,
@@ -145,24 +102,15 @@ impl AutoStartController {
         Self::default()
     }
 
-    /// Forget the last applied value and any retry. Used when the config file
-    /// is missing: a later re-created file may apply its value again even if
-    /// it matches the last one this process saw.
     pub fn reset(&mut self) {
         self.applied = None;
         self.retry_at = None;
     }
 
-    /// Apply the configured value once. `set` performs the platform side
-    /// effect and reports whether anything changed.
     pub fn apply<F>(&mut self, cfg: &sysvitals_core::Config, set: F)
     where
         F: FnOnce(bool) -> Result<AutoStartOutcome, String>,
     {
-        // A `false` that merely came from the default (or a config re-created
-        // after a corrupt file was backed up) is not a user choice, so it must
-        // not remove a login item. A legacy `true` is still safe to apply: it
-        // can only repair/add the entry, never remove one.
         if !cfg.startup.auto_start_explicit && !cfg.startup.auto_start {
             self.reset();
             return;
@@ -200,8 +148,6 @@ impl AutoStartController {
         }
     }
 
-    /// Retry a failed apply on its cooldown. Only a file-backed, successfully
-    /// parsed config may drive this side effect.
     pub fn retry_if_due<F>(&mut self, file_backed: bool, cfg: &sysvitals_core::Config, set: F)
     where
         F: FnOnce(bool) -> Result<AutoStartOutcome, String>,
@@ -218,7 +164,6 @@ impl AutoStartController {
     }
 }
 
-/// Result of one shared config-file poll.
 pub enum ConfigEvent {
     Unchanged,
     Failed,
@@ -229,9 +174,6 @@ pub enum ConfigEvent {
     },
 }
 
-/// Poll the shared config file and log a parse failure once per broken mtime.
-/// The retry/backoff policy lives in [`sysvitals_core::ConfigWatcher`]; this
-/// only keeps the three panel/indicator call sites on the same message shape.
 pub fn poll_config(watcher: &mut sysvitals_core::ConfigWatcher, error_prefix: &str) -> ConfigEvent {
     use sysvitals_core::config_watch::ConfigPoll;
     match watcher.poll() {
@@ -254,9 +196,6 @@ pub fn poll_config(watcher: &mut sysvitals_core::ConfigWatcher, error_prefix: &s
     }
 }
 
-/// Rust panic hook writing the panic (with location and backtrace) to the
-/// log before the process dies. Shared by every binary; the Windows overlay
-/// additionally installs a Win32 unhandled-exception filter on top.
 pub fn install_panic_hook() {
     std::panic::set_hook(Box::new(|info| {
         let message = if let Some(text) = info.payload().downcast_ref::<&str>() {
@@ -282,13 +221,11 @@ pub fn install_panic_hook() {
     }));
 }
 
-/// Encode a Rust string as a NUL-terminated UTF-16 vector for `PCWSTR`.
 #[cfg(windows)]
 pub fn utf16(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-/// Read a DWORD from HKCU; `None` when the key or value is absent.
 #[cfg(windows)]
 pub fn hkcu_dword(key: &str, value: &str) -> Option<u32> {
     use windows::Win32::System::Registry::{
@@ -332,11 +269,6 @@ pub fn hkcu_dword(key: &str, value: &str) -> Option<u32> {
     }
 }
 
-/// The Windows system directory (`%SystemRoot%\System32`), or `None` when
-/// the probe fails. System tools must be launched by absolute path: a bare
-/// `cmd.exe`/`timeout.exe`/`taskmgr.exe` is resolved through the current
-/// directory and `PATH`, so a file with the same name next to a portable
-/// launch or on a developer `PATH` can win.
 #[cfg(windows)]
 pub fn system_directory() -> Option<std::path::PathBuf> {
     use windows::Win32::System::SystemInformation::GetSystemDirectoryW;
@@ -358,10 +290,6 @@ pub fn system_directory() -> Option<std::path::PathBuf> {
     )))
 }
 
-/// The Windows OS build number, or `None` if the version probe fails.
-///
-/// `RtlGetVersion` is the documented way to read the real build (the classic
-/// `GetVersionEx` is version-helpered and lies on 8.1+).
 #[cfg(windows)]
 pub fn os_build_number() -> Option<u32> {
     use windows::Wdk::System::SystemServices::RtlGetVersion;
@@ -376,10 +304,6 @@ pub fn os_build_number() -> Option<u32> {
     Some(info.dwBuildNumber)
 }
 
-/// HKCU Explorer taskbar-alignment flag (`TaskbarAl`): `1` when the Windows
-/// 11 taskbar centers its icons. Read by both the overlay (placement) and
-/// the settings panel (anchor choices), which must agree on the very same
-/// value.
 #[cfg(windows)]
 pub fn taskbar_al() -> Option<u32> {
     hkcu_dword(
@@ -388,20 +312,12 @@ pub fn taskbar_al() -> Option<u32> {
     )
 }
 
-/// Outcome of acquiring the per-user single-instance lock.
 pub enum InstanceLock {
-    /// This process owns the lock; keep the guard alive for the process
-    /// lifetime.
     Acquired(SingleInstanceGuard),
-    /// Another process already owns it.
     Busy,
-    /// The OS refused to create the lock; the caller decides whether that is
-    /// fatal for its process.
     Unavailable(String),
 }
 
-/// Platform single-instance guard. Windows holds a named mutex handle;
-/// macOS holds an exclusively flocked file; other hosts are a no-op.
 #[cfg(windows)]
 pub struct SingleInstanceGuard {
     handle: windows::Win32::Foundation::HANDLE,
@@ -422,9 +338,7 @@ pub struct SingleInstanceGuard {
 #[cfg(not(any(windows, target_os = "macos")))]
 pub struct SingleInstanceGuard;
 
-/// Acquire the process-wide instance lock. `name` is a named-mutex name on
-/// Windows and a file name under the data directory on macOS. Keeping the
-/// value alive holds the lock; process exit releases it.
+// Single-instance lock: named mutex on Windows, locked file on macOS; Busy means another process owns it.
 #[cfg(windows)]
 pub fn acquire_instance_lock(name: &str) -> InstanceLock {
     use windows::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS};
@@ -480,9 +394,6 @@ pub fn acquire_instance_lock(_name: &str) -> InstanceLock {
     InstanceLock::Acquired(SingleInstanceGuard)
 }
 
-/// A Windows parent process handle watched by a child panel. The handle is
-/// stored as `isize` so the struct can move into a GPUI foreground task;
-/// dropping it closes the handle.
 #[cfg(windows)]
 pub struct ParentProcess {
     handle: isize,
@@ -490,8 +401,6 @@ pub struct ParentProcess {
 
 #[cfg(windows)]
 impl ParentProcess {
-    /// Open `pid` with `PROCESS_SYNCHRONIZE`. The error string is the Windows
-    /// error text so callers can keep their existing diagnostic line.
     pub fn open(pid: u32) -> Result<Self, String> {
         use windows::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE};
         match unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, pid) } {
@@ -502,8 +411,6 @@ impl ParentProcess {
         }
     }
 
-    /// Whether the parent has exited. A failed wait is treated as exited, the
-    /// same conservative rule the panels used before this helper existed.
     pub fn exited(&self) -> bool {
         use windows::Win32::Foundation::{HANDLE, WAIT_TIMEOUT};
         use windows::Win32::System::Threading::WaitForSingleObject;

@@ -1,18 +1,4 @@
-//! Minimal file logger: one file per local calendar day, pruned to a
-//! configurable retention window (default 7 days).
-//!
-//! Design: the core crate stays free of platform time APIs and timezone
-//! assumptions. The display layer (which can query the real local clock, e.g.
-//! `GetLocalTime` on Windows) passes in the already-formatted local date
-//! (`YYYY-MM-DD`) and time (`HH:MM:SS`) strings. This crate only handles file
-//! naming, rolling, formatting and retention pruning.
-//!
-//! Retention is applied both at startup (the first line of a process prunes)
-//! and on every date roll, so a process that stays resident for weeks prunes
-//! old daily files without needing a restart.
-//!
-//! Logging must never break the indicator, so every public function swallows
-//! I/O errors silently.
+//! Daily file logger with pruning.
 
 use std::borrow::Cow;
 use std::fs::{self, File, OpenOptions};
@@ -20,20 +6,15 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
-/// Default number of daily log files to keep.
 pub const DEFAULT_RETENTION_DAYS: u32 = 7;
 
 static LOG_FILE: Mutex<Option<File>> = Mutex::new(None);
 static LOG_DATE: Mutex<String> = Mutex::new(String::new());
 
-/// Where log files live: `<data_dir>/logs/`.
 pub fn log_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("logs")
 }
 
-/// `Component[pid]` prefix shared by every line from this process. Multiple
-/// SysVitals processes append to the same daily file, so a line without an
-/// owner is ambiguous. Cached because every log line uses it.
 fn process_tag() -> &'static str {
     static TAG: OnceLock<String> = OnceLock::new();
     TAG.get_or_init(|| {
@@ -45,9 +26,6 @@ fn process_tag() -> &'static str {
             })
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| "sysvitals".to_string());
-        // The macOS bundle's main binary is `sysvitals`; the panels use the
-        // exported `SysVitalsSettings` / `SysVitalsHistory` names. Normalize
-        // the main binary so every platform reads the same.
         if name.eq_ignore_ascii_case("sysvitals") {
             name = "SysVitals".to_string();
         }
@@ -55,9 +33,6 @@ fn process_tag() -> &'static str {
     })
 }
 
-/// Collapse CR/LF so one event stays one log line. Panic backtraces and
-/// multi-line `anyhow` errors otherwise break the `timestamp [LEVEL]` prefix
-/// contract and produce fake entries.
 fn one_line(message: &str) -> Cow<'_, str> {
     if !message.contains('\n') && !message.contains('\r') {
         return Cow::Borrowed(message);
@@ -79,39 +54,23 @@ fn one_line(message: &str) -> Cow<'_, str> {
     Cow::Owned(out)
 }
 
-/// Open (or roll to) the log file for the given local date. Returns the file
-/// handle, or `None` if the directory cannot be created.
 fn open_for_date(dir: &Path, date: &str) -> Option<File> {
     let _ = fs::create_dir_all(dir);
     let path = dir.join(format!("sysvitals-{date}.log"));
     OpenOptions::new().create(true).append(true).open(path).ok()
 }
 
-/// Append one line. `date` is the local date `YYYY-MM-DD` and `time` the local
-/// time (`HH:MM:SS` or `HH:MM:SS.mmm`), both supplied by the caller from the
-/// platform clock. `level` is a short tag like `INFO` / `WARN` / `ERROR`.
-/// Rolls to a new file when the date changes. Never panics.
 pub fn log_line(data_dir: &Path, date: &str, time: &str, level: &str, message: &str) {
     let mut file_guard = LOG_FILE.lock().unwrap_or_else(|e| e.into_inner());
     let mut date_guard = LOG_DATE.lock().unwrap_or_else(|e| e.into_inner());
     if *date_guard != date {
-        // Drop the previous day's handle before the open attempt: writing a
-        // new date's line into yesterday's file would be worse than losing it
-        // until the retry succeeds.
         *file_guard = None;
     }
-    // Retry the open when the date changed *or* the previous attempt failed.
-    // Clearing the date on failure (instead of committing it) is what keeps a
-    // transient permission/lock error from silencing the whole day.
     if *date_guard != date || file_guard.is_none() {
         if let Some(file) = open_for_date(&log_dir(data_dir), date) {
             let rolled = *date_guard != date;
             *file_guard = Some(file);
             *date_guard = date.to_string();
-            // A long-running process only rolls the file, it never restarts,
-            // so the startup-only prune would let the directory grow without
-            // bound. Pruning on the first line of each new local day keeps
-            // the retention window enforced for the life of the process.
             if rolled {
                 prune_logs(data_dir, date, DEFAULT_RETENTION_DAYS);
             }
@@ -119,17 +78,11 @@ pub fn log_line(data_dir: &Path, date: &str, time: &str, level: &str, message: &
     }
     if let Some(file) = file_guard.as_mut() {
         let message = one_line(message);
-        // One write_all keeps a whole line atomic with respect to other
-        // processes appending to the same daily file, so `process_tag()`
-        // cannot be interleaved into a foreign line.
         let line = format!("{date} {time} [{level}] {} {message}\n", process_tag());
         let _ = file.write_all(line.as_bytes());
     }
 }
 
-/// Delete log files older than `retention_days`. Only touches files matching
-/// the `sysvitals-YYYY-MM-DD.log` pattern so unrelated files are never
-/// removed. Best-effort; errors are ignored. `today` is the current local date.
 pub fn prune_logs(data_dir: &Path, today: &str, retention_days: u32) {
     let dir = log_dir(data_dir);
     let Ok(entries) = fs::read_dir(&dir) else {
@@ -169,7 +122,6 @@ fn parse_log_name(name: &str) -> Option<String> {
     Some(rest.to_string())
 }
 
-/// Days since 1970-01-01 for a `YYYY-MM-DD` string, used to compare file ages.
 fn date_to_days(date: &str) -> Option<i64> {
     let y: i64 = date.get(0..4)?.parse().ok()?;
     let m: u32 = date.get(5..7)?.parse().ok()?;
@@ -180,8 +132,6 @@ fn date_to_days(date: &str) -> Option<i64> {
     Some(days_from_civil(y, m, d))
 }
 
-/// Days since 1970-01-01 for a civil (year, month, day) date. Inverse of the
-/// standard civil-from-days algorithm.
 fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };
     let era = if y >= 0 { y } else { y - 399 } / 400;
@@ -201,7 +151,6 @@ mod tests {
         assert_eq!(days_from_civil(1970, 1, 1), 0);
         assert_eq!(days_from_civil(1970, 1, 2), 1);
         assert_eq!(days_from_civil(2000, 3, 1), 11017);
-        // Monotonic across a leap-year boundary.
         assert!(days_from_civil(2024, 3, 1) > days_from_civil(2024, 2, 28));
     }
 
@@ -265,15 +214,10 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         let logs = log_dir(&dir);
         fs::create_dir_all(&logs).unwrap();
-        // Two files with different ages: the first is already outside the
-        // retention window when the process starts, the second falls out on
-        // the next date roll (7 days old today, 8 tomorrow).
         for name in ["sysvitals-2026-09-01.log", "sysvitals-2026-10-12.log"] {
             fs::write(logs.join(name), b"x").unwrap();
         }
         log_line(&dir, "2026-10-19", "13:00:00", "INFO", "hello");
-        // The first line of a process prunes, so a resident process does not
-        // need a restart to enforce retention.
         assert!(
             !logs.join("sysvitals-2026-09-01.log").exists(),
             "stale file pruned on first line"
@@ -293,15 +237,12 @@ mod tests {
             content.contains(&format!("[{}]", std::process::id())),
             "every line carries the process tag: {content}"
         );
-        // Rolling to the next day creates a second file and prunes the file
-        // that has just crossed the seven-day boundary.
         log_line(&dir, "2026-10-20", "09:00:00", "INFO", "next day");
         assert!(log_dir(&dir).join("sysvitals-2026-10-20.log").exists());
         assert!(
             !logs.join("sysvitals-2026-10-12.log").exists(),
             "file pruned on date roll"
         );
-        // Reset globals so other tests are unaffected.
         *LOG_FILE.lock().unwrap() = None;
         *LOG_DATE.lock().unwrap() = String::new();
         let _ = fs::remove_dir_all(&dir);

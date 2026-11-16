@@ -1,11 +1,4 @@
-//! Static UI strings. Two locales, `en` (default) and `zh`. The text lives in
-//! `locales/*.conf` (one `key=value` per line) and is compiled into the binary
-//! with `include_str!`; each locale is parsed lazily on first use. A
-//! heavyweight i18n framework is not warranted for this fixed string set.
-//!
-//! Scope: these keys cover settings/panel/menu/CSV-header text. Status-bar
-//! metric *prefixes* are user config and deliberately NOT here: changing
-//! language must never rewrite a user's custom prefix.
+//! Static English/Chinese UI strings.
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -23,7 +16,6 @@ pub enum Language {
 impl Language {
     pub const ALL: [Language; 2] = [Language::En, Language::Zh];
 
-    /// Native name shown in the language picker.
     pub fn label(self) -> &'static str {
         match self {
             Language::En => "English",
@@ -41,10 +33,6 @@ impl Language {
     }
 }
 
-/// Translate `key` for `lang`. The return is valid for the lifetime of `key`;
-/// callers always pass string literals. A missing key returns the key itself,
-/// making a forgotten string visible during development rather than silently
-/// empty.
 pub fn t(lang: Language, key: &str) -> &str {
     lang.strings().get(key).copied().unwrap_or(key)
 }
@@ -53,9 +41,6 @@ fn parse(source: &'static str) -> HashMap<&'static str, &'static str> {
     entries(source).collect()
 }
 
-/// Yield `(key, value)` pairs in file order. Full-line comments (`#`) and
-/// blank lines are skipped; the first `=` separates key and value. Keys and
-/// values are trimmed, so locale files must not rely on edge whitespace.
 fn entries(source: &'static str) -> impl Iterator<Item = (&'static str, &'static str)> {
     source.lines().filter_map(|line| {
         let line = line.trim();
@@ -76,8 +61,6 @@ mod tests {
     const EN: &str = include_str!("../locales/en.conf");
     const ZH: &str = include_str!("../locales/zh.conf");
 
-    /// Raw `(key, value)` slices before trimming, so the test can detect
-    /// edge whitespace that the runtime parser would silently discard.
     fn raw_entries(source: &'static str) -> impl Iterator<Item = (&'static str, &'static str)> {
         source.lines().filter_map(|line| {
             if line.trim().is_empty() || line.trim_start().starts_with('#') {
@@ -112,9 +95,6 @@ mod tests {
 
     #[test]
     fn menu_task_viewers_localized() {
-        // Context-menu labels for the per-platform system resource viewer.
-        // Both locales must resolve (no key-passthrough), and the two OSes
-        // ship under different names so both pairs need their own keys.
         assert_eq!(t(Language::En, "menu.task_manager"), "Task Manager");
         assert_eq!(t(Language::Zh, "menu.task_manager"), "任务管理器");
         assert_eq!(t(Language::En, "menu.activity_monitor"), "Activity Monitor");

@@ -1,20 +1,7 @@
-//! Pure command-line parsing shared by the platform indicators and the
-//! GPUI panels they launch.
-//!
-//! Panels receive their placement and supervision arguments as plain CLI
-//! flags (`--anchor L T R B`, `--anchor-monitor <handle>`,
-//! `--parent-pid <pid>`, `--ready-file <path>`). The parsing is pure so it
-//! is unit-tested here once instead of being copy-pasted into each panel.
-//! Callers pass the argument list without the binary name.
+//! Shared command-line parsing.
 
 use std::path::PathBuf;
 
-/// The indicator rectangle in GPUI logical pixels, passed to a panel with
-/// `--anchor` so it opens on the same display as the indicator that launched
-/// it (multi-monitor). The rectangle is expressed in the same coordinate
-/// space GPUI reports for the target display's bounds: global desktop pixels
-/// on Windows, display-local pixels on macOS. Panels always pair it with
-/// `--anchor-monitor` when available so the space is unambiguous.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AnchorRect {
     pub left: f32,
@@ -23,9 +10,6 @@ pub struct AnchorRect {
     pub bottom: f32,
 }
 
-/// Parse `--anchor L T R B` from `args`. Absent, malformed, or degenerate
-/// rectangles yield `None`, which keeps the default centered placement — a
-/// bad argument must never prevent the window from opening.
 pub fn parse_anchor(args: &[String]) -> Option<AnchorRect> {
     let mut iter = args.iter().map(String::as_str);
     while let Some(arg) = iter.next() {
@@ -50,10 +34,6 @@ pub fn parse_anchor(args: &[String]) -> Option<AnchorRect> {
     None
 }
 
-/// Parse `--anchor-monitor <handle>` from `args`: the native display handle
-/// (HMONITOR on Windows, CGDirectDisplayID/NSScreenNumber on macOS) that
-/// hosted the indicator. Zero or malformed values yield `None`; the panels
-/// then fall back to the rectangle probe.
 pub fn parse_anchor_monitor(args: &[String]) -> Option<u64> {
     let mut iter = args.iter().map(String::as_str);
     while let Some(arg) = iter.next() {
@@ -65,11 +45,6 @@ pub fn parse_anchor_monitor(args: &[String]) -> Option<u64> {
     None
 }
 
-/// Parse `--parent-pid <pid>` from `args`: the launching indicator's
-/// process id, watched by the panel so it exits when the indicator does.
-/// PID 0 has platform-specific broadcast semantics (`kill(0, 0)` always
-/// succeeds), so it is rejected rather than installing a watchdog that can
-/// never fire.
 pub fn parse_parent_pid(args: &[String]) -> Option<u32> {
     let mut iter = args.iter().map(String::as_str);
     while let Some(arg) = iter.next() {
@@ -81,12 +56,6 @@ pub fn parse_parent_pid(args: &[String]) -> Option<u32> {
     None
 }
 
-/// Parse `--ready-file <path>` from `args`: the file a launched panel writes
-/// its PID into once its window exists. The indicator uses it to tell "the
-/// process is alive but its window is still being created" apart from "the
-/// popup is on screen", so a second click can close the popup as soon as it
-/// is visible instead of waiting out a fixed startup grace. An empty path
-/// yields `None`; a missing marker simply keeps the time-based fallback.
 pub fn parse_ready_file(args: &[String]) -> Option<PathBuf> {
     let mut iter = args.iter().map(String::as_str);
     while let Some(arg) = iter.next() {
@@ -141,7 +110,6 @@ mod tests {
     #[test]
     fn anchor_rejects_malformed_numbers() {
         assert!(parse_anchor(&args(&["--anchor", "1", "x", "3", "4"])).is_none());
-        // `NaN` parses as a float but must not reach placement math.
         assert!(parse_anchor(&args(&["--anchor", "NaN", "2", "3", "4"])).is_none());
     }
 
@@ -160,7 +128,6 @@ mod tests {
         );
         assert!(parse_parent_pid(&args(&["--parent-pid"])).is_none());
         assert!(parse_parent_pid(&args(&["--parent-pid", "x"])).is_none());
-        // PID 0 broadcasts on POSIX; it must not arm a watchdog.
         assert!(parse_parent_pid(&args(&["--parent-pid", "0"])).is_none());
         assert!(parse_parent_pid(&args(&["--anchor", "1", "2", "3", "4"])).is_none());
     }

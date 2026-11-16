@@ -1,9 +1,7 @@
-//! Core data model: the value types exchanged between sampler, format and the
-//! display/UI layers.
+//! Core value types shared across layers.
 
 use serde::{Deserialize, Serialize};
 
-/// The four indicators the status bar can show.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Metric {
@@ -17,19 +15,14 @@ impl Metric {
     pub const ALL: [Metric; 4] = [Metric::Cpu, Metric::Mem, Metric::Up, Metric::Down];
 }
 
-/// Taskbar anchor position (Windows only).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Anchor {
-    /// Just left of the system tray (default, available on Win10 and Win11).
     #[default]
     Right,
-    /// Far left of the taskbar. Only honored on Win11 with centered icons;
-    /// silently falls back to [`Anchor::Right`] otherwise.
     Left,
 }
 
-/// Theme mode. `Auto` follows the OS light/dark setting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Theme {
@@ -39,15 +32,8 @@ pub enum Theme {
     Dark,
 }
 
-/// A single sampled reading. The unit of both status-bar display and history
-/// storage. Network fields are instantaneous bytes-per-second rates.
-///
-/// `cpu_pct`/`mem_pct` are `NaN` when that metric was unavailable/suppressed
-/// for this tick; `up_bps`/`down_bps` are `NaN` on the first tick or after a
-/// baseline reset (adapter change / sleep-wake), signaling "no rate yet".
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Snapshot {
-    /// Unix timestamp (seconds) of the sample, local wall clock.
     pub ts: i64,
     pub cpu_pct: f64,
     pub mem_pct: f64,
@@ -101,8 +87,6 @@ mod tests {
         assert_eq!(m, Metric::Up);
     }
 
-    // Tiny helper: parse a single serde value from TOML-compatible JSON-ish
-    // text without pulling in a JSON crate.
     fn serde_json_free<T: serde::de::DeserializeOwned>(s: &str) -> T {
         let toml_str = format!("v = {}", s.trim());
         let de: Wrap<T> = toml::from_str(&toml_str).unwrap();
