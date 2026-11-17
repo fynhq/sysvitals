@@ -98,8 +98,17 @@ fn main() {
     #[cfg(not(any(windows, target_os = "macos")))]
     let app = gpui_kit::application().with_assets(gpui_kit::assets::Assets);
 
+    log_event(
+        "INFO",
+        &format!("history: application built at {}ms", elapsed_ms()),
+    );
+
     app.run(move |cx| {
         gpui_kit::init(cx);
+        log_event(
+            "INFO",
+            &format!("history: gpui init done at {}ms", elapsed_ms()),
+        );
         apply_theme_and_accent(cx);
 
         #[cfg(windows)]

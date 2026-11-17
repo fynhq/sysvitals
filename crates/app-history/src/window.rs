@@ -137,5 +137,20 @@ pub(crate) fn open_history_window(
         }
     }
     WINDOW_CREATED_MS.store(elapsed_ms() as u64, Ordering::Relaxed);
+    log_event(
+        "INFO",
+        &format!(
+            "history: open_window returned at {}ms",
+            WINDOW_CREATED_MS.load(Ordering::Relaxed)
+        ),
+    );
+    let _ = window_handle.update(cx, |_, window, _| {
+        window.on_next_frame(move |_, _| {
+            log_event(
+                "INFO",
+                &format!("history: first frame at {}ms", elapsed_ms()),
+            );
+        });
+    });
     Some((window_handle, first_load, layout_size))
 }
