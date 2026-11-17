@@ -397,9 +397,10 @@ pub(crate) fn run_resident(cx: &mut App) {
                                 shared.mark_hidden();
                                 log_event(
                                     "WARN",
-                                    "history: DirectX device unavailable; not opening the popup",
+                                    "history: DirectX device unavailable; exiting so the next click can retry",
                                 );
-                                break 'pump;
+                                cx.update(|app| app.quit());
+                                return;
                             }
                         }
                         ResidentAction::ReleaseGpu => {
