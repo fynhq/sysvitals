@@ -389,6 +389,7 @@ impl Render for HistoryView {
                         .stroke(mem_color())
                         .fill(transparent_color())
                         .name(t(lang, "chart.mem").to_string())
+                        // Equal min/max makes AreaChart skip its series, so the overlay below is the only curve renderer.
                         .y_domain(0.0, 0.0)
                         .y_padding(0.0, 0.0)
                         .x_axis(true)
