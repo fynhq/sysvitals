@@ -208,12 +208,20 @@ impl SettingsView {
             ));
         }
 
+        // GPUI does not blur focused inputs when a window is removed, so pending edits are saved before close.
+        let this = cx.weak_entity();
+        window.on_window_should_close(cx, move |_, cx| {
+            let _ = this.update(cx, |view, cx| view.save(cx));
+            true
+        });
+
         #[cfg(target_os = "macos")]
-        let window_shortcuts = cx.observe_keystrokes(|_view, event, window, _cx| {
+        let window_shortcuts = cx.observe_keystrokes(|view, event, window, cx| {
             let keystroke = &event.keystroke;
             if keystroke.modifiers.platform
                 && (keystroke.key.as_str() == "w" || keystroke.key.as_str() == "q")
             {
+                view.save(cx);
                 window.remove_window();
             }
         });
