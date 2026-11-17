@@ -94,13 +94,7 @@ fn main() {
 
     let (cfg, config_read_ok) = load_config_with_backup();
 
-    // Settings stays a regular foreground app; only the history popup uses headless/accessory mode.
-    #[cfg(target_os = "macos")]
-    let app = gpui_kit::application()
-        .with_assets(gpui_kit::assets::Assets)
-        .with_quit_mode(QuitMode::LastWindowClosed);
-    #[cfg(not(target_os = "macos"))]
-    let app = gpui_kit::application().with_assets(gpui_kit::assets::Assets);
+    let app = sysvitals_panel::build_panel_app(false, QuitMode::LastWindowClosed);
 
     log_event(
         "INFO",
@@ -111,13 +105,7 @@ fn main() {
     );
 
     app.run(move |cx| {
-        gpui_kit::init(cx);
-        log_event(
-            "INFO",
-            &format!("settings: gpui init done at {}ms", started.elapsed().as_millis()),
-        );
-        apply_theme_and_accent(cx);
-        watch_parent(cx);
+        sysvitals_panel::init_panel(cx, "settings", started, apply_theme_and_accent);
 
         let anchor = anchor_arg();
         let monitor = anchor_monitor_arg().map(DisplayId::new);
@@ -186,17 +174,7 @@ fn main() {
             "INFO",
             &format!("settings: window built at {}ms", started.elapsed().as_millis()),
         );
-        let _ = window_handle.update(cx, |_, window, _| {
-            window.on_next_frame(move |_, _| {
-                log_event(
-                    "INFO",
-                    &format!(
-                        "settings: first frame at {}ms",
-                        started.elapsed().as_millis()
-                    ),
-                );
-            });
-        });
+        sysvitals_panel::log_first_frame(window_handle, cx, "settings", started);
 
         #[cfg(windows)]
         {

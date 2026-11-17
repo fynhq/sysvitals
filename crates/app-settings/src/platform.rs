@@ -48,10 +48,6 @@ pub(crate) fn taskbar_is_vertical() -> bool {
     false
 }
 
-pub(crate) fn watch_parent(cx: &mut App) {
-    sysvitals_panel::watch_parent(cx, "settings");
-}
-
 const SETTINGS_MARGIN: f32 = 16.0;
 const SETTINGS_MIN_SIZE: f32 = 200.0;
 
