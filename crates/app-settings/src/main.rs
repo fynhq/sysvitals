@@ -52,6 +52,7 @@ const INSTANCE_LOCK_NAME: &str = "Local\\SysVitalsSettings_SingleInstance";
 const INSTANCE_LOCK_NAME: &str = "settings.lock";
 
 fn main() {
+    let started = Instant::now();
     sysvitals_panel::install_panic_hook();
     let _instance = match acquire_instance_lock(INSTANCE_LOCK_NAME) {
         InstanceLock::Acquired(guard) => Some(guard),
@@ -101,8 +102,20 @@ fn main() {
     #[cfg(not(target_os = "macos"))]
     let app = gpui_kit::application().with_assets(gpui_kit::assets::Assets);
 
+    log_event(
+        "INFO",
+        &format!(
+            "settings: application built at {}ms",
+            started.elapsed().as_millis()
+        ),
+    );
+
     app.run(move |cx| {
         gpui_kit::init(cx);
+        log_event(
+            "INFO",
+            &format!("settings: gpui init done at {}ms", started.elapsed().as_millis()),
+        );
         apply_theme_and_accent(cx);
         watch_parent(cx);
 
@@ -169,6 +182,22 @@ fn main() {
             }
         };
 
+        log_event(
+            "INFO",
+            &format!("settings: window built at {}ms", started.elapsed().as_millis()),
+        );
+        let _ = window_handle.update(cx, |_, window, _| {
+            window.on_next_frame(move |_, _| {
+                log_event(
+                    "INFO",
+                    &format!(
+                        "settings: first frame at {}ms",
+                        started.elapsed().as_millis()
+                    ),
+                );
+            });
+        });
+
         #[cfg(windows)]
         {
             let hwnd = window_handle
@@ -187,18 +216,27 @@ fn main() {
                         );
                     }
                 }
+                // GPUI shows the window on its first frame, so polling beats a fixed retry sleep.
+                let deadline = Instant::now() + std::time::Duration::from_secs(4);
+                let mut polls = 0u32;
+                let mut activations = 0u32;
+                let mut activated = false;
                 let mut shown = false;
-                for attempt in 0..3 {
-                    let _resized = cx.update(|app| {
-                        window_handle
-                            .update(app, |_, window, _| window.resize(initial_size))
-                            .is_ok()
-                    });
-                    let activated = cx.update(|app| {
-                        window_handle
-                            .update(app, |_, window, _| window.activate_window())
-                            .is_ok()
-                    });
+                loop {
+                    polls += 1;
+                    if polls == 1 || polls.is_multiple_of(4) {
+                        activations += 1;
+                        let _ = cx.update(|app| {
+                            window_handle
+                                .update(app, |_, window, _| window.resize(initial_size))
+                                .is_ok()
+                        });
+                        activated |= cx.update(|app| {
+                            window_handle
+                                .update(app, |_, window, _| window.activate_window())
+                                .is_ok()
+                        });
+                    }
                     let visible = hwnd.is_some_and(window_is_visible);
                     let active = cx.update(|app| {
                         window_handle
@@ -210,22 +248,26 @@ fn main() {
                         log_event(
                             "INFO",
                             &format!(
-                                "settings: window shown after hidden placement (attempt {}, visible={visible}, active={active})",
-                                attempt + 1
+                                "settings: window shown after hidden placement (attempt {activations}, polls {polls}, visible={visible}, active={active}, elapsed={}ms)",
+                                started.elapsed().as_millis()
                             ),
                         );
                         break;
                     }
-                    if attempt < 2 {
-                        cx.background_executor()
-                            .timer(std::time::Duration::from_millis(700))
-                            .await;
+                    if Instant::now() >= deadline {
+                        break;
                     }
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(30))
+                        .await;
                 }
                 if !shown {
                     log_event(
                         "WARN",
-                        "settings: window remained hidden after activation retries; exiting so the next click can retry",
+                        &format!(
+                            "settings: window remained hidden after {}ms (activation attempts {activations}); exiting so the next click can retry",
+                            started.elapsed().as_millis()
+                        ),
                     );
                     if hwnd.is_some() {
                         cx.update(|app| app.quit());
