@@ -153,6 +153,38 @@ fn quarantine_corrupt_db(path: &Path) -> std::io::Result<Option<PathBuf>> {
     Ok(main_moved.then_some(backup))
 }
 
+fn quarantine_and_log(path: &Path, log: &LogFn, error_logged: &mut bool) -> bool {
+    match quarantine_corrupt_db(path) {
+        Ok(Some(backup)) => {
+            log(
+                "WARN",
+                &format!(
+                    "history store was corrupt; moved to {} and recreating",
+                    backup.display()
+                ),
+            );
+            true
+        }
+        Ok(None) => {
+            log(
+                "WARN",
+                "history store was corrupt; no database file to move",
+            );
+            true
+        }
+        Err(e) => {
+            if !*error_logged {
+                *error_logged = true;
+                log(
+                    "WARN",
+                    &format!("history store is corrupt but could not be moved aside: {e}"),
+                );
+            }
+            false
+        }
+    }
+}
+
 fn open_store(path: &Path, log: &LogFn, error_logged: &mut bool) -> Option<Store> {
     match Store::open(path) {
         Ok(opened) => {
@@ -252,31 +284,7 @@ fn run(rx: Receiver<HistorySample>, log: LogFn, path: PathBuf) {
         if store.is_none() && retry_at.is_none_or(|at| now >= at) {
             let mut can_open = true;
             if quarantine_next {
-                match quarantine_corrupt_db(&path) {
-                    Ok(Some(backup)) => log(
-                        "WARN",
-                        &format!(
-                            "history store was corrupt; moved to {} and recreating",
-                            backup.display()
-                        ),
-                    ),
-                    Ok(None) => log(
-                        "WARN",
-                        "history store was corrupt; no database file to move",
-                    ),
-                    Err(e) => {
-                        if !open_error_logged {
-                            open_error_logged = true;
-                            log(
-                                "WARN",
-                                &format!(
-                                    "history store is corrupt but could not be moved aside: {e}"
-                                ),
-                            );
-                        }
-                        can_open = false;
-                    }
-                }
+                can_open = quarantine_and_log(&path, &log, &mut open_error_logged);
                 quarantine_next = false;
             }
             if can_open {
@@ -351,6 +359,17 @@ fn run(rx: Receiver<HistorySample>, log: LogFn, path: PathBuf) {
             store = None;
             write_failures = 0;
             retry_at = Some(Instant::now() + OPEN_RETRY_COOLDOWN);
+            if quarantine_next {
+                // Corruption recovers at once; the generic cooldown would drop every sample until it expires.
+                quarantine_next = false;
+                if quarantine_and_log(&path, &log, &mut open_error_logged) {
+                    store = open_store(&path, &log, &mut open_error_logged);
+                    if store.is_some() {
+                        write_error_logged = false;
+                        retry_at = None;
+                    }
+                }
+            }
         }
     }
 }
@@ -369,6 +388,71 @@ mod tests {
             "sysvitals-history-{tag}-{}-{nanos}",
             std::process::id()
         ))
+    }
+
+    fn capture_log() -> (LogFn, Arc<std::sync::Mutex<Vec<String>>>) {
+        let logs: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = logs.clone();
+        let log: LogFn = Arc::new(move |level: &str, message: &str| {
+            sink.lock().unwrap().push(format!("{level} {message}"));
+        });
+        (log, logs)
+    }
+
+    #[test]
+    fn quarantine_helper_moves_the_database_then_reports_nothing_to_move() {
+        let dir = temp_history_path("helper-move");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("history.db");
+        fs::write(&path, b"not a database").unwrap();
+        let (log, logs) = capture_log();
+        let mut error_logged = false;
+
+        assert!(quarantine_and_log(&path, &log, &mut error_logged));
+        assert!(!path.exists());
+        assert!(quarantine_and_log(&path, &log, &mut error_logged));
+
+        let logged = logs.lock().unwrap();
+        assert_eq!(logged.len(), 2);
+        assert!(logged[0].contains("moved to"));
+        assert!(logged[1].contains("no database file to move"));
+        assert!(!error_logged);
+        drop(logged);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_blocked_quarantine_logs_once_and_keeps_the_original() {
+        let dir = temp_history_path("helper-blocked");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("history.db");
+        fs::write(&path, b"not a database").unwrap();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        for offset in 0..3 {
+            let blocked = dir.join(format!(
+                "history.db.corrupt-{}-{}",
+                stamp + offset,
+                std::process::id()
+            ));
+            fs::create_dir_all(&blocked).unwrap();
+            fs::write(blocked.join("occupied"), b"x").unwrap();
+        }
+        let (log, logs) = capture_log();
+        let mut error_logged = false;
+
+        assert!(!quarantine_and_log(&path, &log, &mut error_logged));
+        assert!(!quarantine_and_log(&path, &log, &mut error_logged));
+        assert!(path.exists(), "an unmovable database must stay in place");
+
+        let logged = logs.lock().unwrap();
+        assert_eq!(logged.len(), 1, "a blocked move is logged once");
+        assert!(logged[0].contains("could not be moved aside"));
+        assert!(error_logged);
+        drop(logged);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -420,13 +504,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("history.db");
         fs::write(&path, b"not a database").unwrap();
-        let logs: Arc<std::sync::Mutex<Vec<String>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let log_for_test: LogFn = {
-            let logs = logs.clone();
-            Arc::new(move |level: &str, message: &str| {
-                logs.lock().unwrap().push(format!("{level} {message}"));
-            })
-        };
+        let (log_for_test, logs) = capture_log();
 
         let writer = HistoryWriter::spawn_at(log_for_test, path.clone()).unwrap();
         assert!(writer.record(1_700_000_000, 10.0, 20.0, 30));
