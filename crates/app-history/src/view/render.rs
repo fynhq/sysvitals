@@ -2,6 +2,7 @@
 
 use super::*;
 
+use gpui_kit::base::plot::label::{PlotLabel, Text as PlotText};
 use gpui_kit::base::{Sequence, Transition};
 use sysvitals_core::format::format_percent;
 

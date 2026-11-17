@@ -96,6 +96,9 @@ fn main() {
         sysvitals_panel::log_first_frame(window_handle, cx, "history", started);
         #[cfg(windows)]
         cx.spawn(async move |cx| {
+            let Some(window_handle) = window_handle.downcast::<HistoryView>() else {
+                return;
+            };
             let mut activated = false;
             for _ in 0..3 {
                 let _ = cx.update(|app| {
