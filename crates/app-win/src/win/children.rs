@@ -1,14 +1,53 @@
-//! Child process management for settings, history, and panels.
+//! Child process management for settings and the one-shot history popup.
 
 use super::*;
 use std::os::windows::process::CommandExt;
 use std::process::{Command, Stdio};
+use std::sync::{Mutex, MutexGuard};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ProcessState {
     Alive,
     Exited,
     Failed,
+}
+
+struct Child {
+    handle: Option<isize>,
+    pid: u32,
+    monitor: i64,
+    launching: bool,
+    shown: bool,
+    started_at: Option<Instant>,
+}
+
+impl Child {
+    const fn new() -> Self {
+        Self {
+            handle: None,
+            pid: 0,
+            monitor: 0,
+            launching: false,
+            shown: false,
+            started_at: None,
+        }
+    }
+
+    fn take(&mut self) -> Option<isize> {
+        let handle = self.handle.take();
+        self.pid = 0;
+        self.monitor = 0;
+        self.shown = false;
+        self.started_at = None;
+        handle
+    }
+}
+
+static SETTINGS: Mutex<Child> = Mutex::new(Child::new());
+static HISTORY: Mutex<Child> = Mutex::new(Child::new());
+
+fn lock(slot: &'static Mutex<Child>) -> MutexGuard<'static, Child> {
+    slot.lock().unwrap_or_else(|error| error.into_inner())
 }
 
 unsafe fn process_state(handle: HANDLE) -> ProcessState {
@@ -19,37 +58,36 @@ unsafe fn process_state(handle: HANDLE) -> ProcessState {
     }
 }
 
-pub(crate) fn settings_child_alive() -> bool {
-    let mut slot = SETTINGS_PROCESS.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(raw) = *slot else {
+fn child_alive(child: &mut Child, label: &str) -> bool {
+    let Some(raw) = child.handle else {
         return false;
     };
     let handle = HANDLE(raw as *mut std::ffi::c_void);
     if handle.is_invalid() {
-        *slot = None;
+        child.take();
         return false;
     }
     match unsafe { process_state(handle) } {
         ProcessState::Alive => true,
         ProcessState::Exited => {
             let _ = unsafe { CloseHandle(handle) };
-            *slot = None;
+            child.take();
             false
         }
         ProcessState::Failed => {
             let _ = unsafe { CloseHandle(handle) };
-            *slot = None;
-            log_event("WARN", "settings process wait failed; handle dropped");
+            child.take();
+            log_event(
+                "WARN",
+                &format!("{label} process wait failed; handle dropped"),
+            );
             false
         }
     }
 }
 
-pub(crate) fn terminate_settings(wait_for_exit: bool) -> bool {
-    let raw = {
-        let mut slot = SETTINGS_PROCESS.lock().unwrap_or_else(|e| e.into_inner());
-        slot.take()
-    };
+fn terminate(slot: &'static Mutex<Child>, wait_for_exit: bool, label: &str) -> bool {
+    let raw = lock(slot).take();
     let Some(raw) = raw else {
         return false;
     };
@@ -65,7 +103,10 @@ pub(crate) fn terminate_settings(wait_for_exit: bool) -> bool {
         ProcessState::Alive => {}
         ProcessState::Failed => {
             let _ = unsafe { CloseHandle(handle) };
-            log_event("WARN", "settings process wait failed; handle dropped");
+            log_event(
+                "WARN",
+                &format!("{label} process wait failed; handle dropped"),
+            );
             return false;
         }
     }
@@ -73,44 +114,22 @@ pub(crate) fn terminate_settings(wait_for_exit: bool) -> bool {
     if wait_for_exit {
         let wait = unsafe { WaitForSingleObject(handle, 2_000) };
         if wait != WAIT_OBJECT_0 {
-            log_event("WARN", "settings window did not exit within 2s");
+            log_event("WARN", &format!("{label} window did not exit within 2s"));
         }
     }
     let _ = unsafe { CloseHandle(handle) };
-    log_event("INFO", "settings window process closed by indicator");
-    true
-}
-
-pub(crate) fn history_terminate() -> bool {
-    let mut slot = HISTORY_PROCESS.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(raw) = slot.take() else {
-        return false;
-    };
-    let handle = HANDLE(raw as *mut std::ffi::c_void);
-    if handle.is_invalid() {
-        return false;
-    }
-    match unsafe { process_state(handle) } {
-        ProcessState::Alive => {}
-        ProcessState::Exited => {
-            let _ = unsafe { CloseHandle(handle) };
-            return false;
-        }
-        ProcessState::Failed => {
-            log_event("WARN", "history process wait failed; handle dropped");
-            let _ = unsafe { CloseHandle(handle) };
-            return false;
-        }
-    }
-    let _ = unsafe { TerminateProcess(handle, 0) };
-    let _ = unsafe { CloseHandle(handle) };
-    log_event("INFO", "history process closed by indicator");
+    log_event("INFO", &format!("{label} process closed by indicator"));
     true
 }
 
 pub(crate) fn close_children() {
-    let _ = history_terminate();
-    let _ = terminate_settings(false);
+    let _ = terminate(&HISTORY, false, "history");
+    let _ = terminate(&SETTINGS, false, "settings");
+}
+
+pub(crate) fn forget_child_monitors() {
+    lock(&SETTINGS).monitor = 0;
+    lock(&HISTORY).monitor = 0;
 }
 
 pub(crate) unsafe fn init_child_job() {
@@ -191,57 +210,68 @@ pub(crate) fn spawn_process(
     }
 }
 
-pub(crate) fn launch_settings(hwnd: HWND) {
+fn anchor_args(hwnd: HWND, with_monitor: bool) -> String {
     let mut args = format!("--parent-pid {}", unsafe { GetCurrentProcessId() });
     if let Some(anchor) = window_anchor_logical(hwnd) {
         args.push_str(&format!(
             " --anchor {} {} {} {}",
             anchor[0], anchor[1], anchor[2], anchor[3]
         ));
-        let monitor = window_monitor_id(hwnd);
-        if monitor != 0 {
-            args.push_str(&format!(" --anchor-monitor {monitor}"));
+        if with_monitor {
+            let monitor = window_monitor_id(hwnd);
+            if monitor != 0 {
+                args.push_str(&format!(" --anchor-monitor {monitor}"));
+            }
         }
     }
-    let monitor = window_monitor_id(hwnd) as isize;
-    let alive = settings_child_alive();
-    if alive && SETTINGS_MONITOR.load(Ordering::Relaxed) == monitor {
-        log_event("INFO", "settings launch skipped: already on this monitor");
-        return;
-    }
-    if SETTINGS_LAUNCHING.swap(true, Ordering::SeqCst) {
-        log_event(
-            "INFO",
-            "settings launch skipped: another launch is in flight",
-        );
-        return;
-    }
-    if alive {
-        log_event("INFO", "settings: moving window to the clicked monitor");
+    args
+}
+
+#[allow(clippy::too_many_arguments)]
+fn spawn_child(
+    slot: &'static Mutex<Child>,
+    label: &'static str,
+    exe_name: &'static str,
+    args: String,
+    monitor: i64,
+    ready_msg: u32,
+    replace: bool,
+) -> bool {
+    {
+        let mut child = lock(slot);
+        if child.launching {
+            log_event(
+                "INFO",
+                &format!("{label} launch skipped: another launch is in flight"),
+            );
+            return false;
+        }
+        child.launching = true;
     }
     let Some(dir) = current_exe_dir() else {
-        SETTINGS_LAUNCHING.store(false, Ordering::SeqCst);
-        log_event("WARN", "launch_settings: cannot determine exe directory");
-        return;
+        lock(slot).launching = false;
+        log_event(
+            "WARN",
+            &format!("{label} launch: cannot determine exe directory"),
+        );
+        return false;
     };
-    let exe_path = format!("{dir}\\SysVitalsSettings.exe");
+    let exe_path = format!("{dir}\\{exe_name}");
     if !std::path::Path::new(&exe_path).exists() {
-        SETTINGS_LAUNCHING.store(false, Ordering::SeqCst);
-        log_event("WARN", &format!("launch_settings: not found: {exe_path}"));
-        return;
+        lock(slot).launching = false;
+        log_event("WARN", &format!("{label} launch: not found: {exe_path}"));
+        return false;
     }
     log_event(
         "INFO",
-        &format!("launching SysVitalsSettings.exe (replace={alive}) {args}"),
+        &format!("launching {exe_name} (replace={replace}) {args}"),
     );
-    settings_wait_cursor_begin();
     let sentinel_raw = sentinel_hwnd().0 as isize;
-    let replace = alive;
-    let spawn = std::thread::Builder::new()
-        .name("sysvitals-settings".to_string())
+    let spawned = std::thread::Builder::new()
+        .name(format!("sysvitals-{label}"))
         .spawn(move || {
             if replace {
-                let _ = terminate_settings(true);
+                let _ = terminate(slot, true, label);
             }
             let started = Instant::now();
             match spawn_process(&exe_path, &dir, Some(&args)) {
@@ -250,212 +280,132 @@ pub(crate) fn launch_settings(hwnd: HWND) {
                     if QUITTING.load(Ordering::Relaxed) {
                         let _ = unsafe { TerminateProcess(handle, 0) };
                         let _ = unsafe { CloseHandle(handle) };
-                        log_event("INFO", "settings launch cancelled by quit");
+                        log_event("INFO", &format!("{label} launch cancelled by quit"));
                     } else {
-                        set_settings_pid(handle);
-                        *SETTINGS_PROCESS.lock().unwrap_or_else(|e| e.into_inner()) =
-                            Some(handle.0 as isize);
-                        SETTINGS_MONITOR.store(monitor, Ordering::Relaxed);
+                        let pid = unsafe { GetProcessId(handle) };
+                        let mut child = lock(slot);
+                        child.handle = Some(handle.0 as isize);
+                        child.pid = pid;
+                        child.monitor = monitor;
+                        child.shown = false;
+                        child.started_at = Some(Instant::now());
+                        child.launching = false;
+                        drop(child);
                         log_event(
                             "INFO",
-                            &format!(
-                                "launched SysVitalsSettings.exe in {}ms",
-                                started.elapsed().as_millis()
-                            ),
+                            &format!("launched {exe_name} in {}ms", started.elapsed().as_millis()),
                         );
                     }
                 }
                 Err(e) => {
-                    log_event(
-                        "WARN",
-                        &format!("launch_settings: CreateProcessW failed: {e}"),
-                    );
+                    log_event("WARN", &format!("{label} launch failed: {e}"));
                 }
             }
-            SETTINGS_LAUNCHING.store(false, Ordering::SeqCst);
+            lock(slot).launching = false;
             if sentinel_raw != 0 {
                 let _ = unsafe {
                     PostMessageW(
                         Some(HWND(sentinel_raw as *mut std::ffi::c_void)),
-                        WM_APP_SETTINGS_READY,
+                        ready_msg,
                         WPARAM(0),
                         LPARAM(0),
                     )
                 };
             }
         });
-    if spawn.is_err() {
-        SETTINGS_LAUNCHING.store(false, Ordering::SeqCst);
+    if spawned.is_err() {
+        lock(slot).launching = false;
+        log_event("WARN", &format!("{label} launch thread failed"));
+        return false;
+    }
+    true
+}
+
+pub(crate) fn launch_settings(hwnd: HWND) {
+    let monitor = window_monitor_id(hwnd);
+    let replace = {
+        let mut child = lock(&SETTINGS);
+        let alive = child_alive(&mut child, "settings");
+        if alive && child.monitor == monitor {
+            log_event("INFO", "settings launch skipped: already on this monitor");
+            return;
+        }
+        alive
+    };
+    settings_wait_cursor_begin();
+    if !spawn_child(
+        &SETTINGS,
+        "settings",
+        "SysVitalsSettings.exe",
+        anchor_args(hwnd, true),
+        monitor,
+        WM_APP_SETTINGS_READY,
+        replace,
+    ) {
         wait_cursor_clear();
-        log_event("WARN", "launch_settings: worker thread spawn failed");
     }
 }
 
-pub(crate) fn history_busy() -> bool {
-    history_child_alive() || HISTORY_LAUNCHING.load(Ordering::SeqCst)
-}
-
-static HISTORY_LAST_EXIT_CODE: AtomicU32 = AtomicU32::new(u32::MAX);
-static HISTORY_RELAUNCHED_GENERATION: AtomicU32 = AtomicU32::new(0);
-
-pub(crate) fn history_child_alive() -> bool {
-    let mut slot = HISTORY_PROCESS.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(raw) = *slot else {
-        return false;
-    };
-    let handle = HANDLE(raw as *mut std::ffi::c_void);
-    if handle.is_invalid() {
-        *slot = None;
-        return false;
-    }
-    match unsafe { process_state(handle) } {
-        ProcessState::Alive => true,
-        ProcessState::Exited => {
-            let mut code = u32::MAX;
-            let _ = unsafe { GetExitCodeProcess(handle, &mut code) };
-            HISTORY_LAST_EXIT_CODE.store(code, Ordering::Relaxed);
-            if !QUITTING.load(Ordering::Relaxed) {
-                if code == 0 {
-                    log_event(
-                        "INFO",
-                        "history resident exited after idling; it will be relaunched on demand",
-                    );
-                } else {
-                    log_event(
-                        "WARN",
-                        &format!("history resident exited unexpectedly (exit code {code})"),
-                    );
-                }
-            }
-            let _ = unsafe { CloseHandle(handle) };
-            *slot = None;
-            false
-        }
-        ProcessState::Failed => {
-            log_event("WARN", "history process wait failed; handle dropped");
-            let _ = unsafe { CloseHandle(handle) };
-            *slot = None;
-            false
-        }
+fn launch_history(hwnd: HWND, replace: bool) {
+    let monitor = window_monitor_id(hwnd);
+    history_wait_cursor_begin();
+    if !spawn_child(
+        &HISTORY,
+        "history",
+        "SysVitalsHistory.exe",
+        anchor_args(hwnd, true),
+        monitor,
+        WM_APP_HISTORY_READY,
+        replace,
+    ) {
+        wait_cursor_clear();
     }
 }
 
-static HISTORY_STATE_WARNED: AtomicBool = AtomicBool::new(false);
-
-fn warn_history_state(message: &str) {
-    if !HISTORY_STATE_WARNED.swap(true, Ordering::Relaxed) {
-        log_event("WARN", message);
-    }
-}
-
-fn history_state_security() -> Option<(
-    windows::Win32::Security::SECURITY_ATTRIBUTES,
-    windows::Win32::Security::PSECURITY_DESCRIPTOR,
-)> {
-    use windows::Win32::Security::Authorization::{
-        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
-    };
-    use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
-    let sddl = utf16("D:(A;;GA;;;OW)");
-    let mut descriptor = PSECURITY_DESCRIPTOR(std::ptr::null_mut());
-    let converted = unsafe {
-        ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            windows::core::PCWSTR(sddl.as_ptr()),
-            SDDL_REVISION_1,
-            &mut descriptor,
-            None,
+pub(crate) fn toggle_history(hwnd: HWND) {
+    let monitor = window_monitor_id(hwnd);
+    let (pid, launching, shown, started_at, same_monitor) = {
+        let mut child = lock(&HISTORY);
+        let alive = child_alive(&mut child, "history");
+        (
+            if alive { child.pid } else { 0 },
+            child.launching,
+            child.shown,
+            child.started_at,
+            child.monitor == monitor,
         )
     };
-    if converted.is_err() {
-        warn_history_state("history state security descriptor failed; using the default DACL");
-        return None;
+    if launching {
+        log_event(
+            "INFO",
+            "history launch skipped: the popup is still starting",
+        );
+        return;
     }
-    Some((
-        SECURITY_ATTRIBUTES {
-            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
-            lpSecurityDescriptor: descriptor.0,
-            bInheritHandle: windows::core::BOOL(0),
-        },
-        descriptor,
-    ))
-}
-
-pub(crate) fn history_state_ptr() -> Option<*mut sysvitals_core::HistoryState> {
-    HISTORY_STATE.with(|slot| {
-        if slot.borrow().is_none() {
-            let name = utf16(sysvitals_core::HISTORY_STATE_MAP);
-            let size = std::mem::size_of::<sysvitals_core::HistoryState>();
-            let security = history_state_security();
-            let mapping_result = unsafe {
-                CreateFileMappingW(
-                    INVALID_HANDLE_VALUE,
-                    security.as_ref().map(|(sa, _)| sa as *const _),
-                    PAGE_READWRITE,
-                    0,
-                    size as u32,
-                    windows::core::PCWSTR(name.as_ptr()),
-                )
-            };
-            let already_exists = unsafe { windows::Win32::Foundation::GetLastError() }
-                == windows::Win32::Foundation::ERROR_ALREADY_EXISTS;
-            if let Some((_, descriptor)) = security {
-                unsafe {
-                    let _ = windows::Win32::Foundation::LocalFree(Some(
-                        windows::Win32::Foundation::HLOCAL(descriptor.0),
-                    ));
-                }
-            }
-            let mapping = match mapping_result {
-                Ok(mapping) => mapping,
-                Err(e) => {
-                    warn_history_state(&format!("history state mapping failed: {e}"));
-                    return None;
-                }
-            };
-            let view = unsafe { MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, size) };
-            if view.Value.is_null() {
-                let _ = unsafe { CloseHandle(mapping) };
-                warn_history_state("history state map view failed");
-                return None;
-            }
-            let ptr = view.Value as *mut sysvitals_core::HistoryState;
-            let usable = already_exists
-                && unsafe {
-                    let header = std::ptr::read_volatile(ptr);
-                    header.magic == sysvitals_core::HISTORY_STATE_MAGIC
-                        && header.version == sysvitals_core::HISTORY_STATE_VERSION
-                };
-            if !usable {
-                unsafe { std::ptr::write_volatile(ptr, sysvitals_core::HistoryState::new()) };
-            }
-            HISTORY_STATE_WARNED.store(false, Ordering::Relaxed);
-            *slot.borrow_mut() = Some((ptr, mapping));
+    let visible = pid != 0 && visible_window_of_pid(pid);
+    if visible {
+        if same_monitor {
+            let _ = terminate(&HISTORY, false, "history");
+        } else {
+            log_event(
+                "INFO",
+                "history: moving popup to the clicked indicator's screen",
+            );
+            launch_history(hwnd, true);
         }
-        slot.borrow().as_ref().map(|(ptr, _)| *ptr)
-    })
-}
-
-pub(crate) fn history_snapshot() -> Option<sysvitals_core::HistoryState> {
-    let ptr = history_state_ptr()?;
-    Some(unsafe { sysvitals_core::HistoryState::read_consistent(ptr) })
-}
-
-pub(crate) fn history_close_request() {
-    let Some(ptr) = history_state_ptr() else {
         return;
-    };
-    unsafe {
-        sysvitals_core::HistoryState::write_request(ptr, false, None, 0);
     }
-}
-
-pub(crate) fn history_mark_stopped() {
-    let Some(ptr) = history_state_ptr() else {
-        return;
-    };
-    unsafe {
-        sysvitals_core::HistoryState::clear(ptr);
+    if pid != 0 {
+        if !shown && started_at.is_some_and(|at| at.elapsed() < Duration::from_secs(3)) {
+            log_event(
+                "INFO",
+                "history: popup is still starting; ignoring the click",
+            );
+            return;
+        }
+        let _ = terminate(&HISTORY, false, "history");
     }
+    launch_history(hwnd, false);
 }
 
 const WAIT_NONE: u32 = 0;
@@ -465,7 +415,6 @@ const WAIT_TASKMGR: u32 = 3;
 
 static WAIT_TARGET: AtomicU32 = AtomicU32::new(WAIT_NONE);
 static WAIT_SINCE_MS: AtomicU64 = AtomicU64::new(0);
-static SETTINGS_PID: AtomicU32 = AtomicU32::new(0);
 const WAIT_CURSOR_TIMEOUT_MS: u64 = 10_000;
 
 fn now_ms() -> u64 {
@@ -488,7 +437,6 @@ pub(crate) fn history_wait_cursor_begin() {
 }
 
 pub(crate) fn settings_wait_cursor_begin() {
-    SETTINGS_PID.store(0, Ordering::Relaxed);
     wait_cursor_begin(WAIT_SETTINGS);
 }
 
@@ -544,24 +492,33 @@ pub(crate) fn wait_cursor_reconcile() {
 
 fn launch_window_visible(target: u32) -> bool {
     match target {
-        WAIT_HISTORY => {
-            let visible = history_snapshot().is_some_and(|state| state.visible != 0);
-            let failed = !history_child_alive() && !HISTORY_LAUNCHING.load(Ordering::SeqCst);
-            visible || failed
-        }
-        WAIT_SETTINGS => {
-            if SETTINGS_LAUNCHING.load(Ordering::SeqCst) {
-                return false;
-            }
-            if !settings_child_alive() {
-                return true;
-            }
-            let pid = SETTINGS_PID.load(Ordering::Relaxed);
-            pid != 0 && visible_window_of_pid(pid)
-        }
+        WAIT_HISTORY => child_window_visible(&HISTORY, "history"),
+        WAIT_SETTINGS => child_window_visible(&SETTINGS, "settings"),
         WAIT_TASKMGR => visible_task_manager(),
         _ => true,
     }
+}
+
+fn child_window_visible(slot: &'static Mutex<Child>, label: &str) -> bool {
+    let (pid, launching) = {
+        let mut child = lock(slot);
+        let alive = child_alive(&mut child, label);
+        (if alive { child.pid } else { 0 }, child.launching)
+    };
+    if launching {
+        return false;
+    }
+    if pid == 0 {
+        return true;
+    }
+    let visible = visible_window_of_pid(pid);
+    if visible {
+        let mut child = lock(slot);
+        if child.pid == pid {
+            child.shown = true;
+        }
+    }
+    visible
 }
 
 fn visible_window_of_pid(pid: u32) -> bool {
@@ -594,10 +551,6 @@ fn visible_task_manager() -> bool {
     }
 }
 
-pub(crate) fn set_settings_pid(handle: HANDLE) {
-    SETTINGS_PID.store(unsafe { GetProcessId(handle) }, Ordering::Relaxed);
-}
-
 pub(crate) fn window_monitor_id(hwnd: HWND) -> i64 {
     if let Some(ov) = overlay_by_hwnd(hwnd) {
         return ov.monitor as i64;
@@ -618,126 +571,6 @@ pub(crate) fn window_anchor_logical(hwnd: HWND) -> Option<[f32; 4]> {
         rect.right as f32 / scale,
         rect.bottom as f32 / scale,
     ])
-}
-
-pub(crate) fn history_open_request(hwnd: HWND) -> bool {
-    let Some(ptr) = history_state_ptr() else {
-        return false;
-    };
-    let Some(anchor) = window_anchor_logical(hwnd) else {
-        return false;
-    };
-    unsafe {
-        sysvitals_core::HistoryState::write_request(
-            ptr,
-            true,
-            Some(anchor),
-            window_monitor_id(hwnd),
-        );
-    }
-    true
-}
-
-pub(crate) fn ensure_history_resident() {
-    start_history_resident(true);
-}
-
-fn start_history_resident(clear_request: bool) {
-    if history_busy() {
-        return;
-    }
-    if history_state_ptr().is_none() {
-        log_event("WARN", "history resident unavailable: state mapping failed");
-        return;
-    }
-    if clear_request {
-        history_mark_stopped();
-    }
-    let Some(dir) = current_exe_dir() else {
-        log_event("WARN", "history launch: cannot determine exe directory");
-        return;
-    };
-    let exe_path = format!("{dir}\\SysVitalsHistory.exe");
-    if !std::path::Path::new(&exe_path).exists() {
-        log_event("WARN", &format!("history launch: not found: {exe_path}"));
-        return;
-    }
-    let parent_pid = unsafe { GetCurrentProcessId() };
-    let args = format!("--resident --parent-pid {parent_pid}");
-    log_event("INFO", &format!("launching SysVitalsHistory.exe {args}"));
-    HISTORY_LAUNCHING.store(true, Ordering::SeqCst);
-    let sentinel_raw = sentinel_hwnd().0 as isize;
-    let spawn = std::thread::Builder::new()
-        .name("sysvitals-history-launch".to_string())
-        .spawn(move || {
-            let started = Instant::now();
-            match spawn_process(&exe_path, &dir, Some(&args)) {
-                Ok(handle) => {
-                    unsafe { assign_to_child_job(handle) };
-                    if QUITTING.load(Ordering::Relaxed) {
-                        let _ = unsafe { TerminateProcess(handle, 0) };
-                        let _ = unsafe { CloseHandle(handle) };
-                        log_event("INFO", "history launch cancelled by quit");
-                    } else {
-                        *HISTORY_PROCESS.lock().unwrap_or_else(|e| e.into_inner()) =
-                            Some(handle.0 as isize);
-                        log_event(
-                            "INFO",
-                            &format!(
-                                "launched SysVitalsHistory.exe in {}ms",
-                                started.elapsed().as_millis()
-                            ),
-                        );
-                    }
-                }
-                Err(e) => {
-                    log_event("WARN", &format!("history launch failed: {e}"));
-                }
-            }
-            HISTORY_LAUNCHING.store(false, Ordering::SeqCst);
-            let _ = unsafe {
-                PostMessageW(
-                    Some(HWND(sentinel_raw as *mut std::ffi::c_void)),
-                    WM_APP_HISTORY_READY,
-                    WPARAM(0),
-                    LPARAM(0),
-                )
-            };
-        });
-    if let Err(e) = spawn {
-        HISTORY_LAUNCHING.store(false, Ordering::SeqCst);
-        log_event("WARN", &format!("history launch thread failed: {e}"));
-    }
-}
-
-// Reap a dead resident and reconcile its last request; a pending click must relaunch instead of being dropped.
-pub(crate) fn sync_history_state() {
-    wait_cursor_reconcile();
-    let alive = history_child_alive();
-    if alive || HISTORY_LAUNCHING.load(Ordering::SeqCst) {
-        return;
-    }
-    let Some(state) = history_snapshot() else {
-        return;
-    };
-    if state.desired_open != 0 {
-        let raced_exit =
-            state.click_raced_idle_exit(HISTORY_LAST_EXIT_CODE.load(Ordering::Relaxed) == 0);
-        if raced_exit && HISTORY_RELAUNCHED_GENERATION.load(Ordering::Relaxed) != state.generation {
-            HISTORY_RELAUNCHED_GENERATION.store(state.generation, Ordering::Relaxed);
-            log_event(
-                "INFO",
-                "history: click raced the idle exit; relaunching with the pending request",
-            );
-            start_history_resident(false);
-            return;
-        }
-        history_mark_stopped();
-        return;
-    }
-    if state.visible != 0 {
-        history_mark_stopped();
-    }
 }
 
 fn current_exe_path() -> Option<String> {

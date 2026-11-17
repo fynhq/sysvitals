@@ -17,15 +17,8 @@ sysvitals-panel = { path = "../panel-support" }
 gpui-kit = { workspace = true }
 arboard = "=3.7.0"
 
-# Windows-only: the popup reads the system accent color (DWM) so its primary
-# button style matches the OS theme color, probes the OS build number
-# (RtlGetVersion) plus the transparency-effects preference to pick a backdrop,
-# and moves its own hidden window onto the target display before activation.
-[target.'cfg(windows)'.dependencies]
-windows = { workspace = true }
-
-# macOS-only dependencies for the GPUI popup are inherited through
-# `sysvitals-panel`; this binary has no direct macOS platform calls.
+# Platform-specific theme, DPI, and parent-watch dependencies are inherited
+# through `sysvitals-panel`; this binary has no direct platform calls.
 
 [build-dependencies]
 sysvitals-build = { path = "../build-support" }

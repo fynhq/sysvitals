@@ -75,13 +75,6 @@ impl ConfigWatcher {
         }
     }
 
-    pub fn seed_now(&mut self) {
-        self.last_mtime = self.path.as_deref().map(config_mtime_nanos).unwrap_or(0);
-        self.error_mtime = 0;
-        self.failure_streak = 0;
-        self.failure_retry_at = None;
-    }
-
     pub fn poll(&mut self) -> ConfigPoll {
         let Some(path) = self.path.as_deref() else {
             return ConfigPoll::Unchanged;
@@ -312,15 +305,5 @@ mod tests {
             failure_retry_at: None,
         };
         assert!(matches!(watcher.poll_mtime(10), ConfigPoll::Unchanged));
-    }
-
-    #[test]
-    fn seed_now_absorbs_the_current_mtime() {
-        let path = temp_path("seed");
-        fs::write(&path, valid_toml()).unwrap();
-        let mut watcher = make_watcher(&path);
-        watcher.seed_now();
-        assert!(matches!(watcher.poll(), ConfigPoll::Unchanged));
-        let _ = fs::remove_file(&path);
     }
 }

@@ -2,33 +2,6 @@
 
 use super::*;
 
-pub(crate) fn handle_history_click(hwnd: HWND) {
-    if !history_child_alive() {
-        history_mark_stopped();
-        HISTORY_ANCHOR_MONITOR.store(0, Ordering::Relaxed);
-    }
-    let visible = history_snapshot().is_some_and(|state| state.visible != 0);
-    let this_monitor = overlay_by_hwnd(hwnd).map(|o| o.monitor).unwrap_or(0);
-    if !visible {
-        ensure_history_resident();
-        if history_open_request(hwnd) {
-            HISTORY_ANCHOR_MONITOR.store(this_monitor, Ordering::Relaxed);
-            history_wait_cursor_begin();
-        }
-    } else if HISTORY_ANCHOR_MONITOR.load(Ordering::Relaxed) == this_monitor {
-        history_close_request();
-        HISTORY_ANCHOR_MONITOR.store(0, Ordering::Relaxed);
-    } else {
-        log_event(
-            "INFO",
-            "history: moving popup to the clicked indicator's screen",
-        );
-        if history_open_request(hwnd) {
-            HISTORY_ANCHOR_MONITOR.store(this_monitor, Ordering::Relaxed);
-        }
-    }
-}
-
 fn setting_change_name(lparam: LPARAM) -> Option<String> {
     use std::ffi::c_void;
     use windows::Win32::System::Diagnostics::Debug::ReadProcessMemory;
@@ -112,7 +85,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(0)
         }
         WM_LBUTTONUP => {
-            handle_history_click(hwnd);
+            toggle_history(hwnd);
             LRESULT(0)
         }
         WM_RBUTTONUP => {
@@ -255,7 +228,7 @@ pub(crate) fn run() {
                 for (id, elapse, label) in [
                     (TIMER_MOVE, MOVE_MS, "move"),
                     (TIMER_CONFIG, CONFIG_POLL_MS, "config"),
-                    (TIMER_HISTORY, HISTORY_SYNC_MS, "history"),
+                    (TIMER_CURSOR, CURSOR_POLL_MS, "cursor"),
                     (TIMER_WATCH, WATCHDOG_MS, "watchdog"),
                 ] {
                     if SetTimer(Some(sentinel), id, elapse, None) == 0 {
@@ -318,19 +291,13 @@ unsafe extern "system" fn sentinel_wndproc(
         }
         return LRESULT(0);
     }
-    if msg == WM_APP_HISTORY_READY {
-        sync_history_state();
-        return LRESULT(0);
-    }
-    if msg == WM_APP_SETTINGS_READY {
-        let _ = settings_child_alive();
+    if msg == WM_APP_HISTORY_READY || msg == WM_APP_SETTINGS_READY {
         wait_cursor_reconcile();
         return LRESULT(0);
     }
     if msg == WM_DISPLAYCHANGE {
         log_event("INFO", "WM_DISPLAYCHANGE: display configuration changed");
-        HISTORY_ANCHOR_MONITOR.store(0, Ordering::Relaxed);
-        SETTINGS_MONITOR.store(0, Ordering::Relaxed);
+        forget_child_monitors();
         invalidate_clock_anchor();
         invalidate_ui_font();
         OVERLAYS.with(|slot| {
@@ -357,8 +324,8 @@ unsafe extern "system" fn sentinel_wndproc(
                 poll_config_change();
                 return LRESULT(0);
             }
-            TIMER_HISTORY => {
-                sync_history_state();
+            TIMER_CURSOR => {
+                wait_cursor_reconcile();
                 return LRESULT(0);
             }
             TIMER_REBIND => {

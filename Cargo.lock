@@ -196,7 +196,6 @@ dependencies = [
  "sysvitals-build",
  "sysvitals-core",
  "sysvitals-panel",
- "windows 0.62.2",
 ]
 
 [[package]]
@@ -6345,7 +6344,6 @@ dependencies = [
  "serde",
  "sysinfo 0.40.3",
  "toml 1.2.1+spec-1.1.0",
- "unicode-width",
  "windows 0.62.2",
 ]
 

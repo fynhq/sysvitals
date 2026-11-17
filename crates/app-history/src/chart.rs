@@ -16,13 +16,6 @@ pub(crate) const SERIES_DRAW: Duration = Duration::from_millis(360);
 
 pub(crate) const SERIES_REFRESH: Duration = Duration::from_millis(280);
 
-pub(crate) const ASYNC_MIN_BUCKET_SECS: i64 = 120;
-
-#[cfg(windows)]
-pub(crate) const ACTIVE_POLL_MS: u64 = 100;
-#[cfg(windows)]
-pub(crate) const IDLE_POLL_MS: u64 = 250;
-
 pub(crate) const X_TICK_COUNT: usize = 6;
 
 pub(crate) const AXIS_LABEL_SIZE: f32 = 12.0;

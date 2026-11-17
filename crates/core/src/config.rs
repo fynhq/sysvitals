@@ -25,6 +25,8 @@ pub const DEFAULT_LEFT_MARGIN_PX: u32 = 16;
 
 pub const MAX_RETENTION_DAYS: u32 = 365;
 
+pub const DEFAULT_RETENTION_DAYS: u32 = 30;
+
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -128,7 +130,9 @@ impl Default for PrefixConfig {
 
 impl Default for HistoryConfig {
     fn default() -> Self {
-        HistoryConfig { retention_days: 30 }
+        HistoryConfig {
+            retention_days: DEFAULT_RETENTION_DAYS,
+        }
     }
 }
 
@@ -159,10 +163,7 @@ impl Config {
 
         if !ALLOWED_INTERVAL_MS.contains(&self.sample.interval_ms) {
             let old = self.sample.interval_ms;
-            self.sample.interval_ms = *ALLOWED_INTERVAL_MS
-                .iter()
-                .min_by_key(|x| x.abs_diff(old))
-                .unwrap_or(&DEFAULT_INTERVAL_MS);
+            self.sample.interval_ms = snap_u64(old, &ALLOWED_INTERVAL_MS);
             issues.push(SanitizeIssue {
                 field: "sample.interval_ms",
                 message: format!(
@@ -174,7 +175,11 @@ impl Config {
 
         if self.history.retention_days == 0 || self.history.retention_days > MAX_RETENTION_DAYS {
             let old = self.history.retention_days;
-            self.history.retention_days = if old == 0 { 30 } else { MAX_RETENTION_DAYS };
+            self.history.retention_days = if old == 0 {
+                DEFAULT_RETENTION_DAYS
+            } else {
+                MAX_RETENTION_DAYS
+            };
             issues.push(SanitizeIssue {
                 field: "history.retention_days",
                 message: format!(
@@ -266,7 +271,6 @@ impl Config {
             &mut value,
             ("display", "language"),
             &["en", "zh"],
-            "en",
             "display.language",
             &mut issues,
         );
@@ -274,7 +278,6 @@ impl Config {
             &mut value,
             ("display", "theme"),
             &["auto", "light", "dark"],
-            "auto",
             "display.theme",
             &mut issues,
         );
@@ -282,7 +285,6 @@ impl Config {
             &mut value,
             ("windows", "anchor"),
             &["right", "left"],
-            "right",
             "windows.anchor",
             &mut issues,
         );
@@ -355,14 +357,23 @@ fn snap_u32(value: u32, allowed: &[u32]) -> u32 {
         .expect("allowed must be non-empty")
 }
 
+fn snap_u64(value: u64, allowed: &[u64]) -> u64 {
+    *allowed
+        .iter()
+        .min_by_key(|x| x.abs_diff(value))
+        .expect("allowed must be non-empty")
+}
+
 fn repair_enum(
     root: &mut toml::Value,
     path: (&str, &str),
     allowed: &[&str],
-    fallback: &str,
     field: &'static str,
     issues: &mut Vec<SanitizeIssue>,
 ) {
+    let Some(&fallback) = allowed.first() else {
+        return;
+    };
     let Some(table) = root.get_mut(path.0).and_then(toml::Value::as_table_mut) else {
         return;
     };

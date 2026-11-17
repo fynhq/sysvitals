@@ -39,7 +39,6 @@ pub(crate) unsafe fn launch_taskmgr() {
     }
 }
 
-#[derive(Clone)]
 pub(crate) struct MenuEntry {
     pub(crate) id: usize,
     pub(crate) label: String,
@@ -133,7 +132,7 @@ pub(crate) unsafe fn shutdown_and_quit() {
     let _ = KillTimer(Some(sentinel), TIMER_SAMPLE);
     let _ = KillTimer(Some(sentinel), TIMER_MOVE);
     let _ = KillTimer(Some(sentinel), TIMER_CONFIG);
-    let _ = KillTimer(Some(sentinel), TIMER_HISTORY);
+    let _ = KillTimer(Some(sentinel), TIMER_CURSOR);
     let _ = KillTimer(Some(sentinel), TIMER_WATCH);
     PostQuitMessage(0);
 }

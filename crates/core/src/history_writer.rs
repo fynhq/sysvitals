@@ -185,59 +185,32 @@ fn quarantine_and_log(path: &Path, log: &LogFn, error_logged: &mut bool) -> bool
     }
 }
 
+fn log_store_opened(path: &Path, store: &Store, verb: &str, log: &LogFn) {
+    let rollup = if store.rollup_ready() {
+        "ready"
+    } else {
+        "unavailable, raw-only fallback"
+    };
+    log(
+        "INFO",
+        &format!("history store {verb}: {} (rollup {rollup})", path.display()),
+    );
+}
+
 fn open_store(path: &Path, log: &LogFn, error_logged: &mut bool) -> Option<Store> {
     match Store::open(path) {
         Ok(opened) => {
-            let rollup = if opened.rollup_ready() {
-                "ready"
-            } else {
-                "unavailable, raw-only fallback"
-            };
-            log(
-                "INFO",
-                &format!("history store opened: {} (rollup {rollup})", path.display()),
-            );
+            log_store_opened(path, &opened, "opened", log);
             *error_logged = false;
             Some(opened)
         }
         Err(e) if is_corruption_error(&e) => {
-            match quarantine_corrupt_db(path) {
-                Ok(Some(backup)) => log(
-                    "WARN",
-                    &format!(
-                        "history store was corrupt; moved to {} and recreating",
-                        backup.display()
-                    ),
-                ),
-                Ok(None) => log(
-                    "WARN",
-                    "history store was corrupt; no database file to move",
-                ),
-                Err(qe) => {
-                    if !*error_logged {
-                        *error_logged = true;
-                        log(
-                            "WARN",
-                            &format!("history store is corrupt but could not be moved aside: {qe}"),
-                        );
-                    }
-                    return None;
-                }
+            if !quarantine_and_log(path, log, error_logged) {
+                return None;
             }
             match Store::open(path) {
                 Ok(opened) => {
-                    let rollup = if opened.rollup_ready() {
-                        "ready"
-                    } else {
-                        "unavailable, raw-only fallback"
-                    };
-                    log(
-                        "INFO",
-                        &format!(
-                            "history store recreated: {} (rollup {rollup})",
-                            path.display()
-                        ),
-                    );
+                    log_store_opened(path, &opened, "recreated", log);
                     *error_logged = false;
                     Some(opened)
                 }
@@ -265,6 +238,33 @@ fn open_store(path: &Path, log: &LogFn, error_logged: &mut bool) -> Option<Store
             }
             None
         }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn note_write_failure(
+    operation: &str,
+    error: &anyhow::Error,
+    write_failures: &mut u32,
+    write_error_logged: &mut bool,
+    drop_store: &mut bool,
+    quarantine_next: &mut bool,
+    log: &LogFn,
+) {
+    *write_failures = write_failures.saturating_add(1);
+    if !*write_error_logged {
+        *write_error_logged = true;
+        log("WARN", &format!("history {operation} failed: {error}"));
+    }
+    if is_corruption_error(error) {
+        *quarantine_next = true;
+        *drop_store = true;
+    } else if *write_failures >= WRITE_FAILURE_LIMIT {
+        *drop_store = true;
+        log(
+            "WARN",
+            &format!("history store dropped after repeated {operation} failures; reopening"),
+        );
     }
 }
 
@@ -310,23 +310,15 @@ fn run(rx: Receiver<HistorySample>, log: LogFn, path: PathBuf) {
                 write_failures = 0;
                 write_error_logged = false;
             }
-            Err(e) => {
-                write_failures = write_failures.saturating_add(1);
-                if !write_error_logged {
-                    write_error_logged = true;
-                    log("WARN", &format!("history insert failed: {e}"));
-                }
-                if is_corruption_error(&e) {
-                    quarantine_next = true;
-                    drop_store = true;
-                } else if write_failures >= WRITE_FAILURE_LIMIT {
-                    drop_store = true;
-                    log(
-                        "WARN",
-                        "history store dropped after repeated insert failures; reopening",
-                    );
-                }
-            }
+            Err(e) => note_write_failure(
+                "insert",
+                &e,
+                &mut write_failures,
+                &mut write_error_logged,
+                &mut drop_store,
+                &mut quarantine_next,
+                &log,
+            ),
         }
 
         if tick.is_multiple_of(300) {
@@ -335,23 +327,15 @@ fn run(rx: Receiver<HistorySample>, log: LogFn, path: PathBuf) {
                     write_failures = 0;
                     write_error_logged = false;
                 }
-                Err(e) => {
-                    write_failures = write_failures.saturating_add(1);
-                    if !write_error_logged {
-                        write_error_logged = true;
-                        log("WARN", &format!("history prune failed: {e}"));
-                    }
-                    if is_corruption_error(&e) {
-                        quarantine_next = true;
-                        drop_store = true;
-                    } else if write_failures >= WRITE_FAILURE_LIMIT {
-                        drop_store = true;
-                        log(
-                            "WARN",
-                            "history store dropped after repeated prune failures; reopening",
-                        );
-                    }
-                }
+                Err(e) => note_write_failure(
+                    "prune",
+                    &e,
+                    &mut write_failures,
+                    &mut write_error_logged,
+                    &mut drop_store,
+                    &mut quarantine_next,
+                    &log,
+                ),
             }
         }
 

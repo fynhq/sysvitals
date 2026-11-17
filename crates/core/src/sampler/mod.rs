@@ -12,8 +12,6 @@ mod net_win;
 pub use cpu::CpuSampler;
 pub use net::NetSampler;
 
-pub use cpu::STALE_GAP_SECS;
-
 use std::time::Instant;
 
 use sysinfo::{CpuRefreshKind, MemoryRefreshKind, Networks, RefreshKind, System};

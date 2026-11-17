@@ -2,6 +2,7 @@
 
 use super::*;
 
+use std::sync::Arc;
 use sysvitals_core::config_watch::ConfigWatcher;
 
 #[cfg(windows)]
@@ -9,7 +10,6 @@ use sysvitals_panel::restore_window_size_after_move;
 
 pub(crate) struct HistoryView {
     pub(crate) lang: Language,
-    pub(crate) hidden_start: bool,
     #[cfg(windows)]
     pub(crate) fixed_size: Option<gpui_kit::Size<Pixels>>,
     #[cfg(windows)]
@@ -19,8 +19,8 @@ pub(crate) struct HistoryView {
     pub(crate) data_loading: bool,
     pub(crate) query: Option<VisibleQuery>,
     pub(crate) load_seq: u64,
-    pub(crate) store: Option<Store>,
     pub(crate) data_error_logged: bool,
+    pub(crate) first_data_logged: bool,
     pub(crate) copied: bool,
     pub(crate) copy_failed: bool,
     pub(crate) copy_feedback_seq: u64,
@@ -32,8 +32,6 @@ pub(crate) struct HistoryView {
     // Keep the shortcut observer alive; dropping it silently disables Esc close and Cmd/Ctrl+C copy.
     pub(crate) _shortcuts: Option<Subscription>,
     pub(crate) last_accent: Option<u32>,
-    pub(crate) first_load: Arc<AtomicBool>,
-    pub(crate) shared: Option<Arc<HistoryShared>>,
     pub(crate) pending_draw: bool,
     pub(crate) series_fx: Option<SeriesFx>,
     pub(crate) series_gen: u64,
@@ -67,17 +65,13 @@ impl SeriesFx {
 impl HistoryView {
     pub(crate) fn new(
         lang: Language,
-        hidden_start: bool,
         fixed_size: Option<gpui_kit::Size<Pixels>>,
-        first_load: Arc<AtomicBool>,
-        shared: Option<Arc<HistoryShared>>,
         cx: &mut Context<Self>,
     ) -> Self {
         #[cfg(not(windows))]
         let _ = fixed_size;
         let mut view = Self {
             lang,
-            hidden_start,
             #[cfg(windows)]
             fixed_size,
             #[cfg(windows)]
@@ -87,8 +81,8 @@ impl HistoryView {
             data_loading: false,
             query: None,
             load_seq: 0,
-            store: None,
             data_error_logged: false,
+            first_data_logged: false,
             copied: false,
             copy_failed: false,
             copy_feedback_seq: 0,
@@ -99,8 +93,6 @@ impl HistoryView {
             _appearance: None,
             _shortcuts: None,
             last_accent: None,
-            first_load,
-            shared,
             pending_draw: true,
             series_fx: None,
             series_gen: 0,
@@ -127,9 +119,6 @@ impl HistoryView {
             return;
         }
         if self.data_loading || self.query.is_none() || self.buckets.is_empty() {
-            return;
-        }
-        if self.hidden_start && !self.ever_active {
             return;
         }
         if self.points().len() < 2 {
@@ -191,12 +180,6 @@ impl HistoryView {
         }
     }
 
-    pub(crate) fn mark_hidden(&self) {
-        if let Some(shared) = &self.shared {
-            shared.mark_hidden();
-        }
-    }
-
     // Accent-only changes do not fire the appearance observer; poll the OS accent every 500 ms and re-apply.
     pub(crate) fn start_accent_watch(&mut self, cx: &mut Context<Self>) {
         spawn_accent_watch(
@@ -213,7 +196,6 @@ impl HistoryView {
         let subscription = cx.observe_keystrokes(|view, event, window, cx| {
             let keystroke = &event.keystroke;
             if keystroke.key == "escape" {
-                view.mark_hidden();
                 window.remove_window();
                 return;
             }
@@ -261,7 +243,6 @@ impl HistoryView {
                 view.restore_popup_size(window);
                 cx.notify();
             } else if view.ever_active {
-                view.mark_hidden();
                 window.remove_window();
             }
         });
@@ -289,15 +270,11 @@ impl HistoryView {
                 .update(cx, |view: &mut HistoryView, cx| {
                     view.reload_config();
                     view.load_data(cx);
-                    view.first_load.store(true, Ordering::Release);
                     log_event(
                         "INFO",
                         &format!(
-                            "history: window created at {}ms, first data {}ms later ({} points, hidden_start={})",
-                            WINDOW_CREATED_MS.load(Ordering::Relaxed),
-                            elapsed_ms().saturating_sub(WINDOW_CREATED_MS.load(Ordering::Relaxed) as u128),
-                            view.buckets.len(),
-                            view.hidden_start,
+                            "history: window created at {}ms",
+                            WINDOW_CREATED_MS.load(Ordering::Relaxed)
                         ),
                     );
                     cx.notify();

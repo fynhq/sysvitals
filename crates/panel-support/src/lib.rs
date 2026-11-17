@@ -25,6 +25,52 @@ pub enum PanelSurface {
     History,
 }
 
+pub fn build_panel_app(headless: bool, quit_mode: QuitMode) -> Application {
+    let app = gpui_kit::application()
+        .with_assets(gpui_kit::assets::Assets)
+        .with_quit_mode(quit_mode);
+    if headless {
+        app.with_windowing(WindowingRequest::Headless)
+    } else {
+        app
+    }
+}
+
+pub fn init_panel<F>(cx: &mut App, label: &'static str, started: std::time::Instant, apply_theme: F)
+where
+    F: FnOnce(&mut App),
+{
+    gpui_kit::init(cx);
+    log_event(
+        "INFO",
+        &format!(
+            "{label}: gpui init done at {}ms",
+            started.elapsed().as_millis()
+        ),
+    );
+    apply_theme(cx);
+    watch_parent(cx, label);
+}
+
+pub fn log_first_frame(
+    window: AnyWindowHandle,
+    cx: &mut App,
+    label: &'static str,
+    started: std::time::Instant,
+) {
+    let _ = window.update(cx, |_, window, _| {
+        window.on_next_frame(move |_, _| {
+            log_event(
+                "INFO",
+                &format!(
+                    "{label}: first frame at {}ms",
+                    started.elapsed().as_millis()
+                ),
+            );
+        });
+    });
+}
+
 #[cfg(windows)]
 pub const CONTROL_RADIUS: f32 = 4.0;
 #[cfg(not(windows))]

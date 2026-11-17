@@ -32,9 +32,6 @@ serde = { version = "=1.0.229", features = ["derive"] }
 toml = "=1.2.1"
 anyhow = "=1.0.104"
 directories = "=6.0.0"
-# Terminal/emoji-aware display width for prefix column padding. Also already
-# in the dependency graph through the GPUI stack.
-unicode-width = "=0.2.3"
 # `bundled` statically embeds SQLite so there is no system-library dependency
 # on Windows/macOS. History storage is the only consumer.
 rusqlite = { version = "=0.43.0", features = ["bundled"] }
@@ -49,13 +46,10 @@ windows = { version = "=0.62.2", default-features = false, features = [
     "Win32_System_Diagnostics_Debug",
     "Win32_System_JobObjects",
     "Win32_System_LibraryLoader",
-    "Win32_System_Memory",
     "Win32_System_Performance",
     "Win32_System_Registry",
     "Win32_System_SystemInformation",
     "Win32_System_Threading",
-    "Win32_Security",
-    "Win32_Security_Authorization",
     "Win32_Storage_FileSystem",
     "Win32_UI_Controls",
     "Win32_UI_Accessibility",

@@ -20,7 +20,7 @@ pub(crate) use wndproc::*;
 
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock, RwLock};
+use std::sync::{OnceLock, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use sysvitals_core::format::FormattedRow;
@@ -34,7 +34,7 @@ use sysvitals_support::{
 };
 use windows::core::{Interface, BOOL, PCWSTR};
 use windows::Win32::Foundation::{
-    CloseHandle, ERROR_FILE_NOT_FOUND, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    CloseHandle, ERROR_FILE_NOT_FOUND, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT,
 };
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
@@ -61,13 +61,10 @@ use windows::Win32::System::LibraryLoader::{
     GetModuleFileNameW, GetModuleHandleExW, GetModuleHandleW,
     GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
 };
-use windows::Win32::System::Memory::{
-    CreateFileMappingW, MapViewOfFile, FILE_MAP_ALL_ACCESS, PAGE_READWRITE,
-};
 use windows::Win32::System::Registry::{RegDeleteKeyValueW, HKEY_CURRENT_USER};
 use windows::Win32::System::Threading::{
-    CreateProcessW, GetCurrentProcessId, GetExitCodeProcess, GetProcessId, TerminateProcess,
-    WaitForSingleObject, PROCESS_INFORMATION, STARTF_FORCEOFFFEEDBACK, STARTUPINFOW,
+    CreateProcessW, GetCurrentProcessId, GetProcessId, TerminateProcess, WaitForSingleObject,
+    PROCESS_INFORMATION, STARTF_FORCEOFFFEEDBACK, STARTUPINFOW,
 };
 use windows::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
 use windows::Win32::UI::HiDpi::{
@@ -104,8 +101,8 @@ const MOVE_MS: u32 = 1_000;
 const CONFIG_POLL_MS: u32 = 500;
 const WM_APP_HISTORY_READY: u32 = 0x8000 + 3;
 const WM_APP_SETTINGS_READY: u32 = 0x8000 + 4;
-const TIMER_HISTORY: usize = 0x519;
-const HISTORY_SYNC_MS: u32 = 250;
+const TIMER_CURSOR: usize = 0x519;
+const CURSOR_POLL_MS: u32 = 250;
 const TIMER_REBIND: usize = 0x51A;
 const REBIND_RETRY_MS: u32 = 500;
 const TIMER_WATCH: usize = 0x51B;
@@ -137,15 +134,9 @@ static WIN11_CENTERED: AtomicU32 = AtomicU32::new(u32::MAX);
 static AUTO_HIDE: AtomicU32 = AtomicU32::new(u32::MAX);
 // A kill-on-close job owns every panel child, so a crash or quit cannot leave an orphan.
 static CHILD_JOB: AtomicIsize = AtomicIsize::new(0);
-static HISTORY_PROCESS: Mutex<Option<isize>> = Mutex::new(None);
-static HISTORY_LAUNCHING: AtomicBool = AtomicBool::new(false);
-static SETTINGS_LAUNCHING: AtomicBool = AtomicBool::new(false);
-static SETTINGS_MONITOR: AtomicIsize = AtomicIsize::new(0);
-static SETTINGS_PROCESS: Mutex<Option<isize>> = Mutex::new(None);
 static QUITTING: AtomicBool = AtomicBool::new(false);
 // One hidden sentinel owns every timer and the TaskbarCreated broadcast, so timers survive Explorer restarts.
 static SENTINEL_HWND: AtomicIsize = AtomicIsize::new(0);
-static HISTORY_ANCHOR_MONITOR: AtomicIsize = AtomicIsize::new(0);
 static TASKBAR_CREATED: OnceLock<u32> = OnceLock::new();
 static SAMPLE_TIMER_OK: AtomicBool = AtomicBool::new(false);
 fn sentinel_hwnd() -> HWND {
@@ -160,6 +151,5 @@ thread_local! {
     static HISTORY_WRITER: RefCell<HistoryWriterSlot> = const { RefCell::new(HistoryWriterSlot::new()) };
     static LAST_OCCLUSION_PROBE: std::cell::Cell<Option<Instant>> =
         const { std::cell::Cell::new(None) };
-    static HISTORY_STATE: RefCell<Option<(*mut sysvitals_core::HistoryState, HANDLE)>> = const { RefCell::new(None) };
     static VD_MANAGER: RefCell<Option<IVirtualDesktopManager>> = const { RefCell::new(None) };
 }

@@ -87,7 +87,6 @@ mod tests {
     #[test]
     fn anchor_skips_unrelated_flags() {
         let a = parse_anchor(&args(&[
-            "--resident",
             "--parent-pid",
             "42",
             "--anchor",
@@ -123,7 +122,7 @@ mod tests {
     #[test]
     fn parent_pid_parses_and_rejects() {
         assert_eq!(
-            parse_parent_pid(&args(&["--resident", "--parent-pid", "4242"])),
+            parse_parent_pid(&args(&["--parent-pid", "4242"])),
             Some(4242)
         );
         assert!(parse_parent_pid(&args(&["--parent-pid"])).is_none());

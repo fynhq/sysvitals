@@ -69,24 +69,6 @@ pub fn join_prefix(prefix: &str, value: &str) -> String {
     }
 }
 
-pub fn display_width(s: &str) -> usize {
-    unicode_width::UnicodeWidthStr::width(s)
-}
-
-fn pad_to_width(s: &str, width: usize) -> String {
-    let cur = display_width(s);
-    if cur >= width {
-        s.to_string()
-    } else {
-        let mut out = String::with_capacity(s.len() + (width - cur));
-        out.push_str(s);
-        for _ in 0..(width - cur) {
-            out.push(' ');
-        }
-        out
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Line {
     pub left: String,
@@ -201,46 +183,26 @@ pub fn format_frame(snapshot: &Snapshot, cfg: &Config) -> FormattedRow {
         let left = metric_cells(left_metrics, cfg, snapshot);
         let right = metric_cells(right_metrics, cfg, snapshot);
 
-        let left_w = left
-            .iter()
-            .map(|(_, s)| display_width(s))
-            .max()
-            .unwrap_or(0);
-        let right_w = right
-            .iter()
-            .map(|(_, s)| display_width(s))
-            .max()
-            .unwrap_or(0);
-
         if left.is_empty() || right.is_empty() {
             let cells = if left.is_empty() { &right } else { &left };
-            let w = cells
-                .iter()
-                .map(|(_, s)| display_width(s))
-                .max()
-                .unwrap_or(0);
             return FormattedRow {
                 lines: vec![
-                    Line::single(cell_at(cells, 0, w)),
-                    Line::single(cell_at(cells, 1, w)),
+                    Line::single(cell_at(cells, 0)),
+                    Line::single(cell_at(cells, 1)),
                 ],
                 items: Vec::new(),
             };
         }
 
-        let row0_left = cell_at(&left, 0, left_w);
-        let row1_left = cell_at(&left, 1, left_w);
-        let row0_right = cell_at(&right, 0, right_w);
-        let row1_right = cell_at(&right, 1, right_w);
         FormattedRow {
             lines: vec![
                 Line {
-                    left: row0_left,
-                    right: row0_right,
+                    left: cell_at(&left, 0),
+                    right: cell_at(&right, 0),
                 },
                 Line {
-                    left: row1_left,
-                    right: row1_right,
+                    left: cell_at(&left, 1),
+                    right: cell_at(&right, 1),
                 },
             ],
             items: Vec::new(),
@@ -258,11 +220,8 @@ pub fn format_frame(snapshot: &Snapshot, cfg: &Config) -> FormattedRow {
     }
 }
 
-fn cell_at(cells: &[(Metric, String)], idx: usize, width: usize) -> String {
-    match cells.get(idx) {
-        Some((_, s)) => pad_to_width(s, width),
-        None => " ".repeat(width),
-    }
+fn cell_at(cells: &[(Metric, String)], idx: usize) -> String {
+    cells.get(idx).map(|(_, s)| s.clone()).unwrap_or_default()
 }
 
 pub fn format_frame_vertical(snapshot: &Snapshot, cfg: &Config) -> FormattedRow {
@@ -382,23 +341,6 @@ mod tests {
     }
 
     #[test]
-    fn display_width_counts_cjk_as_two() {
-        assert_eq!(display_width("CPU"), 3);
-        assert_eq!(display_width("内存"), 4);
-        assert_eq!(display_width("上传"), 4);
-        assert_eq!(display_width("U 1.2M/s"), 8);
-    }
-
-    #[test]
-    fn display_width_handles_emoji_and_variation_selectors() {
-        assert_eq!(display_width("🚀"), 2);
-        assert_eq!(display_width("⌚"), 2);
-        assert_eq!(display_width("☀️"), 2);
-        assert_eq!(display_width("👨‍👩‍👧‍👦"), 2);
-        assert_eq!(display_width("🇨🇳"), 2);
-    }
-
-    #[test]
     fn single_row_layout() {
         let mut cfg = Config::default();
         cfg.display.dual_row = false;
@@ -454,28 +396,20 @@ mod tests {
     }
 
     #[test]
-    fn dual_row_is_two_lines_aligned() {
+    fn dual_row_exposes_unpadded_cells_for_pixel_alignment() {
         let mut cfg = Config::default();
         cfg.display.dual_row = true;
         let f = format_frame(&snap(29.0, 68.0, 1.2 * MB, 314.0 * KB), &cfg);
         assert_eq!(f.lines.len(), 2);
-        assert_eq!(f.lines[0].left.len(), f.lines[1].left.len());
-        assert_eq!(f.lines[0].render(), "CPU: 29%  U: 1.20 M/s");
-        assert_eq!(f.lines[1].render(), "MEM: 68%  D: 314 K/s ");
-    }
-
-    #[test]
-    fn dual_row_columns_align_within_frame() {
-        let mut cfg = Config::default();
-        cfg.display.dual_row = true;
-        let f = format_frame(&snap(9.0, 68.0, 1024.0, 1024.0 * 1024.0), &cfg);
-        assert_eq!(
-            display_width(&f.lines[0].left),
-            display_width(&f.lines[1].left)
-        );
-        assert_eq!(
-            display_width(&f.lines[0].right),
-            display_width(&f.lines[1].right)
+        assert_eq!(f.lines[0].left, "CPU: 29%");
+        assert_eq!(f.lines[1].left, "MEM: 68%");
+        assert_eq!(f.lines[0].right, "U: 1.20 M/s");
+        assert_eq!(f.lines[1].right, "D: 314 K/s");
+        assert!(
+            f.lines
+                .iter()
+                .all(|line| !line.left.ends_with(' ') && !line.right.ends_with(' ')),
+            "column alignment belongs to the renderer, not to the formatter"
         );
     }
 
@@ -534,7 +468,7 @@ mod tests {
         let f = format_frame_vertical(&snap(90.0, 60.0, 1.56 * MB, 100.0 * KB), &cfg);
         for l in &f.lines {
             assert!(
-                display_width(&l.left) <= display_width("1.56 M"),
+                l.left.chars().count() <= "1.56 M".chars().count(),
                 "line {:?} exceeds the compact value-only width",
                 l.left
             );

@@ -180,6 +180,9 @@ impl Render for HistoryView {
                 .label(label)
                 .on_click(cx.listener(move |this: &mut Self, _: &ClickEvent, _, cx| {
                     this.range = r;
+                    this.buckets.clear();
+                    this.query = None;
+                    this.data_error_logged = false;
                     this.begin_series_draw();
                     this.load_data(cx);
                     cx.notify();

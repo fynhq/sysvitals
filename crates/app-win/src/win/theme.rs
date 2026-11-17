@@ -155,13 +155,9 @@ pub(crate) fn width_slack_px(vertical: bool) -> i32 {
 }
 
 pub(crate) unsafe fn make_font_for(hwnd: HWND, vertical: bool) -> HFONT {
-    make_font_at_for(hwnd, 1, vertical)
-}
-
-pub(crate) unsafe fn make_font_at_for(hwnd: HWND, scale: i32, vertical: bool) -> HFONT {
     let (_, face) = ui_font();
     create_font(
-        effective_font_height_for(hwnd, vertical) * scale.max(1),
+        effective_font_height_for(hwnd, vertical),
         TEXT_WEIGHT.load(Ordering::Relaxed),
         &face,
     )

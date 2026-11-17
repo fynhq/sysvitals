@@ -1,22 +1,11 @@
-//! History popup entry: DPI awareness before the run loop; macOS headless/accessory, Windows resident bootstrap.
+//! History popup entry: DPI awareness before the run loop; macOS headless, Windows one-shot.
 
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
-use std::env;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
-#[cfg(windows)]
-use windows::Win32::Foundation::CloseHandle;
-#[cfg(windows)]
-use windows::Win32::System::Memory::{
-    MapViewOfFile, OpenFileMappingW, UnmapViewOfFile, FILE_MAP_READ, FILE_MAP_WRITE,
-};
-#[cfg(windows)]
-use windows::Win32::System::Threading::{GetCurrentProcess, SetProcessWorkingSetSize};
-
-use gpui_kit::base::plot::label::{PlotLabel, Text as PlotText};
 use gpui_kit::component::button::*;
 use gpui_kit::component::chart::AreaChart;
 use gpui_kit::component::theme::Theme as UiTheme;
@@ -27,14 +16,14 @@ use gpui_kit::*;
 use sysvitals_core::cli::AnchorRect;
 use sysvitals_core::config::{config_path, history_path, Config};
 use sysvitals_core::i18n::{t, Language};
-use sysvitals_core::store::{floor_to_grid, Bucket, Store};
+use sysvitals_core::store::{floor_to_grid, Bucket};
+#[cfg(windows)]
+use sysvitals_panel::set_per_monitor_dpi_aware;
 use sysvitals_panel::{
     anchor_arg, anchor_monitor_arg, anchor_visible_bounds, backdrop_for, detect_material,
     layout_rect, log_event, log_sanitize_issues, observe_system_appearance, spawn_accent_watch,
     ConfigEvent, PanelSurface, CONTROL_RADIUS,
 };
-#[cfg(windows)]
-use sysvitals_panel::{preplace_hidden_window, set_per_monitor_dpi_aware, utf16, window_hwnd};
 
 static START: OnceLock<Instant> = OnceLock::new();
 
@@ -58,14 +47,12 @@ fn write_ready_marker(path: Option<&std::path::Path>) {
 
 mod chart;
 mod placement;
-mod resident;
 mod theme;
 mod view;
 mod window;
 
 pub(crate) use chart::*;
 pub(crate) use placement::*;
-pub(crate) use resident::*;
 pub(crate) use theme::*;
 pub(crate) use view::*;
 pub(crate) use window::*;
@@ -73,30 +60,13 @@ pub(crate) use window::*;
 fn main() {
     sysvitals_panel::install_panic_hook();
     let _ = START.set(Instant::now());
+    let started = START.get().copied().unwrap_or_else(Instant::now);
 
     #[cfg(windows)]
     set_per_monitor_dpi_aware();
 
-    #[cfg(windows)]
-    let resident = env::args().any(|arg| arg == "--resident");
-
-    #[cfg(target_os = "macos")]
-    let app = gpui_kit::application()
-        .with_assets(gpui_kit::assets::Assets)
-        .with_windowing(WindowingRequest::Headless)
-        .with_quit_mode(QuitMode::LastWindowClosed);
-    #[cfg(windows)]
-    let app = if resident {
-        gpui_kit::application()
-            .with_assets(gpui_kit::assets::Assets)
-            .with_quit_mode(QuitMode::Explicit)
-    } else {
-        gpui_kit::application()
-            .with_assets(gpui_kit::assets::Assets)
-            .with_quit_mode(QuitMode::LastWindowClosed)
-    };
-    #[cfg(not(any(windows, target_os = "macos")))]
-    let app = gpui_kit::application().with_assets(gpui_kit::assets::Assets);
+    let app =
+        sysvitals_panel::build_panel_app(cfg!(target_os = "macos"), QuitMode::LastWindowClosed);
 
     log_event(
         "INFO",
@@ -104,21 +74,7 @@ fn main() {
     );
 
     app.run(move |cx| {
-        gpui_kit::init(cx);
-        log_event(
-            "INFO",
-            &format!("history: gpui init done at {}ms", elapsed_ms()),
-        );
-        apply_theme_and_accent(cx);
-
-        #[cfg(windows)]
-        if resident {
-            run_resident(cx);
-            return;
-        }
-
-        #[cfg(target_os = "macos")]
-        watch_parent(cx);
+        sysvitals_panel::init_panel(cx, "history", started, apply_theme_and_accent);
 
         let anchor = anchor_arg();
         let monitor = anchor_monitor_arg().map(DisplayId::new);
@@ -132,54 +88,50 @@ fn main() {
                 monitor
             ),
         );
-        match open_history_window(cx, anchor, monitor, false, None) {
-            Some((_window_handle, _ready, _size)) => {
-                write_ready_marker(ready_file.as_deref());
-                #[cfg(windows)]
-                cx.spawn(async move |cx| {
-                    let Some(window_handle) = _window_handle.downcast::<HistoryView>() else {
-                        return;
-                    };
-                    for _ in 0..3 {
-                        let _ = cx.update(|app| {
-                            window_handle.update(app, |_view, window, _| {
-                                window.activate_window();
-                            })
-                        });
-                        cx.background_executor()
-                            .timer(Duration::from_millis(500))
-                            .await;
-                        let active = cx.update(|app| {
-                            window_handle
-                                .update(app, |view, window, _| {
-                                    if window.is_window_active() {
-                                        view.ever_active = true;
-                                        view.restore_popup_size(window);
-                                        true
-                                    } else {
-                                        false
-                                    }
-                                })
-                                .unwrap_or(false)
-                        });
-                        if active {
-                            return;
-                        }
-                    }
-                    let _ = cx.update(|app| {
-                        window_handle.update(app, |view, window, _| {
-                            view.restore_popup_size(window);
+        let Some(window_handle) = open_history_window(cx, anchor, monitor) else {
+            cx.quit();
+            return;
+        };
+        write_ready_marker(ready_file.as_deref());
+        sysvitals_panel::log_first_frame(window_handle, cx, "history", started);
+        #[cfg(windows)]
+        cx.spawn(async move |cx| {
+            let mut activated = false;
+            for _ in 0..3 {
+                let _ = cx.update(|app| {
+                    window_handle.update(app, |_view, window, _| window.activate_window())
+                });
+                cx.background_executor()
+                    .timer(Duration::from_millis(500))
+                    .await;
+                activated = cx.update(|app| {
+                    window_handle
+                        .update(app, |view, window, _| {
+                            if window.is_window_active() {
+                                view.ever_active = true;
+                                view.restore_popup_size(window);
+                                true
+                            } else {
+                                false
+                            }
                         })
-                    });
-                    log_event(
-                        "WARN",
-                        "history: one-shot popup shown without activation; click-away is not armed",
-                    );
-                })
-                .detach();
+                        .unwrap_or(false)
+                });
+                if activated {
+                    return;
+                }
             }
-            None => cx.quit(),
-        }
+            let _ = cx.update(|app| {
+                window_handle.update(app, |view, window, _| {
+                    view.restore_popup_size(window);
+                })
+            });
+            log_event(
+                "WARN",
+                "history: popup shown without activation; click-away is not armed",
+            );
+        })
+        .detach();
     });
     log_event("INFO", "history: exited");
 }

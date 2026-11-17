@@ -2,6 +2,8 @@
 
 use super::*;
 
+use std::sync::Mutex;
+
 // One overlay per visible taskbar; mixed-DPI monitors keep their own geometry and render state.
 #[derive(Clone, Copy)]
 pub(crate) struct Overlay {

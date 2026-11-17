@@ -2,6 +2,9 @@
 
 use super::*;
 
+use std::time::{SystemTime, UNIX_EPOCH};
+use sysvitals_core::store::Store;
+
 fn open_store_for_read(path: &std::path::Path) -> Result<Store, String> {
     let has_db = path
         .metadata()
@@ -26,33 +29,6 @@ impl HistoryView {
         }
     }
 
-    pub(crate) fn ensure_store(&mut self) -> bool {
-        if self.store.is_some() {
-            return true;
-        }
-        let path = match history_path() {
-            Ok(path) => path,
-            Err(e) => {
-                self.log_data_error(format!("history: cannot resolve the store path: {e}"));
-                return false;
-            }
-        };
-        let opened = open_store_for_read(&path);
-        match opened {
-            Ok(store) => {
-                self.store = Some(store);
-                true
-            }
-            Err(e) => {
-                self.log_data_error(format!(
-                    "history: store open failed: {}: {e}",
-                    path.display()
-                ));
-                false
-            }
-        }
-    }
-
     pub(crate) fn log_data_error(&mut self, message: String) {
         if !self.data_error_logged {
             log_event("WARN", &message);
@@ -68,13 +44,9 @@ impl HistoryView {
         let query = self.visible_query(now);
         self.query = Some(query);
         self.load_seq = self.load_seq.wrapping_add(1);
-        if query.bucket < ASYNC_MIN_BUCKET_SECS {
-            self.load_data_sync(query);
-            return;
+        if self.buckets.is_empty() {
+            self.data_loading = true;
         }
-        self.buckets = Vec::new();
-        self.data_loading = true;
-        self.note_series_data();
         let seq = self.load_seq;
         let executor = cx.background_executor().clone();
         cx.spawn(async move |this, cx| {
@@ -95,6 +67,17 @@ impl HistoryView {
                         view.buckets = buckets;
                         view.trim_leading_gap();
                         view.data_error_logged = false;
+                        if !view.first_data_logged {
+                            view.first_data_logged = true;
+                            log_event(
+                                "INFO",
+                                &format!(
+                                    "history: first data loaded at {}ms ({} points)",
+                                    elapsed_ms(),
+                                    view.points().len()
+                                ),
+                            );
+                        }
                     }
                     Err(e) => view.log_data_error(format!("history: query failed: {e}")),
                 }
@@ -103,28 +86,6 @@ impl HistoryView {
             });
         })
         .detach();
-    }
-
-    pub(crate) fn load_data_sync(&mut self, query: VisibleQuery) {
-        self.data_loading = false;
-        let mut buckets = Vec::new();
-        if self.ensure_store() {
-            let result = self.store.as_ref().map(|store| query_buckets(store, query));
-            match result {
-                Some(Ok(loaded)) => {
-                    buckets = loaded;
-                    self.data_error_logged = false;
-                }
-                Some(Err(e)) => {
-                    self.log_data_error(format!("history: query failed: {e}"));
-                    self.store = None;
-                }
-                None => {}
-            }
-        }
-        self.buckets = buckets;
-        self.trim_leading_gap();
-        self.note_series_data();
     }
 
     fn trim_leading_gap(&mut self) {
