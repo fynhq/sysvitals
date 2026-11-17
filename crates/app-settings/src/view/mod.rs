@@ -33,11 +33,6 @@ pub(crate) struct SettingsView {
     pub(crate) prefix_mem: Entity<InputState>,
     pub(crate) prefix_up: Entity<InputState>,
     pub(crate) prefix_down: Entity<InputState>,
-    pub(crate) dual_row: bool,
-    pub(crate) show_resources: bool,
-    pub(crate) show_network: bool,
-    pub(crate) auto_start: bool,
-    pub(crate) auto_start_touched: bool,
     pub(crate) lang_idx: usize,
     pub(crate) interval_idx: usize,
     pub(crate) spacing_idx: usize,
@@ -228,11 +223,6 @@ impl SettingsView {
 
         let last_saved_toml = cfg.to_toml_string().ok();
         let view = Self {
-            dual_row: cfg.display.dual_row,
-            show_resources: cfg.display.show_resources,
-            show_network: cfg.display.show_network,
-            auto_start: cfg.startup.auto_start,
-            auto_start_touched: false,
             cfg,
             prefix_cpu,
             prefix_mem,
@@ -285,11 +275,11 @@ impl SettingsView {
     }
 
     pub(crate) fn set_resources(&mut self, checked: bool) {
-        self.show_resources = checked;
+        self.cfg.display.show_resources = checked;
     }
 
     pub(crate) fn set_network(&mut self, checked: bool) {
-        self.show_network = checked;
+        self.cfg.display.show_network = checked;
     }
 
     pub(crate) fn collect_config(&self, cx: &App) -> Config {
@@ -308,12 +298,6 @@ impl SettingsView {
             2 => Theme::Dark,
             _ => Theme::Auto,
         };
-        cfg.display.dual_row = self.dual_row;
-        cfg.display.show_resources = self.show_resources;
-        cfg.display.show_network = self.show_network;
-        cfg.startup.auto_start = self.auto_start;
-        cfg.startup.auto_start_explicit =
-            self.auto_start_touched || cfg.startup.auto_start_explicit;
         cfg.display.prefix.cpu = self.prefix_cpu.read(cx).value().to_string();
         cfg.display.prefix.mem = self.prefix_mem.read(cx).value().to_string();
         cfg.display.prefix.up = self.prefix_up.read(cx).value().to_string();

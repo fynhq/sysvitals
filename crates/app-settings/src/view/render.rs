@@ -271,19 +271,19 @@ impl Render for SettingsView {
                 t(lang, "settings.auto_start").to_string(),
                 IconName::Play,
                 Switch::new("auto-start")
-                    .checked(self.auto_start)
+                    .checked(self.cfg.startup.auto_start)
                     .accessibility_label(t(lang, "settings.auto_start").to_string())
                     .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                        this.auto_start = *checked;
-                        this.auto_start_touched = true;
+                        this.cfg.startup.auto_start = *checked;
+                        this.cfg.startup.auto_start_explicit = true;
                         this.save(cx);
                         cx.notify();
                     })),
                 dim,
             ));
 
-        let resources_last = self.show_resources && !self.show_network;
-        let network_last = self.show_network && !self.show_resources;
+        let resources_last = self.cfg.display.show_resources && !self.cfg.display.show_network;
+        let network_last = self.cfg.display.show_network && !self.cfg.display.show_resources;
         let keep_one_hint = t(lang, "settings.keep_one_hint");
         let resources_label = if resources_last {
             format!("{} — {keep_one_hint}", t(lang, "settings.show_resources"))
@@ -296,7 +296,7 @@ impl Render for SettingsView {
             t(lang, "settings.show_network").to_string()
         };
         let mut resources_switch = Switch::new("show-res")
-            .checked(self.show_resources)
+            .checked(self.cfg.display.show_resources)
             .accessibility_label(resources_label);
         if resources_last {
             resources_switch = resources_switch
@@ -310,7 +310,7 @@ impl Render for SettingsView {
                 cx.notify();
             }));
         let mut network_switch = Switch::new("show-net")
-            .checked(self.show_network)
+            .checked(self.cfg.display.show_network)
             .accessibility_label(network_label);
         if network_last {
             network_switch = network_switch
@@ -341,10 +341,10 @@ impl Render for SettingsView {
                 t(lang, "settings.dual_row").to_string(),
                 IconName::GalleryVerticalEnd,
                 Switch::new("dual-row")
-                    .checked(self.dual_row)
+                    .checked(self.cfg.display.dual_row)
                     .accessibility_label(t(lang, "settings.dual_row").to_string())
                     .on_click(cx.listener(|this, checked: &bool, _, cx| {
-                        this.dual_row = *checked;
+                        this.cfg.display.dual_row = *checked;
                         this.save(cx);
                         cx.notify();
                     })),
