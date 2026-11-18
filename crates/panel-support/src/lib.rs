@@ -12,9 +12,10 @@ use sysvitals_core::backdrop::{
 };
 
 pub use sysvitals_support::{
-    acquire_instance_lock, anchor_arg, anchor_monitor_arg, install_panic_hook, log_event,
-    log_sanitize_issues, parent_pid_arg, poll_config, ready_file_arg, ConfigEvent, InstanceLock,
-    SV_BUILD_ID,
+    acquire_instance_lock, anchor_arg, anchor_monitor_arg, clear_panel_request, install_panic_hook,
+    log_event, log_sanitize_issues, parent_pid_arg, poll_config, prewarm_arg, ready_file_arg,
+    take_panel_request, write_panel_request, ConfigEvent, InstanceLock, PanelAction, PanelRequest,
+    PANEL_HISTORY, PANEL_SETTINGS, SV_BUILD_ID,
 };
 #[cfg(windows)]
 pub use sysvitals_support::{hkcu_dword, os_build_number, taskbar_al, utf16, ParentProcess};
@@ -34,6 +35,54 @@ pub fn build_panel_app(headless: bool, quit_mode: QuitMode) -> Application {
     } else {
         app
     }
+}
+
+#[cfg(windows)]
+pub fn trim_working_set() {
+    use windows::Win32::System::Threading::{GetCurrentProcess, SetProcessWorkingSetSize};
+    // SAFETY: the pseudo-handle refers to this process; -1 sizes request a trim.
+    unsafe {
+        let _ = SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX);
+    }
+}
+
+#[cfg(not(windows))]
+pub fn trim_working_set() {}
+
+// Detach DirectX/VSync while the resident host has no windows; reattach before opening one.
+#[cfg(windows)]
+pub async fn set_gpu_windowed(cx: &mut AsyncApp, windowed: bool) -> bool {
+    let current = cx.update(|app| app.graphical_environment().is_some());
+    if current == windowed {
+        return current;
+    }
+    let request = if windowed {
+        gpui_kit::WindowingRequest::Windowed(gpui_kit::GraphicalEnvironment::detect())
+    } else {
+        gpui_kit::WindowingRequest::Headless
+    };
+    match cx.update(|app| app.request_windowing(request)).await {
+        Ok(()) => windowed,
+        Err(error) => {
+            log_event(
+                "WARN",
+                &format!(
+                    "panel: {} the DirectX device failed: {error}",
+                    if windowed { "attaching" } else { "releasing" }
+                ),
+            );
+            current
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub async fn set_gpu_windowed(_cx: &mut AsyncApp, _windowed: bool) -> bool {
+    true
+}
+
+pub fn window_display_id(window: &Window, cx: &App) -> Option<DisplayId> {
+    window.display(cx).map(|display| display.id())
 }
 
 pub fn init_panel<F>(cx: &mut App, label: &'static str, started: std::time::Instant, apply_theme: F)

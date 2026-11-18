@@ -12,6 +12,10 @@ pub fn command_args() -> Vec<String> {
     std::env::args().skip(1).collect()
 }
 
+pub fn prewarm_arg() -> bool {
+    command_args().iter().any(|arg| arg == "--prewarm")
+}
+
 pub fn parent_pid_arg() -> Option<u32> {
     sysvitals_core::cli::parse_parent_pid(&command_args())
 }
@@ -194,6 +198,157 @@ pub fn poll_config(watcher: &mut sysvitals_core::ConfigWatcher, error_prefix: &s
             source,
         },
     }
+}
+
+pub const PANEL_SETTINGS: &str = "settings";
+pub const PANEL_HISTORY: &str = "history";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PanelAction {
+    Open,
+    Toggle,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PanelRequest {
+    pub action: PanelAction,
+    pub anchor: Option<sysvitals_core::cli::AnchorRect>,
+    pub monitor: Option<u64>,
+    pub requested_at_ms: u64,
+}
+
+impl PanelRequest {
+    pub fn encode(self) -> String {
+        let action = match self.action {
+            PanelAction::Open => "open",
+            PanelAction::Toggle => "toggle",
+        };
+        let anchor = self
+            .anchor
+            .map(|a| format!("{} {} {} {}", a.left, a.top, a.right, a.bottom))
+            .unwrap_or_else(|| "- - - -".to_string());
+        format!(
+            "{action} {anchor} {} {}\n",
+            self.monitor.unwrap_or(0),
+            self.requested_at_ms
+        )
+    }
+
+    pub fn decode(text: &str) -> Option<Self> {
+        let mut parts = text.split_whitespace();
+        let action = match parts.next()? {
+            "open" => PanelAction::Open,
+            "toggle" => PanelAction::Toggle,
+            _ => return None,
+        };
+        let left = parts.next()?;
+        let (anchor, monitor, requested_at_ms) = if left == "-" {
+            for _ in 0..3 {
+                if parts.next()? != "-" {
+                    return None;
+                }
+            }
+            let monitor = parse_monitor(parts.next()?)?;
+            (None, monitor, parts.next()?.parse::<u64>().ok()?)
+        } else {
+            let left = parse_coord(left)?;
+            let top = parse_coord(parts.next()?)?;
+            let right = parse_coord(parts.next()?)?;
+            let bottom = parse_coord(parts.next()?)?;
+            if right <= left || bottom <= top {
+                return None;
+            }
+            let monitor = parse_monitor(parts.next()?)?;
+            (
+                Some(sysvitals_core::cli::AnchorRect {
+                    left,
+                    top,
+                    right,
+                    bottom,
+                }),
+                monitor,
+                parts.next()?.parse::<u64>().ok()?,
+            )
+        };
+        if parts.next().is_some() {
+            return None;
+        }
+        Some(Self {
+            action,
+            anchor,
+            monitor,
+            requested_at_ms,
+        })
+    }
+
+    pub fn is_stale(self, max_age_ms: u64) -> bool {
+        unix_ms().saturating_sub(self.requested_at_ms) > max_age_ms
+    }
+}
+
+fn parse_coord(value: &str) -> Option<f32> {
+    let value = value.parse::<f32>().ok()?;
+    value.is_finite().then_some(value)
+}
+
+fn parse_monitor(value: &str) -> Option<Option<u64>> {
+    let monitor = value.parse::<u64>().ok()?;
+    Some((monitor != 0).then_some(monitor))
+}
+
+pub fn unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+pub fn write_panel_request(
+    panel: &str,
+    action: PanelAction,
+    anchor: Option<sysvitals_core::cli::AnchorRect>,
+    monitor: Option<u64>,
+) -> Result<(), String> {
+    let dir = sysvitals_core::config::data_dir()
+        .map_err(|error| format!("data directory unavailable: {error}"))?
+        .join("panels");
+    std::fs::create_dir_all(&dir)
+        .map_err(|error| format!("cannot create {}: {error}", dir.display()))?;
+    let path = dir.join(format!("{panel}.request"));
+    let temp = dir.join(format!("{panel}.request.tmp-{}", std::process::id()));
+    let request = PanelRequest {
+        action,
+        anchor,
+        monitor,
+        requested_at_ms: unix_ms(),
+    };
+    std::fs::write(&temp, request.encode())
+        .map_err(|error| format!("cannot write {}: {error}", temp.display()))?;
+    if let Err(first_error) = std::fs::rename(&temp, &path) {
+        let _ = std::fs::remove_file(&path);
+        std::fs::rename(&temp, &path).map_err(|error| {
+            format!(
+                "cannot replace {} (first attempt: {first_error}): {error}",
+                path.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+pub fn take_panel_request(panel: &str) -> Option<PanelRequest> {
+    let dir = sysvitals_core::config::data_dir().ok()?.join("panels");
+    let path = dir.join(format!("{panel}.request"));
+    let text = std::fs::read_to_string(&path).ok()?;
+    let _ = std::fs::remove_file(&path);
+    PanelRequest::decode(&text)
+}
+
+pub fn clear_panel_request(panel: &str) {
+    let Ok(dir) = sysvitals_core::config::data_dir() else {
+        return;
+    };
+    let _ = std::fs::remove_file(dir.join("panels").join(format!("{panel}.request")));
 }
 
 pub fn install_panic_hook() {
@@ -486,5 +641,50 @@ mod tests {
             Ok(AutoStartOutcome::Unchanged)
         });
         assert!(!called.get());
+    }
+
+    #[test]
+    fn panel_request_round_trips_with_an_anchor() {
+        let request = PanelRequest {
+            action: PanelAction::Open,
+            anchor: Some(sysvitals_core::cli::AnchorRect {
+                left: 1.5,
+                top: 2.0,
+                right: 101.5,
+                bottom: 42.0,
+            }),
+            monitor: Some(9_001),
+            requested_at_ms: 123_456,
+        };
+        assert_eq!(PanelRequest::decode(&request.encode()), Some(request));
+    }
+
+    #[test]
+    fn panel_request_round_trips_without_an_anchor() {
+        let request = PanelRequest {
+            action: PanelAction::Toggle,
+            anchor: None,
+            monitor: None,
+            requested_at_ms: 7,
+        };
+        assert_eq!(PanelRequest::decode(&request.encode()), Some(request));
+    }
+
+    #[test]
+    fn panel_request_rejects_malformed_lines() {
+        assert_eq!(PanelRequest::decode(""), None);
+        assert_eq!(PanelRequest::decode("open"), None);
+        assert_eq!(PanelRequest::decode("open 1 2 3 4 0 1 extra"), None);
+        assert_eq!(
+            PanelRequest::decode("open 5 5 5 9 0 1"),
+            None,
+            "degenerate anchor must be rejected"
+        );
+        assert_eq!(
+            PanelRequest::decode("open - - - x 0 1"),
+            None,
+            "incomplete no-anchor marker must be rejected"
+        );
+        assert_eq!(PanelRequest::decode("close - - - - 0 1"), None);
     }
 }
