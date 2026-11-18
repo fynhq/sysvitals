@@ -344,7 +344,7 @@ fn show_settings(
             cx.background_executor()
                 .timer(Duration::from_millis(50))
                 .await;
-            let _ = cx.update(|app| {
+            cx.update(|app| {
                 open_settings_window(app, anchor, monitor, request_started);
             });
         })
@@ -409,7 +409,7 @@ fn start_request_loop(cx: &mut App) {
             let anchor = request.anchor;
             let monitor = request.monitor.map(DisplayId::new);
             let request_started = Instant::now();
-            let _ = cx.update(|app| show_settings(app, anchor, monitor, request_started));
+            cx.update(|app| show_settings(app, anchor, monitor, request_started));
             idle_since = None;
             idle_handled = false;
         }
