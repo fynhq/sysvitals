@@ -298,7 +298,6 @@ unsafe extern "system" fn sentinel_wndproc(
     }
     if msg == WM_DISPLAYCHANGE {
         log_event("INFO", "WM_DISPLAYCHANGE: display configuration changed");
-        forget_child_monitors();
         invalidate_clock_anchor();
         invalidate_ui_font();
         OVERLAYS.with(|slot| {

@@ -2,7 +2,6 @@
 
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
-use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -50,7 +49,7 @@ fn elapsed_ms() -> u128 {
         .as_millis()
 }
 
-fn write_ready_marker(path: Option<&Path>) {
+fn write_ready_marker(path: Option<&std::path::Path>) {
     let Some(path) = path else {
         return;
     };
@@ -150,7 +149,7 @@ fn open_history(
     cx: &mut App,
     anchor: Option<AnchorRect>,
     monitor: Option<DisplayId>,
-    ready_file: Option<&Path>,
+    ready_file: Option<&std::path::Path>,
 ) -> Option<AnyWindowHandle> {
     let request_started = begin_open();
     let window_handle = open_history_window(cx, anchor, monitor)?;
@@ -288,7 +287,7 @@ fn apply_history_request(
     action: PanelAction,
     anchor: Option<AnchorRect>,
     monitor: Option<DisplayId>,
-    ready_file: Option<&Path>,
+    ready_file: Option<&std::path::Path>,
 ) -> Result<(), String> {
     let existing = cx.windows().first().copied();
     if let Some(handle) = existing {
