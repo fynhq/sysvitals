@@ -99,7 +99,6 @@ fn main() {
             let Some(window_handle) = window_handle.downcast::<HistoryView>() else {
                 return;
             };
-            let mut activated = false;
             for _ in 0..3 {
                 let _ = cx.update(|app| {
                     window_handle.update(app, |_view, window, _| window.activate_window())
@@ -107,7 +106,7 @@ fn main() {
                 cx.background_executor()
                     .timer(Duration::from_millis(500))
                     .await;
-                activated = cx.update(|app| {
+                let activated = cx.update(|app| {
                     window_handle
                         .update(app, |view, window, _| {
                             if window.is_window_active() {
