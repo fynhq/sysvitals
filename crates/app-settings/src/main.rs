@@ -1,8 +1,8 @@
-//! Settings window entry point: separate GPUI process with file-mtime handoff and DPI/parent watch.
+//! Settings entry: a warm GPUI host after the first launch, with file-based panel requests.
 
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use gpui_kit::component::button::*;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -25,7 +25,8 @@ use sysvitals_core::{t, Anchor, Config, Language, Theme};
 use sysvitals_panel::{
     acquire_instance_lock, anchor_arg, anchor_monitor_arg, anchor_visible_bounds, backdrop_for,
     detect_material, layout_rect, log_event, observe_system_appearance, parent_pid_arg,
-    spawn_accent_watch, InstanceLock, PanelSurface, CONTROL_RADIUS,
+    prewarm_arg, set_gpu_windowed, spawn_accent_watch, take_panel_request, trim_working_set,
+    window_display_id, InstanceLock, PanelAction, PanelSurface, CONTROL_RADIUS, PANEL_SETTINGS,
 };
 #[cfg(windows)]
 use sysvitals_panel::{preplace_hidden_window, taskbar_al, window_hwnd, window_is_visible};
@@ -50,6 +51,8 @@ pub(crate) use widgets::*;
 const INSTANCE_LOCK_NAME: &str = "Local\\SysVitalsSettings_SingleInstance";
 #[cfg(not(windows))]
 const INSTANCE_LOCK_NAME: &str = "settings.lock";
+const REQUEST_MAX_AGE_MS: u64 = 10_000;
+const REQUEST_POLL_MS: u64 = 50;
 
 fn main() {
     let started = Instant::now();
@@ -59,7 +62,7 @@ fn main() {
         InstanceLock::Busy => {
             log_event(
                 "WARN",
-                "settings: another settings window is already running; exiting",
+                "settings: another settings host is already running; exiting",
             );
             return;
         }
@@ -92,9 +95,16 @@ fn main() {
     #[cfg(windows)]
     sysvitals_panel::set_per_monitor_dpi_aware();
 
-    let (cfg, config_read_ok) = load_config_with_backup();
-
-    let app = sysvitals_panel::build_panel_app(false, QuitMode::LastWindowClosed);
+    let resident = parent_pid_arg().is_some();
+    let prewarm = prewarm_arg();
+    let app = sysvitals_panel::build_panel_app(
+        cfg!(target_os = "macos"),
+        if resident {
+            QuitMode::Explicit
+        } else {
+            QuitMode::LastWindowClosed
+        },
+    );
 
     log_event(
         "INFO",
@@ -107,171 +117,312 @@ fn main() {
     app.run(move |cx| {
         sysvitals_panel::init_panel(cx, "settings", started, apply_theme_and_accent);
 
+        if resident && prewarm {
+            #[cfg(target_os = "macos")]
+            set_macos_activation_policy(objc2_app_kit::NSApplicationActivationPolicy::Accessory);
+            log_event("INFO", "settings: prewarmed without a window");
+            start_request_loop(cx);
+            return;
+        }
+
         let anchor = anchor_arg();
         let monitor = anchor_monitor_arg().map(DisplayId::new);
+        if open_settings_window(cx, anchor, monitor, Instant::now()).is_none() {
+            cx.quit();
+            return;
+        }
+        if resident {
+            start_request_loop(cx);
+        }
+    });
+    log_event("INFO", "settings: exited");
+}
 
-        let titlebar = {
-            #[cfg(target_os = "macos")]
-            {
-                TitlebarOptions {
-                    title: Some(t(cfg.display.language, "settings.title").to_string().into()),
-                    appears_transparent: true,
-                    traffic_light_position: Some(point(px(9.), px(9.))),
-                }
+fn open_settings_window(
+    cx: &mut App,
+    anchor: Option<AnchorRect>,
+    monitor: Option<DisplayId>,
+    request_started: Instant,
+) -> Option<AnyWindowHandle> {
+    let (cfg, config_read_ok) = load_config_with_backup();
+
+    let titlebar = {
+        #[cfg(target_os = "macos")]
+        {
+            TitlebarOptions {
+                title: Some(t(cfg.display.language, "settings.title").to_string().into()),
+                appears_transparent: true,
+                traffic_light_position: Some(point(px(9.), px(9.))),
             }
-            #[cfg(windows)]
-            {
-                TitlebarOptions {
-                    title: Some(t(cfg.display.language, "settings.title").to_string().into()),
-                    ..TitleBar::title_bar_options()
-                }
-            }
-            #[cfg(not(any(windows, target_os = "macos")))]
-            {
-                TitlebarOptions {
-                    title: Some(t(cfg.display.language, "settings.title").to_string().into()),
-                    ..Default::default()
-                }
-            }
-        };
-
-        let window_bounds = settings_window_bounds(
-            anchor.as_ref(),
-            monitor,
-            size(px(400.), px(740.)),
-            cx,
-        );
-        let initial_size = window_bounds.get_bounds().size;
-        let window_options = WindowOptions {
-            window_bounds: Some(window_bounds),
-            display_id: monitor,
-            titlebar: Some(titlebar),
-            window_background: backdrop_for(detect_material()),
-            #[cfg(windows)]
-            show: false,
-            #[cfg(windows)]
-            focus: false,
-            #[cfg(not(windows))]
-            focus: true,
-            ..Default::default()
-        };
-
-        let opened = gpui_kit::open_window(window_options, cx, move |window, cx| {
-            cx.new(|cx| {
-                SettingsView::new(cfg, config_read_ok, window, cx, initial_size)
-            })
-        });
-        let (window_handle, _view) = match opened {
-            Ok(opened) => opened,
-            Err(e) => {
-                log_event("WARN", &format!("settings: open window failed: {e}"));
-                cx.quit();
-                return;
-            }
-        };
-
-        log_event(
-            "INFO",
-            &format!("settings: window built at {}ms", started.elapsed().as_millis()),
-        );
-        sysvitals_panel::log_first_frame(window_handle, cx, "settings", started);
-
+        }
         #[cfg(windows)]
         {
-            let hwnd = window_handle
-                .update(cx, |_, window, _| window_hwnd(&*window))
-                .ok()
-                .flatten();
-            cx.spawn(async move |cx| {
-                if let (Some(hwnd), Some(monitor)) = (hwnd, monitor) {
-                    if !preplace_hidden_window(hwnd, monitor) {
-                        log_event(
-                            "WARN",
-                            &format!(
-                                "settings: could not pre-place the window on display 0x{:x}",
-                                u64::from(monitor)
-                            ),
-                        );
-                    }
-                }
-                // GPUI shows the window on its first frame, so polling beats a fixed retry sleep.
-                let deadline = Instant::now() + std::time::Duration::from_secs(4);
-                let mut polls = 0u32;
-                let mut activations = 0u32;
-                let mut activated = false;
-                let mut shown = false;
-                loop {
-                    polls += 1;
-                    if polls == 1 || polls.is_multiple_of(4) {
-                        activations += 1;
-                        let _ = cx.update(|app| {
-                            window_handle
-                                .update(app, |_, window, _| window.resize(initial_size))
-                                .is_ok()
-                        });
-                        activated |= cx.update(|app| {
-                            window_handle
-                                .update(app, |_, window, _| window.activate_window())
-                                .is_ok()
-                        });
-                    }
-                    let visible = hwnd.is_some_and(window_is_visible);
-                    let active = cx.update(|app| {
-                        window_handle
-                            .update(app, |_, window, _| window.is_window_active())
-                            .unwrap_or(false)
-                    });
-                    if visible || active || (hwnd.is_none() && activated) {
-                        shown = true;
-                        log_event(
-                            "INFO",
-                            &format!(
-                                "settings: window shown after hidden placement (attempt {activations}, polls {polls}, visible={visible}, active={active}, elapsed={}ms)",
-                                started.elapsed().as_millis()
-                            ),
-                        );
-                        break;
-                    }
-                    if Instant::now() >= deadline {
-                        break;
-                    }
-                    cx.background_executor()
-                        .timer(std::time::Duration::from_millis(30))
-                        .await;
-                }
-                if !shown {
+            TitlebarOptions {
+                title: Some(t(cfg.display.language, "settings.title").to_string().into()),
+                ..TitleBar::title_bar_options()
+            }
+        }
+        #[cfg(not(any(windows, target_os = "macos")))]
+        {
+            TitlebarOptions {
+                title: Some(t(cfg.display.language, "settings.title").to_string().into()),
+                ..Default::default()
+            }
+        }
+    };
+
+    let window_bounds =
+        settings_window_bounds(anchor.as_ref(), monitor, size(px(400.), px(740.)), cx);
+    let initial_size = window_bounds.get_bounds().size;
+    let window_options = WindowOptions {
+        window_bounds: Some(window_bounds),
+        display_id: monitor,
+        titlebar: Some(titlebar),
+        window_background: backdrop_for(detect_material()),
+        #[cfg(windows)]
+        show: false,
+        #[cfg(windows)]
+        focus: false,
+        #[cfg(not(windows))]
+        focus: true,
+        ..Default::default()
+    };
+
+    #[cfg(target_os = "macos")]
+    set_macos_activation_policy(objc2_app_kit::NSApplicationActivationPolicy::Regular);
+
+    let opened = gpui_kit::open_window(window_options, cx, move |window, cx| {
+        cx.new(|cx| SettingsView::new(cfg, config_read_ok, window, cx, initial_size))
+    });
+    let (window_handle, _view) = match opened {
+        Ok(opened) => opened,
+        Err(e) => {
+            log_event("WARN", &format!("settings: open window failed: {e}"));
+            return None;
+        }
+    };
+
+    log_event(
+        "INFO",
+        &format!(
+            "settings: window built at {}ms",
+            request_started.elapsed().as_millis()
+        ),
+    );
+    sysvitals_panel::log_first_frame(window_handle, cx, "settings", request_started);
+
+    #[cfg(windows)]
+    {
+        let hwnd = window_handle
+            .update(cx, |_, window, _| window_hwnd(&*window))
+            .ok()
+            .flatten();
+        cx.spawn(async move |cx| {
+            if let (Some(hwnd), Some(monitor)) = (hwnd, monitor) {
+                if !preplace_hidden_window(hwnd, monitor) {
                     log_event(
                         "WARN",
                         &format!(
-                            "settings: window remained hidden after {}ms (activation attempts {activations}); exiting so the next click can retry",
-                            started.elapsed().as_millis()
+                            "settings: could not pre-place the window on display 0x{:x}",
+                            u64::from(monitor)
                         ),
                     );
-                    if hwnd.is_some() {
-                        cx.update(|app| app.quit());
-                    }
                 }
-            })
-            .detach();
-        }
-
-        #[cfg(target_os = "macos")]
-        {
-            cx.activate(true);
-            let _ = window_handle.update(cx, |_, window, _| window.activate_window());
-            cx.spawn(async move |cx| {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(120))
-                    .await;
-                cx.update(|app| {
-                    app.activate(true);
-                    let _ = window_handle.update(app, |_, window, _| window.activate_window());
+            }
+            // GPUI shows the window on its first frame, so polling beats a fixed retry sleep.
+            let deadline = Instant::now() + Duration::from_secs(4);
+            let mut polls = 0u32;
+            let mut activations = 0u32;
+            let mut activated = false;
+            let mut shown = false;
+            loop {
+                polls += 1;
+                if polls == 1 || polls.is_multiple_of(4) {
+                    activations += 1;
+                    let _ = cx.update(|app| {
+                        window_handle
+                            .update(app, |_, window, _| window.resize(initial_size))
+                            .is_ok()
+                    });
+                    activated |= cx.update(|app| {
+                        window_handle
+                            .update(app, |_, window, _| window.activate_window())
+                            .is_ok()
+                    });
+                }
+                let visible = hwnd.is_some_and(window_is_visible);
+                let active = cx.update(|app| {
+                    window_handle
+                        .update(app, |_, window, _| window.is_window_active())
+                        .unwrap_or(false)
                 });
-            })
-            .detach();
+                if visible || active || (hwnd.is_none() && activated) {
+                    shown = true;
+                    log_event(
+                        "INFO",
+                        &format!(
+                            "settings: window shown after hidden placement (attempt {activations}, polls {polls}, visible={visible}, active={active}, elapsed={}ms)",
+                            request_started.elapsed().as_millis()
+                        ),
+                    );
+                    break;
+                }
+                if Instant::now() >= deadline {
+                    break;
+                }
+                cx.background_executor()
+                    .timer(Duration::from_millis(30))
+                    .await;
+            }
+            if !shown {
+                log_event(
+                    "WARN",
+                    &format!(
+                        "settings: window remained hidden after {}ms (activation attempts {activations}); exiting so the next click can retry",
+                        request_started.elapsed().as_millis()
+                    ),
+                );
+                cx.update(|app| app.quit());
+            }
+        })
+        .detach();
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        cx.activate(true);
+        let _ = window_handle.update(cx, |_, window, _| window.activate_window());
+        cx.spawn(async move |cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(120))
+                .await;
+            cx.update(|app| {
+                app.activate(true);
+                let _ = window_handle.update(app, |_, window, _| window.activate_window());
+            });
+        })
+        .detach();
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    let _ = window_handle;
+
+    Some(window_handle)
+}
+
+fn show_settings(
+    cx: &mut App,
+    anchor: Option<AnchorRect>,
+    monitor: Option<DisplayId>,
+    request_started: Instant,
+) {
+    let existing = cx.windows().first().copied();
+    if let Some(handle) = existing {
+        let existing_display = handle
+            .update(cx, |_, window, cx| window_display_id(window, cx))
+            .ok()
+            .flatten();
+        if monitor.is_none() || existing_display == monitor {
+            #[cfg(target_os = "macos")]
+            set_macos_activation_policy(objc2_app_kit::NSApplicationActivationPolicy::Regular);
+            let _ = handle.update(cx, |_, window, _| window.activate_window());
+            #[cfg(target_os = "macos")]
+            cx.activate(true);
+            log_event("INFO", "settings: existing window focused");
+            return;
         }
-        #[cfg(not(any(windows, target_os = "macos")))]
-        let _ = window_handle;
-    });
-    log_event("INFO", "settings: exited");
+        log_event(
+            "INFO",
+            "settings: replacing the window on the requested display",
+        );
+        let removed = handle
+            .update(cx, |_, window, _| window.remove_window())
+            .is_ok();
+        if !removed {
+            log_event("WARN", "settings: remove_window failed before the move");
+        }
+        cx.spawn(async move |cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(50))
+                .await;
+            let _ = cx.update(|app| {
+                open_settings_window(app, anchor, monitor, request_started);
+            });
+        })
+        .detach();
+        return;
+    }
+    open_settings_window(cx, anchor, monitor, request_started);
+}
+
+fn start_request_loop(cx: &mut App) {
+    cx.spawn(async move |cx| {
+        let mut idle_since: Option<Instant> = None;
+        let mut idle_handled = false;
+        loop {
+            cx.background_executor()
+                .timer(Duration::from_millis(REQUEST_POLL_MS))
+                .await;
+            let empty = cx.update(|app| app.windows().is_empty());
+            if empty {
+                if idle_since.is_none() {
+                    idle_since = Some(Instant::now());
+                    idle_handled = false;
+                }
+                if !idle_handled
+                    && idle_since.is_some_and(|at| at.elapsed() >= Duration::from_secs(2))
+                {
+                    let _ = set_gpu_windowed(cx, false).await;
+                    trim_working_set();
+                    #[cfg(target_os = "macos")]
+                    cx.update(|_| {
+                        set_macos_activation_policy(
+                            objc2_app_kit::NSApplicationActivationPolicy::Accessory,
+                        )
+                    });
+                    idle_handled = true;
+                    log_event("INFO", "settings: resident host is idle");
+                }
+            } else {
+                idle_since = None;
+                idle_handled = false;
+            }
+
+            let Some(request) = take_panel_request(PANEL_SETTINGS) else {
+                continue;
+            };
+            if request.is_stale(REQUEST_MAX_AGE_MS) {
+                log_event("INFO", "settings: stale panel request ignored");
+                continue;
+            }
+            if request.action != PanelAction::Open {
+                log_event("WARN", "settings: unsupported panel request ignored");
+                continue;
+            }
+            if !set_gpu_windowed(cx, true).await {
+                log_event(
+                    "WARN",
+                    "settings: DirectX device unavailable; exiting so the next click can retry",
+                );
+                cx.update(|app| app.quit());
+                return;
+            }
+            let anchor = request.anchor;
+            let monitor = request.monitor.map(DisplayId::new);
+            let request_started = Instant::now();
+            let _ = cx.update(|app| show_settings(app, anchor, monitor, request_started));
+            idle_since = None;
+            idle_handled = false;
+        }
+    })
+    .detach();
+}
+
+#[cfg(target_os = "macos")]
+fn set_macos_activation_policy(policy: objc2_app_kit::NSApplicationActivationPolicy) {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::NSApplication;
+
+    if let Some(mtm) = MainThreadMarker::new() {
+        NSApplication::sharedApplication(mtm).setActivationPolicy(policy);
+    }
 }

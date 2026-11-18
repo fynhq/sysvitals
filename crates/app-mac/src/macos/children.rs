@@ -3,6 +3,11 @@
 use super::*;
 use std::time::{Duration, Instant};
 
+use sysvitals_core::cli::AnchorRect;
+use sysvitals_support::{
+    clear_panel_request, write_panel_request, PanelAction, PANEL_HISTORY, PANEL_SETTINGS,
+};
+
 // The history child writes a PID ready marker when its window exists; an unreported child gets a 3 s grace.
 const HISTORY_LAUNCH_GRACE: Duration = Duration::from_secs(3);
 
@@ -17,10 +22,6 @@ fn history_starting(elapsed: Option<Duration>) -> bool {
     elapsed.is_some_and(|elapsed| elapsed < HISTORY_LAUNCH_GRACE)
 }
 
-fn should_close_popup(elapsed: Option<Duration>, ready: bool) -> bool {
-    ready || !history_starting(elapsed)
-}
-
 fn history_ready_path() -> Option<std::path::PathBuf> {
     sysvitals_core::config::data_dir()
         .ok()
@@ -31,17 +32,6 @@ fn clear_history_ready() {
     if let Some(path) = history_ready_path() {
         let _ = std::fs::remove_file(path);
     }
-}
-
-fn marker_pid(text: &str) -> Option<u32> {
-    text.trim().parse().ok()
-}
-
-fn history_reported_ready(child_pid: u32) -> bool {
-    history_ready_path()
-        .and_then(|path| std::fs::read_to_string(path).ok())
-        .and_then(|text| marker_pid(&text))
-        == Some(child_pid)
 }
 
 pub(crate) fn exe_dir() -> Option<std::path::PathBuf> {
@@ -177,8 +167,53 @@ fn launch_panel(
     }
 }
 
+fn panel_request(panel: &str, action: PanelAction) -> Result<(), String> {
+    let rect = anchor_rect();
+    let anchor = rect.map(|(left, top, right, bottom, _)| AnchorRect {
+        left: left as f32,
+        top: top as f32,
+        right: right as f32,
+        bottom: bottom as f32,
+    });
+    let monitor = rect.and_then(|(_, _, _, _, display)| (display != 0).then_some(display));
+    write_panel_request(panel, action, anchor, monitor)
+}
+
+pub(crate) fn prewarm_children() {
+    clear_panel_request(PANEL_SETTINGS);
+    clear_panel_request(PANEL_HISTORY);
+    if !SETTINGS_CHILD.with(child_alive) {
+        launch_panel(
+            "SysVitalsSettings",
+            "prewarm_settings",
+            |cmd| {
+                cmd.arg("--prewarm");
+            },
+            |child| {
+                SETTINGS_CHILD.with(|slot| *slot.borrow_mut() = Some(child));
+            },
+        );
+    }
+    if !HISTORY_CHILD.with(child_alive) {
+        clear_history_ready();
+        launch_panel(
+            "SysVitalsHistory",
+            "prewarm_history",
+            |cmd| {
+                cmd.arg("--prewarm");
+            },
+            |child| {
+                HISTORY_CHILD.with(|slot| *slot.borrow_mut() = Some(child));
+            },
+        );
+    }
+}
+
 pub(crate) fn launch_settings() {
     if SETTINGS_CHILD.with(child_alive) {
+        if let Err(error) = panel_request(PANEL_SETTINGS, PanelAction::Open) {
+            log_event("WARN", &format!("settings: request failed: {error}"));
+        }
         return;
     }
     launch_panel(
@@ -219,19 +254,19 @@ pub(crate) fn close_history() -> bool {
 }
 
 pub(crate) fn toggle_history() {
-    if let Some(pid) = HISTORY_CHILD.with(live_child_pid) {
+    if HISTORY_CHILD.with(live_child_pid).is_some() {
         let elapsed = HISTORY_LAUNCHED_AT.with(|launched| launched.get().map(|at| at.elapsed()));
-        let ready = history_reported_ready(pid);
-        if !should_close_popup(elapsed, ready) {
+        if history_starting(elapsed) {
             log_event(
                 "INFO",
                 "history: popup window not created yet; ignoring toggle until it reports ready",
             );
             return;
         }
-        if close_history() {
-            return;
+        if let Err(error) = panel_request(PANEL_HISTORY, PanelAction::Toggle) {
+            log_event("WARN", &format!("history: request failed: {error}"));
         }
+        return;
     }
     launch_history();
 }
@@ -281,30 +316,5 @@ mod tests {
         assert!(!history_starting(Some(
             HISTORY_LAUNCH_GRACE + Duration::from_secs(1)
         )));
-    }
-
-    #[test]
-    fn a_reported_window_is_closable_immediately() {
-        assert!(should_close_popup(Some(Duration::ZERO), true));
-        assert!(should_close_popup(Some(Duration::from_millis(200)), true));
-    }
-
-    #[test]
-    fn an_unreported_child_stays_protected_until_the_fallback() {
-        assert!(!should_close_popup(Some(Duration::from_millis(500)), false));
-        assert!(!should_close_popup(
-            Some(HISTORY_LAUNCH_GRACE - Duration::from_millis(1)),
-            false
-        ));
-        assert!(should_close_popup(Some(HISTORY_LAUNCH_GRACE), false));
-        assert!(should_close_popup(None, false));
-    }
-
-    #[test]
-    fn ready_marker_parses_a_trailing_newline() {
-        assert_eq!(marker_pid("4242\n"), Some(4242));
-        assert_eq!(marker_pid(" 4242 "), Some(4242));
-        assert_eq!(marker_pid(""), None);
-        assert_eq!(marker_pid("not-a-pid"), None);
     }
 }

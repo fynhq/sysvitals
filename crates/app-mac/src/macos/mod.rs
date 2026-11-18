@@ -318,6 +318,7 @@ pub(crate) fn run() {
             log_event("INFO", "startup: login-item state applied");
         }
 
+        prewarm_children();
         tick();
         app
     });

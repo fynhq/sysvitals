@@ -5,6 +5,11 @@ use std::os::windows::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, MutexGuard};
 
+use sysvitals_core::cli::AnchorRect;
+use sysvitals_support::{
+    clear_panel_request, write_panel_request, PanelAction, PANEL_HISTORY, PANEL_SETTINGS,
+};
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ProcessState {
     Alive,
@@ -15,8 +20,8 @@ enum ProcessState {
 struct Child {
     handle: Option<isize>,
     pid: u32,
-    monitor: i64,
     launching: bool,
+    prewarm: bool,
     shown: bool,
     started_at: Option<Instant>,
 }
@@ -26,8 +31,8 @@ impl Child {
         Self {
             handle: None,
             pid: 0,
-            monitor: 0,
             launching: false,
+            prewarm: false,
             shown: false,
             started_at: None,
         }
@@ -36,7 +41,8 @@ impl Child {
     fn take(&mut self) -> Option<isize> {
         let handle = self.handle.take();
         self.pid = 0;
-        self.monitor = 0;
+        self.launching = false;
+        self.prewarm = false;
         self.shown = false;
         self.started_at = None;
         handle
@@ -125,11 +131,6 @@ fn terminate(slot: &'static Mutex<Child>, wait_for_exit: bool, label: &str) -> b
 pub(crate) fn close_children() {
     let _ = terminate(&HISTORY, false, "history");
     let _ = terminate(&SETTINGS, false, "settings");
-}
-
-pub(crate) fn forget_child_monitors() {
-    lock(&SETTINGS).monitor = 0;
-    lock(&HISTORY).monitor = 0;
 }
 
 pub(crate) unsafe fn init_child_job() {
@@ -227,15 +228,13 @@ fn anchor_args(hwnd: HWND, with_monitor: bool) -> String {
     args
 }
 
-#[allow(clippy::too_many_arguments)]
 fn spawn_child(
     slot: &'static Mutex<Child>,
     label: &'static str,
     exe_name: &'static str,
     args: String,
-    monitor: i64,
     ready_msg: u32,
-    replace: bool,
+    prewarm: bool,
 ) -> bool {
     {
         let mut child = lock(slot);
@@ -247,6 +246,7 @@ fn spawn_child(
             return false;
         }
         child.launching = true;
+        child.prewarm = prewarm;
     }
     let Some(dir) = current_exe_dir() else {
         lock(slot).launching = false;
@@ -262,17 +262,11 @@ fn spawn_child(
         log_event("WARN", &format!("{label} launch: not found: {exe_path}"));
         return false;
     }
-    log_event(
-        "INFO",
-        &format!("launching {exe_name} (replace={replace}) {args}"),
-    );
+    log_event("INFO", &format!("launching {exe_name} {args}"));
     let sentinel_raw = sentinel_hwnd().0 as isize;
     let spawned = std::thread::Builder::new()
         .name(format!("sysvitals-{label}"))
         .spawn(move || {
-            if replace {
-                let _ = terminate(slot, true, label);
-            }
             let started = Instant::now();
             match spawn_process(&exe_path, &dir, Some(&args)) {
                 Ok(handle) => {
@@ -286,7 +280,7 @@ fn spawn_child(
                         let mut child = lock(slot);
                         child.handle = Some(handle.0 as isize);
                         child.pid = pid;
-                        child.monitor = monitor;
+                        child.prewarm = prewarm;
                         child.shown = false;
                         child.started_at = Some(Instant::now());
                         child.launching = false;
@@ -321,91 +315,129 @@ fn spawn_child(
     true
 }
 
-pub(crate) fn launch_settings(hwnd: HWND) {
+fn panel_request(hwnd: HWND, panel: &str, action: PanelAction) -> Result<(), String> {
+    let anchor = window_anchor_logical(hwnd).map(|[left, top, right, bottom]| AnchorRect {
+        left,
+        top,
+        right,
+        bottom,
+    });
     let monitor = window_monitor_id(hwnd);
-    let replace = {
+    write_panel_request(
+        panel,
+        action,
+        anchor,
+        (monitor != 0).then_some(monitor as u64),
+    )
+}
+
+pub(crate) fn prewarm_children() {
+    clear_panel_request(PANEL_SETTINGS);
+    clear_panel_request(PANEL_HISTORY);
+    let args = format!("--parent-pid {} --prewarm", unsafe {
+        GetCurrentProcessId()
+    });
+    let _ = spawn_child(
+        &SETTINGS,
+        "settings",
+        "SysVitalsSettings.exe",
+        args.clone(),
+        WM_APP_SETTINGS_READY,
+        true,
+    );
+    let _ = spawn_child(
+        &HISTORY,
+        "history",
+        "SysVitalsHistory.exe",
+        args,
+        WM_APP_HISTORY_READY,
+        true,
+    );
+}
+
+pub(crate) fn launch_settings(hwnd: HWND) {
+    let (alive, launching, prewarm) = {
         let mut child = lock(&SETTINGS);
         let alive = child_alive(&mut child, "settings");
-        if alive && child.monitor == monitor {
-            log_event("INFO", "settings launch skipped: already on this monitor");
-            return;
-        }
-        alive
+        (alive, child.launching, child.prewarm)
     };
+    if alive || (launching && prewarm) {
+        settings_wait_cursor_begin();
+        if let Err(error) = panel_request(hwnd, PANEL_SETTINGS, PanelAction::Open) {
+            log_event("WARN", &format!("settings: request failed: {error}"));
+            wait_cursor_clear();
+        }
+        return;
+    }
+    if launching {
+        return;
+    }
     settings_wait_cursor_begin();
     if !spawn_child(
         &SETTINGS,
         "settings",
         "SysVitalsSettings.exe",
         anchor_args(hwnd, true),
-        monitor,
         WM_APP_SETTINGS_READY,
-        replace,
+        false,
     ) {
         wait_cursor_clear();
     }
 }
 
-fn launch_history(hwnd: HWND, replace: bool) {
-    let monitor = window_monitor_id(hwnd);
+fn launch_history(hwnd: HWND) {
     history_wait_cursor_begin();
     if !spawn_child(
         &HISTORY,
         "history",
         "SysVitalsHistory.exe",
         anchor_args(hwnd, true),
-        monitor,
         WM_APP_HISTORY_READY,
-        replace,
+        false,
     ) {
         wait_cursor_clear();
     }
 }
 
 pub(crate) fn toggle_history(hwnd: HWND) {
-    let monitor = window_monitor_id(hwnd);
-    let (pid, launching, shown, started_at, same_monitor) = {
+    let (pid, launching, prewarm, shown, started_at) = {
         let mut child = lock(&HISTORY);
         let alive = child_alive(&mut child, "history");
         (
             if alive { child.pid } else { 0 },
             child.launching,
+            child.prewarm,
             child.shown,
             child.started_at,
-            child.monitor == monitor,
         )
     };
     if launching {
-        log_event(
-            "INFO",
-            "history launch skipped: the popup is still starting",
-        );
-        return;
-    }
-    let visible = pid != 0 && visible_window_of_pid(pid);
-    if visible {
-        if same_monitor {
-            let _ = terminate(&HISTORY, false, "history");
+        if prewarm {
+            if let Err(error) = panel_request(hwnd, PANEL_HISTORY, PanelAction::Toggle) {
+                log_event("WARN", &format!("history: request failed: {error}"));
+            }
         } else {
             log_event(
                 "INFO",
-                "history: moving popup to the clicked indicator's screen",
+                "history launch skipped: the popup is still starting",
             );
-            launch_history(hwnd, true);
         }
         return;
     }
-    if pid != 0 {
-        if !shown && started_at.is_some_and(|at| at.elapsed() < Duration::from_secs(3)) {
-            log_event(
-                "INFO",
-                "history: popup is still starting; ignoring the click",
-            );
-            return;
-        }
-        let _ = terminate(&HISTORY, false, "history");
+    if pid == 0 {
+        launch_history(hwnd);
+        return;
     }
-    launch_history(hwnd, false);
+    if !shown && !prewarm && started_at.is_some_and(|at| at.elapsed() < Duration::from_secs(3)) {
+        log_event(
+            "INFO",
+            "history: popup is still starting; ignoring the click",
+        );
+        return;
+    }
+    if let Err(error) = panel_request(hwnd, PANEL_HISTORY, PanelAction::Toggle) {
+        log_event("WARN", &format!("history: request failed: {error}"));
+    }
 }
 
 const WAIT_NONE: u32 = 0;
