@@ -145,7 +145,7 @@ fn main() {
         #[cfg(not(windows))]
         let hosted = true;
         if hosted {
-            start_history_host(cx, prewarm, anchor, monitor, ready_file);
+            start_history_host(cx, resident, prewarm, anchor, monitor, ready_file);
             return;
         }
         if open_history(cx, anchor, monitor, ready_file.as_deref()).is_none() {
@@ -220,6 +220,7 @@ fn spawn_history_activation(cx: &mut App, window_handle: AnyWindowHandle) {
 
 fn start_history_host(
     cx: &mut App,
+    resident: bool,
     prewarm: bool,
     anchor: Option<AnchorRect>,
     monitor: Option<DisplayId>,
