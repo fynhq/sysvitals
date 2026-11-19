@@ -1,4 +1,4 @@
-//! History popup entry: warm GPUI host after the first click; macOS keeps the accessory windowing policy.
+//! History popup entry: a warm GPUI host on Windows, a one-shot popup on macOS.
 
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
@@ -18,13 +18,15 @@ use sysvitals_core::config::{config_path, history_path, Config};
 use sysvitals_core::i18n::{t, Language};
 use sysvitals_core::store::{floor_to_grid, Bucket};
 #[cfg(windows)]
+use sysvitals_panel::parent_pid_arg;
+#[cfg(windows)]
 use sysvitals_panel::set_per_monitor_dpi_aware;
 use sysvitals_panel::{
     acquire_instance_lock, anchor_arg, anchor_monitor_arg, anchor_visible_bounds, backdrop_for,
     detect_material, layout_rect, log_event, log_sanitize_issues, observe_system_appearance,
-    parent_pid_arg, prewarm_arg, set_gpu_windowed, spawn_accent_watch, take_panel_request,
-    trim_working_set, window_display_id, ConfigEvent, InstanceLock, PanelAction, PanelSurface,
-    CONTROL_RADIUS, PANEL_HISTORY,
+    prewarm_arg, set_gpu_windowed, spawn_accent_watch, take_panel_request, trim_working_set,
+    window_display_id, ConfigEvent, InstanceLock, PanelAction, PanelSurface, CONTROL_RADIUS,
+    PANEL_HISTORY,
 };
 
 static START: OnceLock<Instant> = OnceLock::new();
@@ -103,8 +105,13 @@ fn main() {
     #[cfg(windows)]
     set_per_monitor_dpi_aware();
 
+    #[cfg(windows)]
     let resident = parent_pid_arg().is_some();
+    #[cfg(not(windows))]
+    let resident = false;
     let prewarm = prewarm_arg();
+    let ready_file = sysvitals_panel::ready_file_arg();
+    let ready_file_for_exit = ready_file.clone();
     let app = sysvitals_panel::build_panel_app(
         cfg!(target_os = "macos"),
         if resident {
@@ -124,7 +131,6 @@ fn main() {
 
         let anchor = anchor_arg();
         let monitor = anchor_monitor_arg().map(DisplayId::new);
-        let ready_file = sysvitals_panel::ready_file_arg();
         log_event(
             "INFO",
             &format!(
@@ -134,7 +140,11 @@ fn main() {
                 monitor
             ),
         );
-        if resident {
+        #[cfg(windows)]
+        let hosted = resident;
+        #[cfg(not(windows))]
+        let hosted = true;
+        if hosted {
             start_history_host(cx, prewarm, anchor, monitor, ready_file);
             return;
         }
@@ -142,6 +152,11 @@ fn main() {
             cx.quit();
         }
     });
+    if !resident {
+        if let Some(path) = ready_file_for_exit {
+            let _ = std::fs::remove_file(path);
+        }
+    }
     log_event("INFO", "history: exited");
 }
 
@@ -228,22 +243,24 @@ fn start_history_host(
                 .timer(Duration::from_millis(REQUEST_POLL_MS))
                 .await;
             let empty = cx.update(|app| app.windows().is_empty());
-            if empty {
-                if idle_since.is_none() {
-                    idle_since = Some(Instant::now());
+            if resident {
+                if empty {
+                    if idle_since.is_none() {
+                        idle_since = Some(Instant::now());
+                        idle_handled = false;
+                    }
+                    if !idle_handled
+                        && idle_since.is_some_and(|at| at.elapsed() >= Duration::from_secs(2))
+                    {
+                        let _ = set_gpu_windowed(cx, false).await;
+                        trim_working_set();
+                        idle_handled = true;
+                        log_event("INFO", "history: resident host is idle");
+                    }
+                } else {
+                    idle_since = None;
                     idle_handled = false;
                 }
-                if !idle_handled
-                    && idle_since.is_some_and(|at| at.elapsed() >= Duration::from_secs(2))
-                {
-                    let _ = set_gpu_windowed(cx, false).await;
-                    trim_working_set();
-                    idle_handled = true;
-                    log_event("INFO", "history: resident host is idle");
-                }
-            } else {
-                idle_since = None;
-                idle_handled = false;
             }
 
             let Some(request) = take_panel_request(PANEL_HISTORY) else {
@@ -311,25 +328,50 @@ fn apply_history_request(
             let _ = handle.update(cx, |_, window, _| window.activate_window());
             return Ok(());
         }
-        let removed = handle
-            .update(cx, |_, window, _| window.remove_window())
-            .is_ok();
-        if !removed {
-            log_event("WARN", "history: remove_window failed before the move");
-        }
-        log_event("INFO", "history: moving the popup to the requested display");
-        cx.spawn(async move |cx| {
-            cx.background_executor()
-                .timer(Duration::from_millis(50))
-                .await;
-            cx.update(|app| {
-                if open_history(app, anchor, monitor, None).is_none() {
-                    log_event("WARN", "history: reopen on the requested display failed");
+        #[cfg(target_os = "macos")]
+        {
+            // The one-shot macOS host quits with its last window: open the
+            // replacement first so a display move never empties the app. The
+            // old popup also closes itself when the new window takes focus.
+            log_event("INFO", "history: moving the popup to the requested display");
+            if open_history(cx, anchor, monitor, None).is_some() {
+                if cx.windows().contains(&handle)
+                    && handle
+                        .update(cx, |_, window, _| window.remove_window())
+                        .is_err()
+                {
+                    log_event("WARN", "history: old popup did not close after the move");
                 }
-            });
-        })
-        .detach();
-        return Ok(());
+            } else {
+                log_event(
+                    "WARN",
+                    "history: keeping the existing popup; open on the requested display failed",
+                );
+            }
+            return Ok(());
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let removed = handle
+                .update(cx, |_, window, _| window.remove_window())
+                .is_ok();
+            if !removed {
+                log_event("WARN", "history: remove_window failed before the move");
+            }
+            log_event("INFO", "history: moving the popup to the requested display");
+            cx.spawn(async move |cx| {
+                cx.background_executor()
+                    .timer(Duration::from_millis(50))
+                    .await;
+                cx.update(|app| {
+                    if open_history(app, anchor, monitor, None).is_none() {
+                        log_event("WARN", "history: reopen on the requested display failed");
+                    }
+                });
+            })
+            .detach();
+            return Ok(());
+        }
     }
 
     open_history(cx, anchor, monitor, ready_file)

@@ -1,4 +1,4 @@
-//! Child process management for settings and the one-shot history popup.
+//! Child process management: a resident history host and one-shot settings.
 
 use super::*;
 use std::os::windows::process::CommandExt;
@@ -131,6 +131,17 @@ fn terminate(slot: &'static Mutex<Child>, wait_for_exit: bool, label: &str) -> b
 pub(crate) fn close_children() {
     let _ = terminate(&HISTORY, false, "history");
     let _ = terminate(&SETTINGS, false, "settings");
+}
+
+pub(crate) fn reap_children() {
+    let _ = {
+        let mut child = lock(&SETTINGS);
+        child_alive(&mut child, "settings")
+    };
+    let _ = {
+        let mut child = lock(&HISTORY);
+        child_alive(&mut child, "history")
+    };
 }
 
 pub(crate) unsafe fn init_child_job() {
@@ -331,20 +342,12 @@ fn panel_request(hwnd: HWND, panel: &str, action: PanelAction) -> Result<(), Str
     )
 }
 
-pub(crate) fn prewarm_children() {
+pub(crate) fn prewarm_history() {
     clear_panel_request(PANEL_SETTINGS);
     clear_panel_request(PANEL_HISTORY);
     let args = format!("--parent-pid {} --prewarm", unsafe {
         GetCurrentProcessId()
     });
-    let _ = spawn_child(
-        &SETTINGS,
-        "settings",
-        "SysVitalsSettings.exe",
-        args.clone(),
-        WM_APP_SETTINGS_READY,
-        true,
-    );
     let _ = spawn_child(
         &HISTORY,
         "history",
@@ -356,12 +359,12 @@ pub(crate) fn prewarm_children() {
 }
 
 pub(crate) fn launch_settings(hwnd: HWND) {
-    let (alive, launching, prewarm) = {
+    let (alive, launching) = {
         let mut child = lock(&SETTINGS);
         let alive = child_alive(&mut child, "settings");
-        (alive, child.launching, child.prewarm)
+        (alive, child.launching)
     };
-    if alive || (launching && prewarm) {
+    if alive {
         settings_wait_cursor_begin();
         if let Err(error) = panel_request(hwnd, PANEL_SETTINGS, PanelAction::Open) {
             log_event("WARN", &format!("settings: request failed: {error}"));
@@ -372,6 +375,7 @@ pub(crate) fn launch_settings(hwnd: HWND) {
     if launching {
         return;
     }
+    clear_panel_request(PANEL_SETTINGS);
     settings_wait_cursor_begin();
     if !spawn_child(
         &SETTINGS,
@@ -386,6 +390,7 @@ pub(crate) fn launch_settings(hwnd: HWND) {
 }
 
 fn launch_history(hwnd: HWND) {
+    clear_panel_request(PANEL_HISTORY);
     history_wait_cursor_begin();
     if !spawn_child(
         &HISTORY,

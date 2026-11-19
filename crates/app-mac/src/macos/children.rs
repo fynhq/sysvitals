@@ -34,6 +34,16 @@ fn clear_history_ready() {
     }
 }
 
+fn parse_ready_pid(text: &str) -> Option<u32> {
+    text.trim().parse().ok()
+}
+
+fn history_ready_pid() -> Option<u32> {
+    let path = history_ready_path()?;
+    let text = std::fs::read_to_string(path).ok()?;
+    parse_ready_pid(&text)
+}
+
 pub(crate) fn exe_dir() -> Option<std::path::PathBuf> {
     std::env::current_exe()
         .ok()?
@@ -179,36 +189,6 @@ fn panel_request(panel: &str, action: PanelAction) -> Result<(), String> {
     write_panel_request(panel, action, anchor, monitor)
 }
 
-pub(crate) fn prewarm_children() {
-    clear_panel_request(PANEL_SETTINGS);
-    clear_panel_request(PANEL_HISTORY);
-    if !SETTINGS_CHILD.with(child_alive) {
-        launch_panel(
-            "SysVitalsSettings",
-            "prewarm_settings",
-            |cmd| {
-                cmd.arg("--prewarm");
-            },
-            |child| {
-                SETTINGS_CHILD.with(|slot| *slot.borrow_mut() = Some(child));
-            },
-        );
-    }
-    if !HISTORY_CHILD.with(child_alive) {
-        clear_history_ready();
-        launch_panel(
-            "SysVitalsHistory",
-            "prewarm_history",
-            |cmd| {
-                cmd.arg("--prewarm");
-            },
-            |child| {
-                HISTORY_CHILD.with(|slot| *slot.borrow_mut() = Some(child));
-            },
-        );
-    }
-}
-
 pub(crate) fn launch_settings() {
     if SETTINGS_CHILD.with(child_alive) {
         if let Err(error) = panel_request(PANEL_SETTINGS, PanelAction::Open) {
@@ -216,6 +196,7 @@ pub(crate) fn launch_settings() {
         }
         return;
     }
+    clear_panel_request(PANEL_SETTINGS);
     launch_panel(
         "SysVitalsSettings",
         "launch_settings",
@@ -230,6 +211,7 @@ pub(crate) fn launch_history() {
     if HISTORY_CHILD.with(child_alive) {
         return;
     }
+    clear_panel_request(PANEL_HISTORY);
     clear_history_ready();
     let ready_path = history_ready_path();
     launch_panel(
@@ -254,9 +236,10 @@ pub(crate) fn close_history() -> bool {
 }
 
 pub(crate) fn toggle_history() {
-    if HISTORY_CHILD.with(live_child_pid).is_some() {
+    if let Some(pid) = HISTORY_CHILD.with(live_child_pid) {
+        let ready = history_ready_pid() == Some(pid);
         let elapsed = HISTORY_LAUNCHED_AT.with(|launched| launched.get().map(|at| at.elapsed()));
-        if history_starting(elapsed) {
+        if !ready && history_starting(elapsed) {
             log_event(
                 "INFO",
                 "history: popup window not created yet; ignoring toggle until it reports ready",
@@ -316,5 +299,14 @@ mod tests {
         assert!(!history_starting(Some(
             HISTORY_LAUNCH_GRACE + Duration::from_secs(1)
         )));
+    }
+
+    #[test]
+    fn ready_marker_parses_a_trimmed_pid() {
+        assert_eq!(parse_ready_pid("4242"), Some(4242));
+        assert_eq!(parse_ready_pid("4242\n"), Some(4242));
+        assert_eq!(parse_ready_pid(" 4242 \r\n"), Some(4242));
+        assert_eq!(parse_ready_pid("4242 1"), None);
+        assert_eq!(parse_ready_pid(""), None);
     }
 }

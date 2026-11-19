@@ -248,7 +248,7 @@ pub(crate) fn run() {
             }
         }
 
-        prewarm_children();
+        prewarm_history();
         reconcile_overlays();
         if LAST_SNAPSHOT.with(|s| s.borrow().is_none()) {
             sample_tick();
@@ -321,6 +321,7 @@ unsafe extern "system" fn sentinel_wndproc(
                 return LRESULT(0);
             }
             TIMER_CONFIG => {
+                reap_children();
                 poll_config_change();
                 return LRESULT(0);
             }

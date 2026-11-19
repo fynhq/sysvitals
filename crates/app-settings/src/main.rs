@@ -1,4 +1,4 @@
-//! Settings entry: a warm GPUI host after the first launch, with file-based panel requests.
+//! Settings entry: a one-shot GPUI process on both platforms.
 
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
@@ -25,8 +25,8 @@ use sysvitals_core::{t, Anchor, Config, Language, Theme};
 use sysvitals_panel::{
     acquire_instance_lock, anchor_arg, anchor_monitor_arg, anchor_visible_bounds, backdrop_for,
     detect_material, layout_rect, log_event, observe_system_appearance, parent_pid_arg,
-    prewarm_arg, set_gpu_windowed, spawn_accent_watch, take_panel_request, trim_working_set,
-    window_display_id, InstanceLock, PanelAction, PanelSurface, CONTROL_RADIUS, PANEL_SETTINGS,
+    spawn_accent_watch, take_panel_request, window_display_id, InstanceLock, PanelAction,
+    PanelSurface, CONTROL_RADIUS, PANEL_SETTINGS,
 };
 #[cfg(windows)]
 use sysvitals_panel::{preplace_hidden_window, taskbar_al, window_hwnd, window_is_visible};
@@ -95,16 +95,9 @@ fn main() {
     #[cfg(windows)]
     sysvitals_panel::set_per_monitor_dpi_aware();
 
-    let resident = parent_pid_arg().is_some();
-    let prewarm = prewarm_arg();
-    let app = sysvitals_panel::build_panel_app(
-        cfg!(target_os = "macos"),
-        if resident {
-            QuitMode::Explicit
-        } else {
-            QuitMode::LastWindowClosed
-        },
-    );
+    // Settings is one-shot on both platforms: it exists only while its window is open.
+    let app =
+        sysvitals_panel::build_panel_app(cfg!(target_os = "macos"), QuitMode::LastWindowClosed);
 
     log_event(
         "INFO",
@@ -117,23 +110,13 @@ fn main() {
     app.run(move |cx| {
         sysvitals_panel::init_panel(cx, "settings", started, apply_theme_and_accent);
 
-        if resident && prewarm {
-            #[cfg(target_os = "macos")]
-            set_macos_activation_policy(objc2_app_kit::NSApplicationActivationPolicy::Accessory);
-            log_event("INFO", "settings: prewarmed without a window");
-            start_request_loop(cx);
-            return;
-        }
-
         let anchor = anchor_arg();
         let monitor = anchor_monitor_arg().map(DisplayId::new);
         if open_settings_window(cx, anchor, monitor, Instant::now()).is_none() {
             cx.quit();
             return;
         }
-        if resident {
-            start_request_loop(cx);
-        }
+        start_request_loop(cx);
     });
     log_event("INFO", "settings: exited");
 }
@@ -330,89 +313,51 @@ fn show_settings(
             log_event("INFO", "settings: existing window focused");
             return;
         }
+        // The one-shot host quits with its last window, so open the
+        // replacement before removing the old window; a failed open keeps the
+        // existing window instead of leaving no window at all.
         log_event(
             "INFO",
-            "settings: replacing the window on the requested display",
+            "settings: moving the window to the requested display",
         );
-        let removed = handle
-            .update(cx, |_, window, _| window.remove_window())
-            .is_ok();
-        if !removed {
-            log_event("WARN", "settings: remove_window failed before the move");
+        if open_settings_window(cx, anchor, monitor, request_started).is_some() {
+            let removed = handle
+                .update(cx, |_, window, _| window.remove_window())
+                .is_ok();
+            if !removed {
+                log_event("WARN", "settings: remove_window failed after the move");
+            }
+        } else {
+            log_event(
+                "WARN",
+                "settings: keeping the existing window; open on the requested display failed",
+            );
         }
-        cx.spawn(async move |cx| {
-            cx.background_executor()
-                .timer(Duration::from_millis(50))
-                .await;
-            cx.update(|app| {
-                open_settings_window(app, anchor, monitor, request_started);
-            });
-        })
-        .detach();
         return;
     }
     open_settings_window(cx, anchor, monitor, request_started);
 }
 
 fn start_request_loop(cx: &mut App) {
-    cx.spawn(async move |cx| {
-        let mut idle_since: Option<Instant> = None;
-        let mut idle_handled = false;
-        loop {
-            cx.background_executor()
-                .timer(Duration::from_millis(REQUEST_POLL_MS))
-                .await;
-            let empty = cx.update(|app| app.windows().is_empty());
-            if empty {
-                if idle_since.is_none() {
-                    idle_since = Some(Instant::now());
-                    idle_handled = false;
-                }
-                if !idle_handled
-                    && idle_since.is_some_and(|at| at.elapsed() >= Duration::from_secs(2))
-                {
-                    let _ = set_gpu_windowed(cx, false).await;
-                    trim_working_set();
-                    #[cfg(target_os = "macos")]
-                    cx.update(|_| {
-                        set_macos_activation_policy(
-                            objc2_app_kit::NSApplicationActivationPolicy::Accessory,
-                        )
-                    });
-                    idle_handled = true;
-                    log_event("INFO", "settings: resident host is idle");
-                }
-            } else {
-                idle_since = None;
-                idle_handled = false;
-            }
-
-            let Some(request) = take_panel_request(PANEL_SETTINGS) else {
-                continue;
-            };
-            if request.is_stale(REQUEST_MAX_AGE_MS) {
-                log_event("INFO", "settings: stale panel request ignored");
-                continue;
-            }
-            if request.action != PanelAction::Open {
-                log_event("WARN", "settings: unsupported panel request ignored");
-                continue;
-            }
-            if !set_gpu_windowed(cx, true).await {
-                log_event(
-                    "WARN",
-                    "settings: DirectX device unavailable; exiting so the next click can retry",
-                );
-                cx.update(|app| app.quit());
-                return;
-            }
-            let anchor = request.anchor;
-            let monitor = request.monitor.map(DisplayId::new);
-            let request_started = Instant::now();
-            cx.update(|app| show_settings(app, anchor, monitor, request_started));
-            idle_since = None;
-            idle_handled = false;
+    cx.spawn(async move |cx| loop {
+        cx.background_executor()
+            .timer(Duration::from_millis(REQUEST_POLL_MS))
+            .await;
+        let Some(request) = take_panel_request(PANEL_SETTINGS) else {
+            continue;
+        };
+        if request.is_stale(REQUEST_MAX_AGE_MS) {
+            log_event("INFO", "settings: stale panel request ignored");
+            continue;
         }
+        if request.action != PanelAction::Open {
+            log_event("WARN", "settings: unsupported panel request ignored");
+            continue;
+        }
+        let anchor = request.anchor;
+        let monitor = request.monitor.map(DisplayId::new);
+        let request_started = Instant::now();
+        cx.update(|app| show_settings(app, anchor, monitor, request_started));
     })
     .detach();
 }
