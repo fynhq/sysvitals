@@ -14,8 +14,8 @@ use sysvitals_core::backdrop::{
 pub use sysvitals_support::{
     acquire_instance_lock, anchor_arg, anchor_monitor_arg, clear_panel_request, install_panic_hook,
     log_event, log_sanitize_issues, parent_pid_arg, poll_config, prewarm_arg, ready_file_arg,
-    take_panel_request, write_panel_request, ConfigEvent, InstanceLock, PanelAction, PanelRequest,
-    PANEL_HISTORY, PANEL_SETTINGS, SV_BUILD_ID,
+    take_panel_request, unix_ms, write_panel_request, ConfigEvent, InstanceLock, PanelAction,
+    PanelRequest, PANEL_HISTORY, PANEL_SETTINGS, SV_BUILD_ID,
 };
 #[cfg(windows)]
 pub use sysvitals_support::{hkcu_dword, os_build_number, taskbar_al, utf16, ParentProcess};
@@ -48,38 +48,6 @@ pub fn trim_working_set() {
 
 #[cfg(not(windows))]
 pub fn trim_working_set() {}
-
-// Detach DirectX/VSync while the resident host has no windows; reattach before opening one.
-#[cfg(windows)]
-pub async fn set_gpu_windowed(cx: &mut AsyncApp, windowed: bool) -> bool {
-    let current = cx.update(|app| app.graphical_environment().is_some());
-    if current == windowed {
-        return current;
-    }
-    let request = if windowed {
-        gpui_kit::WindowingRequest::Windowed(gpui_kit::GraphicalEnvironment::detect())
-    } else {
-        gpui_kit::WindowingRequest::Headless
-    };
-    match cx.update(|app| app.request_windowing(request)).await {
-        Ok(()) => windowed,
-        Err(error) => {
-            log_event(
-                "WARN",
-                &format!(
-                    "panel: {} the DirectX device failed: {error}",
-                    if windowed { "attaching" } else { "releasing" }
-                ),
-            );
-            current
-        }
-    }
-}
-
-#[cfg(not(windows))]
-pub async fn set_gpu_windowed(_cx: &mut AsyncApp, _windowed: bool) -> bool {
-    true
-}
 
 // Windows only grants SetForegroundWindow to a process that received the last input or is
 // still starting up, so a long-lived host borrows the foreground thread's input state.
@@ -130,14 +98,15 @@ where
     watch_parent(cx, label);
 }
 
-pub fn log_first_frame(
+// The second frame starts only after the first one was drawn, so the gap measures the first paint.
+pub fn log_first_frames(
     window: AnyWindowHandle,
     cx: &mut App,
     label: &'static str,
     started: std::time::Instant,
 ) {
     let _ = window.update(cx, |_, window, _| {
-        window.on_next_frame(move |_, _| {
+        window.on_next_frame(move |window, _| {
             log_event(
                 "INFO",
                 &format!(
@@ -145,6 +114,15 @@ pub fn log_first_frame(
                     started.elapsed().as_millis()
                 ),
             );
+            window.on_next_frame(move |_, _| {
+                log_event(
+                    "INFO",
+                    &format!(
+                        "{label}: second frame at {}ms",
+                        started.elapsed().as_millis()
+                    ),
+                );
+            });
         });
     });
 }

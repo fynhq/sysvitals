@@ -24,7 +24,7 @@ use sysvitals_panel::set_per_monitor_dpi_aware;
 use sysvitals_panel::{
     acquire_instance_lock, anchor_arg, anchor_monitor_arg, anchor_visible_bounds, backdrop_for,
     detect_material, layout_rect, log_event, log_sanitize_issues, observe_system_appearance,
-    prewarm_arg, set_gpu_windowed, spawn_accent_watch, take_panel_request, trim_working_set,
+    prewarm_arg, spawn_accent_watch, take_panel_request, trim_working_set, unix_ms,
     window_display_id, ConfigEvent, InstanceLock, PanelAction, PanelSurface, CONTROL_RADIUS,
     PANEL_HISTORY,
 };
@@ -129,6 +129,10 @@ fn main() {
     );
 
     app.run(move |cx| {
+        log_event(
+            "INFO",
+            &format!("history: app run entered at {}ms", elapsed_ms()),
+        );
         sysvitals_panel::init_panel(cx, "history", started, apply_theme_and_accent);
 
         let anchor = anchor_arg();
@@ -171,7 +175,7 @@ fn open_history(
     let request_started = begin_open();
     let window_handle = open_history_window(cx, anchor, monitor)?;
     write_ready_marker(ready_file);
-    sysvitals_panel::log_first_frame(window_handle, cx, "history", request_started);
+    sysvitals_panel::log_first_frames(window_handle, cx, "history", request_started);
     #[cfg(windows)]
     spawn_history_activation(cx, window_handle);
     Some(window_handle)
@@ -255,8 +259,8 @@ fn start_history_host(
             cx.background_executor()
                 .timer(Duration::from_millis(REQUEST_POLL_MS))
                 .await;
-            let empty = cx.update(|app| app.windows().is_empty());
             if resident {
+                let empty = cx.update(|app| app.windows().is_empty());
                 if empty {
                     if idle_since.is_none() {
                         idle_since = Some(Instant::now());
@@ -265,10 +269,9 @@ fn start_history_host(
                     if !idle_handled
                         && idle_since.is_some_and(|at| at.elapsed() >= Duration::from_secs(2))
                     {
-                        let _ = set_gpu_windowed(cx, false).await;
                         trim_working_set();
                         idle_handled = true;
-                        log_event("INFO", "history: resident host is idle");
+                        log_event("INFO", "history: resident host trimmed its working set");
                     }
                 } else {
                     idle_since = None;
@@ -279,17 +282,14 @@ fn start_history_host(
             let Some(request) = take_panel_request(PANEL_HISTORY) else {
                 continue;
             };
+            let age_ms = unix_ms().saturating_sub(request.requested_at_ms);
+            log_event(
+                "INFO",
+                &format!("history: panel request reached the host {age_ms}ms after the click"),
+            );
             if request.is_stale(REQUEST_MAX_AGE_MS) {
                 log_event("INFO", "history: stale panel request ignored");
                 continue;
-            }
-            if !set_gpu_windowed(cx, true).await {
-                log_event(
-                    "WARN",
-                    "history: DirectX device unavailable; exiting so the next click can retry",
-                );
-                cx.update(|app| app.quit());
-                return;
             }
             let result = cx.update(|app| {
                 apply_history_request(

@@ -108,6 +108,13 @@ fn main() {
     );
 
     app.run(move |cx| {
+        log_event(
+            "INFO",
+            &format!(
+                "settings: app run entered at {}ms",
+                started.elapsed().as_millis()
+            ),
+        );
         sysvitals_panel::init_panel(cx, "settings", started, apply_theme_and_accent);
 
         let anchor = anchor_arg();
@@ -128,6 +135,13 @@ fn open_settings_window(
     request_started: Instant,
 ) -> Option<AnyWindowHandle> {
     let (cfg, config_read_ok) = load_config_with_backup();
+    log_event(
+        "INFO",
+        &format!(
+            "settings: config loaded at {}ms",
+            request_started.elapsed().as_millis()
+        ),
+    );
 
     let titlebar = {
         #[cfg(target_os = "macos")]
@@ -192,7 +206,7 @@ fn open_settings_window(
             request_started.elapsed().as_millis()
         ),
     );
-    sysvitals_panel::log_first_frame(window_handle, cx, "settings", request_started);
+    sysvitals_panel::log_first_frames(window_handle, cx, "settings", request_started);
 
     #[cfg(windows)]
     {
