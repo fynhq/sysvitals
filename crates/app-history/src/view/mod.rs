@@ -8,7 +8,7 @@ use sysvitals_core::config_watch::ConfigWatcher;
 #[cfg(windows)]
 use sysvitals_panel::restore_window_size_after_move;
 
-const BLUR_CLOSE_DELAY: Duration = Duration::from_millis(200);
+const BLUR_CLOSE_DELAY: Duration = Duration::from_millis(100);
 const FOREGROUND_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 fn window_is_foreground(window: &Window) -> bool {
