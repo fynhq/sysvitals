@@ -87,3 +87,8 @@ codegen-units = 1
 # only debuginfo is stripped. The crash hook logs a backtrace, and fully
 # stripping symbols made those frames address-only.
 strip = "debuginfo"
+
+# Dependencies are nearly all of the panel binaries' code, and a cold launch
+# pays to page it in; size-optimize them while workspace crates stay at 3.
+[profile.release.package."*"]
+opt-level = "s"
