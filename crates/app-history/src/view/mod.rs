@@ -8,6 +8,32 @@ use sysvitals_core::config_watch::ConfigWatcher;
 #[cfg(windows)]
 use sysvitals_panel::restore_window_size_after_move;
 
+const BLUR_CLOSE_DELAY: Duration = Duration::from_millis(200);
+const FOREGROUND_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const FOREGROUND_POLL_ATTEMPTS: u32 = 20;
+
+fn window_is_foreground(window: &Window) -> bool {
+    #[cfg(windows)]
+    {
+        window_hwnd(window).is_some_and(window_has_foreground)
+    }
+    #[cfg(not(windows))]
+    {
+        window.is_window_active()
+    }
+}
+
+fn foreground_note() -> String {
+    #[cfg(windows)]
+    {
+        format!(" (foreground: {})", foreground_window_description())
+    }
+    #[cfg(not(windows))]
+    {
+        String::new()
+    }
+}
+
 pub(crate) struct HistoryView {
     pub(crate) lang: Language,
     #[cfg(windows)]
@@ -27,6 +53,8 @@ pub(crate) struct HistoryView {
     pub(crate) config_watcher: ConfigWatcher,
     pub(crate) last_title: Option<String>,
     pub(crate) ever_active: bool,
+    pub(crate) blur_generation: u64,
+    pub(crate) blur_pending: bool,
     pub(crate) _activation: Option<Subscription>,
     pub(crate) _appearance: Option<Subscription>,
     // Keep the shortcut observer alive; dropping it silently disables Esc close and Cmd/Ctrl+C copy.
@@ -89,6 +117,8 @@ impl HistoryView {
             config_watcher: ConfigWatcher::new().without_retry(),
             last_title: None,
             ever_active: false,
+            blur_generation: 0,
+            blur_pending: false,
             _activation: None,
             _appearance: None,
             _shortcuts: None,
@@ -226,27 +256,115 @@ impl HistoryView {
         restore_window_size_after_move(window, &mut self.size_fixed, target);
     }
 
+    fn note_foreground(&mut self, window: &mut Window) {
+        #[cfg(not(windows))]
+        let _ = window;
+        self.ever_active = true;
+        self.blur_generation = self.blur_generation.wrapping_add(1);
+        if self.blur_pending {
+            self.blur_pending = false;
+            log_event(
+                "INFO",
+                "history: popup kept open; the foreground returned during the close grace",
+            );
+        }
+        #[cfg(windows)]
+        self.restore_popup_size(window);
+    }
+
     pub(crate) fn observe_activation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self._activation.is_some() {
             return;
         }
-        if window.is_window_active() {
-            self.ever_active = true;
-            #[cfg(windows)]
-            self.restore_popup_size(window);
-        }
-        // A popup can open unactivated on Windows; only a real activation edge arms click-away, so a fast double-click can leave it stuck.
+        // GPUI's Windows activation is thread-local; arm click-away only on the real foreground and debounce the blur.
         let subscription = cx.observe_window_activation(window, |view, window, cx| {
             if window.is_window_active() {
-                view.ever_active = true;
-                #[cfg(windows)]
-                view.restore_popup_size(window);
-                cx.notify();
+                if window_is_foreground(window) {
+                    view.note_foreground(window);
+                    cx.notify();
+                }
             } else if view.ever_active {
-                window.remove_window();
+                view.blur_pending = true;
+                view.blur_generation = view.blur_generation.wrapping_add(1);
+                let generation = view.blur_generation;
+                log_event(
+                    "INFO",
+                    &format!(
+                        "history: popup lost activation after {}ms{}; closing in {}ms",
+                        elapsed_ms(),
+                        foreground_note(),
+                        BLUR_CLOSE_DELAY.as_millis()
+                    ),
+                );
+                cx.spawn_in(window, async move |this, cx| {
+                    cx.background_executor().timer(BLUR_CLOSE_DELAY).await;
+                    let foreground = this
+                        .update_in(cx, |view, window, _| {
+                            if view.blur_generation != generation {
+                                return None;
+                            }
+                            let foreground = window_is_foreground(window);
+                            if foreground {
+                                view.blur_pending = false;
+                            }
+                            Some(foreground)
+                        })
+                        .ok()
+                        .flatten();
+                    match foreground {
+                        Some(true) => log_event(
+                            "INFO",
+                            "history: popup kept open; the foreground returned during the close grace",
+                        ),
+                        Some(false) => {
+                            log_event(
+                                "INFO",
+                                &format!(
+                                    "history: popup closed after the blur grace{}",
+                                    foreground_note()
+                                ),
+                            );
+                            let _ = this.update_in(cx, |_view, window, _| window.remove_window());
+                        }
+                        None => {}
+                    }
+                })
+                .detach();
             }
         });
         self._activation = Some(subscription);
+        if window_is_foreground(window) {
+            self.note_foreground(window);
+            return;
+        }
+        // SetForegroundWindow can succeed without a fresh activation edge, so poll briefly for the real foreground.
+        cx.spawn_in(window, async move |this, cx| {
+            for _ in 0..FOREGROUND_POLL_ATTEMPTS {
+                let armed = this
+                    .update_in(cx, |view, window, cx| {
+                        if view.ever_active {
+                            return Some(true);
+                        }
+                        if window_is_foreground(window) {
+                            view.note_foreground(window);
+                            cx.notify();
+                            return Some(true);
+                        }
+                        Some(false)
+                    })
+                    .ok()
+                    .flatten();
+                match armed {
+                    Some(true) => return,
+                    Some(false) => {}
+                    None => return,
+                }
+                cx.background_executor()
+                    .timer(FOREGROUND_POLL_INTERVAL)
+                    .await;
+            }
+        })
+        .detach();
     }
 
     pub(crate) fn reload_config(&mut self) -> bool {

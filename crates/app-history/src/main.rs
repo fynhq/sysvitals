@@ -29,7 +29,9 @@ use sysvitals_panel::{
     PANEL_HISTORY,
 };
 #[cfg(windows)]
-use sysvitals_panel::{take_window_foreground, window_hwnd};
+use sysvitals_panel::{
+    foreground_window_description, take_window_foreground, window_has_foreground, window_hwnd,
+};
 
 static START: OnceLock<Instant> = OnceLock::new();
 static OPEN_STARTED: Mutex<Option<Instant>> = Mutex::new(None);

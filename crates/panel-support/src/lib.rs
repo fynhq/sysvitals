@@ -78,6 +78,40 @@ pub fn take_window_foreground(hwnd: windows::Win32::Foundation::HWND) -> bool {
     }
 }
 
+// GPUI reports thread-local activation on Windows, so close rules must compare against the system foreground.
+#[cfg(windows)]
+pub fn window_has_foreground(hwnd: windows::Win32::Foundation::HWND) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+    // SAFETY: GetForegroundWindow returns a borrowed handle that is only compared.
+    unsafe { GetForegroundWindow() == hwnd }
+}
+
+#[cfg(windows)]
+pub fn foreground_window_description() -> String {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetClassNameW, GetForegroundWindow, GetWindowTextW, GetWindowThreadProcessId,
+    };
+    // SAFETY: both text buffers belong to this call and the returned handles are only inspected.
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.is_invalid() {
+            return "none".to_string();
+        }
+        let mut class = [0u16; 128];
+        let class_len = GetClassNameW(hwnd, &mut class).max(0) as usize;
+        let mut title = [0u16; 256];
+        let title_len = GetWindowTextW(hwnd, &mut title).max(0) as usize;
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        format!(
+            "hwnd=0x{:x} pid={pid} class='{}' title='{}'",
+            hwnd.0 as isize,
+            String::from_utf16_lossy(&class[..class_len]),
+            String::from_utf16_lossy(&title[..title_len]),
+        )
+    }
+}
+
 pub fn window_display_id(window: &Window, cx: &App) -> Option<DisplayId> {
     window.display(cx).map(|display| display.id())
 }
