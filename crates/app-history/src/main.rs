@@ -184,13 +184,13 @@ fn open_history(
 #[cfg(windows)]
 fn spawn_history_activation(cx: &mut App, window_handle: AnyWindowHandle) {
     cx.spawn(async move |cx| {
-        let Some(window_handle) = window_handle.downcast::<HistoryView>() else {
-            return;
-        };
+        // gpui_kit::open_window roots the window in its own wrapper view, so
+        // downcast::<HistoryView>() is always None and the handle stays untyped;
+        // the view arms click-away itself from its render pass.
         for attempt in 0..3 {
-            let alive = cx.update(|app| {
+            let active = cx.update(|app| {
                 window_handle
-                    .update(app, |_view, window, _| {
+                    .update(app, |_view, window, _cx| {
                         if let Some(hwnd) = window_hwnd(&*window) {
                             let taken = take_window_foreground(hwnd);
                             if attempt == 0 {
@@ -203,39 +203,22 @@ fn spawn_history_activation(cx: &mut App, window_handle: AnyWindowHandle) {
                                     },
                                 );
                             }
+                        } else if attempt == 0 {
+                            log_event("WARN", "history: popup has no native window handle");
                         }
                         window.activate_window();
+                        window.is_window_active()
                     })
-                    .is_ok()
+                    .ok()
             });
-            if !alive {
+            // None: the window closed before activation settled. Some(true): it is active.
+            if active != Some(false) {
                 return;
             }
             cx.background_executor()
                 .timer(Duration::from_millis(500))
                 .await;
-            let activated = cx.update(|app| {
-                window_handle
-                    .update(app, |view, window, _| {
-                        if window.is_window_active() {
-                            view.ever_active = true;
-                            view.restore_popup_size(window);
-                            true
-                        } else {
-                            false
-                        }
-                    })
-                    .unwrap_or(false)
-            });
-            if activated {
-                return;
-            }
         }
-        let _ = cx.update(|app| {
-            window_handle.update(app, |view, window, _| {
-                view.restore_popup_size(window);
-            })
-        });
         log_event(
             "WARN",
             "history: popup never reported activation; Esc and click-away may not be armed",
