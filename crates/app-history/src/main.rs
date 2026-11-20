@@ -188,7 +188,7 @@ fn spawn_history_activation(cx: &mut App, window_handle: AnyWindowHandle) {
     cx.spawn(async move |cx| {
         // gpui_kit::open_window roots the window in its own wrapper view, so
         // downcast::<HistoryView>() is always None and the handle stays untyped;
-        // the view arms click-away itself from its render pass.
+        // the view watches the system foreground from its render pass.
         for attempt in 0..3 {
             let active = cx.update(|app| {
                 window_handle

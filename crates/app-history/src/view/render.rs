@@ -93,7 +93,7 @@ impl Render for HistoryView {
         } else {
             None
         };
-        self.observe_activation(window, cx);
+        self.watch_foreground(window, cx);
         self.observe_appearance(window, cx);
 
         let reduce_motion = cx.reduce_motion();
