@@ -28,6 +28,8 @@ use sysvitals_panel::{
     window_display_id, ConfigEvent, InstanceLock, PanelAction, PanelSurface, CONTROL_RADIUS,
     PANEL_HISTORY,
 };
+#[cfg(windows)]
+use sysvitals_panel::{take_window_foreground, window_hwnd};
 
 static START: OnceLock<Instant> = OnceLock::new();
 static OPEN_STARTED: Mutex<Option<Instant>> = Mutex::new(None);
@@ -182,9 +184,19 @@ fn spawn_history_activation(cx: &mut App, window_handle: AnyWindowHandle) {
             return;
         };
         for _ in 0..3 {
-            let _ = cx.update(|app| {
-                window_handle.update(app, |_view, window, _| window.activate_window())
+            let alive = cx.update(|app| {
+                window_handle
+                    .update(app, |_view, window, _| {
+                        if let Some(hwnd) = window_hwnd(&*window) {
+                            take_window_foreground(hwnd);
+                        }
+                        window.activate_window();
+                    })
+                    .is_ok()
             });
+            if !alive {
+                return;
+            }
             cx.background_executor()
                 .timer(Duration::from_millis(500))
                 .await;
@@ -212,7 +224,7 @@ fn spawn_history_activation(cx: &mut App, window_handle: AnyWindowHandle) {
         });
         log_event(
             "WARN",
-            "history: popup shown without activation; click-away is not armed",
+            "history: popup never took the foreground; Esc and click-away are not armed",
         );
     })
     .detach();

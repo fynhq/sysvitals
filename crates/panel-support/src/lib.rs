@@ -81,6 +81,35 @@ pub async fn set_gpu_windowed(_cx: &mut AsyncApp, _windowed: bool) -> bool {
     true
 }
 
+// Windows only grants SetForegroundWindow to a process that received the last input or is
+// still starting up, so a long-lived host borrows the foreground thread's input state.
+#[cfg(windows)]
+pub fn take_window_foreground(hwnd: windows::Win32::Foundation::HWND) -> bool {
+    use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, GetWindowThreadProcessId, IsHungAppWindow, SetForegroundWindow,
+    };
+    // SAFETY: every handle comes from the OS in this scope and attach/detach stay paired.
+    unsafe {
+        let foreground = GetForegroundWindow();
+        if foreground == hwnd {
+            return true;
+        }
+        // Attaching to a hung thread would stall this one, so leave the popup unfocused instead.
+        if !foreground.is_invalid() && IsHungAppWindow(foreground).as_bool() {
+            return false;
+        }
+        let current = GetCurrentThreadId();
+        let owner = GetWindowThreadProcessId(foreground, None);
+        if owner == 0 || owner == current || !AttachThreadInput(current, owner, true).as_bool() {
+            return SetForegroundWindow(hwnd).as_bool();
+        }
+        let taken = SetForegroundWindow(hwnd).as_bool();
+        AttachThreadInput(current, owner, false);
+        taken
+    }
+}
+
 pub fn window_display_id(window: &Window, cx: &App) -> Option<DisplayId> {
     window.display(cx).map(|display| display.id())
 }
