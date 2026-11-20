@@ -73,7 +73,7 @@ pub fn take_window_foreground(hwnd: windows::Win32::Foundation::HWND) -> bool {
             return SetForegroundWindow(hwnd).as_bool();
         }
         let taken = SetForegroundWindow(hwnd).as_bool();
-        AttachThreadInput(current, owner, false);
+        let _ = AttachThreadInput(current, owner, false);
         taken
     }
 }

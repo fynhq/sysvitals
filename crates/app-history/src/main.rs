@@ -187,12 +187,22 @@ fn spawn_history_activation(cx: &mut App, window_handle: AnyWindowHandle) {
         let Some(window_handle) = window_handle.downcast::<HistoryView>() else {
             return;
         };
-        for _ in 0..3 {
+        for attempt in 0..3 {
             let alive = cx.update(|app| {
                 window_handle
                     .update(app, |_view, window, _| {
                         if let Some(hwnd) = window_hwnd(&*window) {
-                            take_window_foreground(hwnd);
+                            let taken = take_window_foreground(hwnd);
+                            if attempt == 0 {
+                                log_event(
+                                    if taken { "INFO" } else { "WARN" },
+                                    if taken {
+                                        "history: popup took the system foreground"
+                                    } else {
+                                        "history: the system denied the popup the foreground"
+                                    },
+                                );
+                            }
                         }
                         window.activate_window();
                     })
@@ -228,7 +238,7 @@ fn spawn_history_activation(cx: &mut App, window_handle: AnyWindowHandle) {
         });
         log_event(
             "WARN",
-            "history: popup never took the foreground; Esc and click-away are not armed",
+            "history: popup never reported activation; Esc and click-away may not be armed",
         );
     })
     .detach();
