@@ -189,7 +189,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "app-history"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "arboard",
  "gpui-kit",
@@ -200,7 +200,7 @@ dependencies = [
 
 [[package]]
 name = "app-mac"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "block2 0.6.2",
  "objc2 0.6.5",
@@ -212,7 +212,7 @@ dependencies = [
 
 [[package]]
 name = "app-settings"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "gpui-kit",
  "objc2 0.6.5",
@@ -226,7 +226,7 @@ dependencies = [
 
 [[package]]
 name = "app-win"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "sysvitals-build",
  "sysvitals-core",
@@ -6328,14 +6328,14 @@ dependencies = [
 
 [[package]]
 name = "sysvitals-build"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "embed-resource",
 ]
 
 [[package]]
 name = "sysvitals-core"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -6349,7 +6349,7 @@ dependencies = [
 
 [[package]]
 name = "sysvitals-panel"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "gpui-kit",
  "libc",
@@ -6363,7 +6363,7 @@ dependencies = [
 
 [[package]]
 name = "sysvitals-support"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "chrono",
  "libc",
