@@ -200,7 +200,7 @@ fn install_signal_logging() {
     CRASH_LOG_FD.store(open_crash_log_fd(), Ordering::Relaxed);
     for sig in CRASH_SIGNALS {
         let act = libc::sigaction {
-            sa_sigaction: crash_signal_handler as libc::sighandler_t,
+            sa_sigaction: crash_signal_handler as *const () as libc::sighandler_t,
             sa_mask: 0,
             sa_flags: libc::SA_SIGINFO,
         };
