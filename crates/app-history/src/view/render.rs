@@ -30,7 +30,7 @@ fn legend_entry(
         .child(div().text_xs().text_color(fg.opacity(0.9)).child(value))
 }
 
-fn natural_path(points: &[(f32, f32)]) -> Option<Path<Pixels>> {
+fn natural_path(points: &[(f32, f32)]) -> Option<Path> {
     let (first, _) = points.split_first()?;
     let mut path = PathBuilder::stroke(px(1.));
     path.move_to(point(px(first.0), px(first.1)));

@@ -27,10 +27,10 @@ publish = false
 
 [workspace.dependencies]
 # Single source of truth for versions; crates inherit with `workspace = true`.
-sysinfo = { version = "=0.40.3", default-features = false, features = ["system", "network"] }
+sysinfo = { version = "=0.40.4", default-features = false, features = ["system", "network"] }
 serde = { version = "=1.0.229", features = ["derive"] }
-toml = "=1.2.1"
-anyhow = "=1.0.104"
+toml = "=1.2.2"
+anyhow = "=1.0.105"
 directories = "=6.0.0"
 # `bundled` statically embeds SQLite so there is no system-library dependency
 # on Windows/macOS. History storage is the only consumer.
@@ -64,8 +64,10 @@ sysvitals-core = { path = "crates/core" }
 sysvitals-support = { path = "crates/support" }
 
 # GPUI Kit: modern cross-platform UI framework for the settings window.
-# Pinned to the exact version; GPUI is pre-1.0 and moves fast.
-gpui-kit = "=0.10.0"
+# Pinned to the exact version; GPUI is pre-1.0 and moves fast. Shipped targets
+# are Windows and macOS only, so the Linux-only `x11` default is opted out;
+# `component` and `assets` mirror the remaining defaults.
+gpui-kit = { version = "=0.11.0", default-features = false, features = ["component", "assets"] }
 
 # Local-time formatting for history chart labels and clipboard rows. Only the
 # `clock`+`std` subset is enabled (no parsing, locales, or serde).

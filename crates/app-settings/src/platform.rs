@@ -87,12 +87,12 @@ pub(crate) fn settings_window_bounds(
         if let Some(display) = cx.primary_display() {
             return centered_on_work(display.visible_bounds(), requested);
         }
-        return WindowBounds::centered(requested, cx);
+        return WindowBounds::centered(None, requested, cx);
     };
     let work = anchor_visible_bounds(cx, anchor, monitor)
         .or_else(|| cx.primary_display().map(|display| display.visible_bounds()));
     let Some(work) = work else {
-        return WindowBounds::centered(requested, cx);
+        return WindowBounds::centered(None, requested, cx);
     };
     centered_on_work(work, requested)
 }

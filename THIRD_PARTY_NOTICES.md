@@ -4,10 +4,10 @@ SysVitals includes open-source third-party components. This notice is
 included in the Windows portable zip and in the macOS app bundle.
 
 The list covers the components used by the Windows and macOS binaries
-(508 packages in the union of all four shipped targets).
+(510 packages in the union of all four shipped targets).
 A package may be present on only some platforms or architectures.
 
-Generated from Cargo.lock. Dependency-set fingerprint: 1709855a1e0e22540b7201531a01fc9f4f388645f42a490378439ad971f82cf8.
+Generated from Cargo.lock. Dependency-set fingerprint: bf5b5429eec4a6d618c8b08f258f8a2c4750d8c613c77af4d2a6894021fbffd5.
 
 License expressions are shown as declared by the upstream package (usually
 SPDX syntax). Where a component is offered under several licenses, SysVitals
@@ -33,7 +33,7 @@ authoritative.
 | allocator-api2 | 0.2.21 | MIT OR Apache-2.0 | https://github.com/zakarumych/allocator-api2 |
 | annotate-snippets | 0.12.18 | MIT OR Apache-2.0 | https://github.com/rust-lang/annotate-snippets-rs |
 | anstyle | 1.0.14 | MIT OR Apache-2.0 | https://github.com/rust-cli/anstyle.git |
-| anyhow | 1.0.104 | MIT OR Apache-2.0 | https://github.com/dtolnay/anyhow |
+| anyhow | 1.0.105 | MIT OR Apache-2.0 | https://github.com/dtolnay/anyhow |
 | arboard | 3.7.0 | MIT OR Apache-2.0 | https://github.com/1Password/arboard |
 | arc-swap | 1.9.5 | MIT OR Apache-2.0 | https://github.com/vorner/arc-swap |
 | arg_enum_proc_macro | 0.3.4 | MIT | https://github.com/lu-zero/arg_enum_proc_macro |
@@ -131,7 +131,6 @@ authoritative.
 | flate2 | 1.1.11 | MIT OR Apache-2.0 | https://github.com/rust-lang/flate2-rs |
 | float-cmp | 0.9.0 | MIT | https://github.com/mikedilger/float-cmp |
 | float-ord | 0.3.2 | MIT / Apache-2.0 | https://github.com/notriddle/rust-float-ord |
-| float_next_after | 1.0.0 | MIT | https://gitlab.com/bronsonbdevost/next_afterf |
 | fluent-uri | 0.1.4 | MIT | https://github.com/yescallop/fluent-uri-rs |
 | flume | 0.12.0 | Apache-2.0/MIT | https://github.com/zesterer/flume |
 | foldhash | 0.2.0 | Zlib | https://github.com/orlp/foldhash |
@@ -139,7 +138,7 @@ authoritative.
 | foreign-types | 0.5.0 | MIT/Apache-2.0 | https://github.com/sfackler/foreign-types |
 | foreign-types-macros | 0.2.4 | MIT/Apache-2.0 | https://github.com/sfackler/foreign-types |
 | foreign-types-shared | 0.3.1 | MIT/Apache-2.0 | https://github.com/sfackler/foreign-types |
-| form_urlencoded | 1.2.2 | MIT OR Apache-2.0 | https://github.com/servo/rust-url |
+| form_urlencoded | 1.2.3 | MIT OR Apache-2.0 | https://github.com/servo/rust-url |
 | futf | 0.1.5 | MIT / Apache-2.0 | https://github.com/servo/futf |
 | futures | 0.3.34 | MIT OR Apache-2.0 | https://github.com/rust-lang/futures-rs |
 | futures-channel | 0.3.34 | MIT OR Apache-2.0 | https://github.com/rust-lang/futures-rs |
@@ -159,34 +158,34 @@ authoritative.
 | glob | 0.3.4 | MIT OR Apache-2.0 | https://github.com/rust-lang/glob |
 | globset | 0.4.21 | Unlicense OR MIT | https://github.com/BurntSushi/ripgrep/tree/master/crates/globset |
 | globwalk | 0.8.1 | MIT | https://github.com/gilnaa/globwalk |
-| gpui-base | 0.10.0 | Apache-2.0 | https://github.com/longbridge/gpui-kit |
-| gpui-component | 0.10.0 | Apache-2.0 | https://github.com/longbridge/gpui-kit |
-| gpui-component-macros | 0.10.0 | Apache-2.0 | https://crates.io/crates/gpui-component-macros/0.10.0 |
-| gpui-kit | 0.10.0 | Apache-2.0 | https://github.com/longbridge/gpui-kit |
-| gpui-kit-assets | 0.10.0 | Apache-2.0 | https://github.com/longbridge/gpui-kit |
-| gpui-pre | 0.3.12 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-apple | 0.3.12 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-collections | 0.3.12 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-derive-refineable | 0.3.12 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-http-client | 0.3.12 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-macos | 0.3.12 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-macros | 0.3.12 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-platform | 0.3.12 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-refineable | 0.3.12 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-scheduler | 0.3.12 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-shared-string | 0.3.12 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-sum-tree | 0.3.12 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-util | 0.3.12 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-windows | 0.3.12 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-ztracing | 0.3.12 | Apache-2.0 | https://github.com/zed-industries/zed |
-| gpui-pre-ztracing-macro | 0.3.12 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-base | 0.11.0 | Apache-2.0 | https://github.com/longbridge/gpui-kit |
+| gpui-component | 0.11.0 | Apache-2.0 | https://github.com/longbridge/gpui-kit |
+| gpui-component-macros | 0.11.0 | Apache-2.0 | https://crates.io/crates/gpui-component-macros/0.11.0 |
+| gpui-kit | 0.11.0 | Apache-2.0 | https://github.com/longbridge/gpui-kit |
+| gpui-kit-assets | 0.11.0 | Apache-2.0 | https://github.com/longbridge/gpui-kit |
+| gpui-pre | 0.3.14 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-apple | 0.3.14 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-collections | 0.3.14 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-derive-refineable | 0.3.14 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-http-client | 0.3.14 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-macos | 0.3.14 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-macros | 0.3.14 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-platform | 0.3.14 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-refineable | 0.3.14 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-scheduler | 0.3.14 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-shared-string | 0.3.14 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-sum-tree | 0.3.14 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-util | 0.3.14 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-windows | 0.3.14 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-ztracing | 0.3.14 | Apache-2.0 | https://github.com/zed-industries/zed |
+| gpui-pre-ztracing-macro | 0.3.14 | Apache-2.0 | https://github.com/zed-industries/zed |
 | granit-parser | 1.3.0 | MIT OR Apache-2.0 | https://github.com/bourumir-wyngs/granit-parser |
 | half | 2.7.1 | MIT OR Apache-2.0 | https://github.com/VoidStarKat/half-rs |
 | hash32 | 0.3.1 | MIT OR Apache-2.0 | https://github.com/japaric/hash32 |
 | hashbrown | 0.16.1 | MIT OR Apache-2.0 | https://github.com/rust-lang/hashbrown |
 | hashbrown | 0.17.1 | MIT OR Apache-2.0 | https://github.com/rust-lang/hashbrown |
 | hashlink | 0.12.2 | MIT OR Apache-2.0 | https://github.com/djc/hashlink |
-| heapless | 0.9.3 | MIT OR Apache-2.0 | https://github.com/rust-embedded/heapless |
+| heapless | 0.9.4 | MIT OR Apache-2.0 | https://github.com/rust-embedded/heapless |
 | heck | 0.5.0 | MIT OR Apache-2.0 | https://github.com/withoutboats/heck |
 | html5ever | 0.27.0 | MIT OR Apache-2.0 | https://github.com/servo/html5ever |
 | http | 1.5.0 | MIT OR Apache-2.0 | https://github.com/hyperium/http |
@@ -219,6 +218,11 @@ authoritative.
 | itertools | 0.13.0 | MIT OR Apache-2.0 | https://github.com/rust-itertools/itertools |
 | itertools | 0.14.0 | MIT OR Apache-2.0 | https://github.com/rust-itertools/itertools |
 | itoa | 1.0.19 | MIT OR Apache-2.0 | https://github.com/dtolnay/itoa |
+| jiff | 1.0.2 | Unlicense OR MIT | https://github.com/BurntSushi/jiff |
+| jiff-core | 1.0.1 | Unlicense OR MIT | https://github.com/BurntSushi/jiff |
+| jiff-static | 1.0.2 | Unlicense OR MIT | https://github.com/BurntSushi/jiff |
+| jiff-tzdb | 1.0.0 | Unlicense OR MIT | https://github.com/BurntSushi/jiff |
+| jiff-tzdb-platform | 1.0.0 | Unlicense OR MIT | https://github.com/BurntSushi/jiff |
 | kurbo | 0.11.3 | Apache-2.0 OR MIT | https://github.com/linebender/kurbo |
 | kurbo | 0.13.1 | Apache-2.0 OR MIT | https://github.com/linebender/kurbo |
 | lazy_static | 1.5.1 | MIT OR Apache-2.0 | https://github.com/rust-lang-nursery/lazy-static.rs |
@@ -233,11 +237,8 @@ authoritative.
 | log | 0.4.35 | MIT OR Apache-2.0 | https://github.com/rust-lang/log |
 | loop9 | 0.1.5 | MIT | https://gitlab.com/kornelski/loop9.git |
 | lsp-types | 0.97.0 | MIT | https://github.com/gluon-lang/lsp-types |
-| lyon | 1.0.19 | MIT OR Apache-2.0 | https://github.com/nical/lyon |
-| lyon_algorithms | 1.0.22 | MIT OR Apache-2.0 | https://github.com/nical/lyon |
 | lyon_geom | 1.0.20 | MIT OR Apache-2.0 | https://github.com/nical/lyon |
 | lyon_path | 1.0.19 | MIT OR Apache-2.0 | https://github.com/nical/lyon |
-| lyon_tessellation | 1.0.23 | MIT OR Apache-2.0 | https://github.com/nical/lyon |
 | mac | 0.1.1 | MIT/Apache-2.0 | https://github.com/reem/rust-mac.git |
 | mach2 | 0.6.0 | BSD-2-Clause OR MIT OR Apache-2.0 | https://github.com/JohnTitor/mach2 |
 | markdown | 1.0.0 | MIT | https://github.com/wooorm/markdown-rs |
@@ -411,7 +412,7 @@ authoritative.
 | synstructure | 0.14.0 | MIT | https://github.com/mystor/synstructure |
 | sys-locale | 0.3.2 | MIT OR Apache-2.0 | https://github.com/1Password/sys-locale |
 | sysinfo | 0.31.4 | MIT | https://github.com/GuillaumeGomez/sysinfo |
-| sysinfo | 0.40.3 | MIT | https://github.com/GuillaumeGomez/sysinfo |
+| sysinfo | 0.40.4 | MIT | https://github.com/GuillaumeGomez/sysinfo |
 | taffy | 0.15.1 | MIT | https://github.com/DioxusLabs/taffy |
 | target-features | 0.1.6 | MIT OR Apache-2.0 | https://github.com/calebzulawski/target-features |
 | tendril | 0.4.3 | MIT/Apache-2.0 | https://github.com/servo/tendril |
@@ -423,12 +424,12 @@ authoritative.
 | tinystr | 0.8.5 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
 | tinyvec | 1.13.3 | Zlib OR Apache-2.0 OR MIT | https://github.com/Lokathor/tinyvec |
 | toml | 0.8.23 | MIT OR Apache-2.0 | https://github.com/toml-rs/toml |
-| toml | 1.2.1+spec-1.1.0 | MIT OR Apache-2.0 | https://github.com/toml-rs/toml |
+| toml | 1.2.2+spec-1.1.0 | MIT OR Apache-2.0 | https://github.com/toml-rs/toml |
 | toml_datetime | 0.6.11 | MIT OR Apache-2.0 | https://github.com/toml-rs/toml |
 | toml_datetime | 1.1.3+spec-1.1.0 | MIT OR Apache-2.0 | https://github.com/toml-rs/toml |
 | toml_edit | 0.22.27 | MIT OR Apache-2.0 | https://github.com/toml-rs/toml |
 | toml_edit | 0.25.19+spec-1.1.0 | MIT OR Apache-2.0 | https://github.com/toml-rs/toml |
-| toml_parser | 1.1.5+spec-1.1.0 | MIT OR Apache-2.0 | https://github.com/toml-rs/toml |
+| toml_parser | 1.1.6+spec-1.1.0 | MIT OR Apache-2.0 | https://github.com/toml-rs/toml |
 | toml_write | 0.1.2 | MIT OR Apache-2.0 | https://github.com/toml-rs/toml |
 | toml_writer | 1.2.0+spec-1.1.0 | MIT OR Apache-2.0 | https://github.com/toml-rs/toml |
 | tracing | 0.1.44 | MIT | https://github.com/tokio-rs/tracing |
@@ -449,7 +450,7 @@ authoritative.
 | unicode-segmentation | 1.13.3 | MIT OR Apache-2.0 | https://github.com/unicode-rs/unicode-segmentation |
 | unicode-vo | 0.1.0 | MIT/Apache-2.0 | https://github.com/RazrFalcon/unicode-vo |
 | unicode-width | 0.2.3 | MIT OR Apache-2.0 | https://github.com/unicode-rs/unicode-width |
-| url | 2.5.8 | MIT OR Apache-2.0 | https://github.com/servo/rust-url |
+| url | 2.5.9 | MIT OR Apache-2.0 | https://github.com/servo/rust-url |
 | usvg | 0.45.1 | Apache-2.0 OR MIT | https://github.com/linebender/resvg |
 | usvg | 0.46.0 | Apache-2.0 OR MIT | https://github.com/linebender/resvg |
 | utf-8 | 0.7.6 | MIT OR Apache-2.0 | https://github.com/SimonSapin/rust-utf8 |
@@ -499,6 +500,7 @@ authoritative.
 | windows-strings | 0.1.0 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
 | windows-strings | 0.4.2 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
 | windows-strings | 0.5.1 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
+| windows-sys | 0.52.0 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
 | windows-sys | 0.61.2 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
 | windows-targets | 0.52.6 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
 | windows-threading | 0.1.0 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
@@ -539,7 +541,7 @@ components whose packaged crate does not include a license file.
 
 ### AccessKit__accesskit / main__LICENSE-APACHE / AccessKit__accesskit / master__LICENSE-APACHE / LICENSE-APACHE
 
-Used by: accesskit 0.24.1, accesskit_consumer 0.38.0, accesskit_macos 0.26.3, accesskit_windows 0.34.0, allocator-api2 0.2.21, anyhow 1.0.104, dyn-clone 1.0.20, enumn 0.1.14, inventory 0.3.25, itoa 1.0.19, libc 0.2.191, mach2 0.6.0, paste 1.0.15, pastey 0.1.1, proc-macro2 1.0.107, quote 1.0.47, ref-cast 1.0.27, ref-cast-impl 1.0.27, rustc-hash 2.1.3, rustversion 1.0.23, ryu 1.0.23, semver 1.0.28, serde 1.0.229, serde-saphyr 1.3.0, serde_core 1.0.229, serde_derive 1.0.229, serde_derive_internals 0.30.0, serde_json 1.0.154, serde_repr 0.1.21, serde_urlencoded 0.7.1, syn 2.0.119, syn 3.0.10, thiserror 2.0.21, thiserror-impl 2.0.21, unicode-ident 1.0.27, utf-8 0.7.6
+Used by: accesskit 0.24.1, accesskit_consumer 0.38.0, accesskit_macos 0.26.3, accesskit_windows 0.34.0, allocator-api2 0.2.21, anyhow 1.0.105, dyn-clone 1.0.20, enumn 0.1.14, inventory 0.3.25, itoa 1.0.19, libc 0.2.191, mach2 0.6.0, paste 1.0.15, pastey 0.1.1, proc-macro2 1.0.107, quote 1.0.47, ref-cast 1.0.27, ref-cast-impl 1.0.27, rustc-hash 2.1.3, rustversion 1.0.23, ryu 1.0.23, semver 1.0.28, serde 1.0.229, serde-saphyr 1.3.0, serde_core 1.0.229, serde_derive 1.0.229, serde_derive_internals 0.30.0, serde_json 1.0.154, serde_repr 0.1.21, serde_urlencoded 0.7.1, syn 2.0.119, syn 3.0.10, thiserror 2.0.21, thiserror-impl 2.0.21, unicode-ident 1.0.27, utf-8 0.7.6
 
 <pre>
 Apache License
@@ -722,7 +724,7 @@ END OF TERMS AND CONDITIONS
 
 ### AccessKit__accesskit / main__LICENSE-MIT / AccessKit__accesskit / master__LICENSE-MIT / LICENSE-MIT
 
-Used by: accesskit 0.24.1, accesskit_consumer 0.38.0, accesskit_macos 0.26.3, accesskit_windows 0.34.0, adler2 2.0.1, allocator-api2 0.2.21, anyhow 1.0.104, async-channel 2.5.0, async-executor 1.14.1, async-fs 2.2.0, async-io 2.6.0, async-lock 3.5.0, async-net 2.0.0, async-process 2.5.0, async-signal 0.2.14, async-task 4.7.1, atomic-waker 1.1.2, blocking 1.7.0, concurrent-queue 2.5.0, displaydoc 0.2.7, dyn-clone 1.0.20, enumn 0.1.14, event-listener 5.4.2, event-listener-strategy 0.5.4, fastrand 2.5.0, flume 0.12.0, futures-lite 2.6.1, inventory 0.3.25, itoa 1.0.19, lazy_static 1.5.1, once_cell 1.21.4, parking 2.2.1, paste 1.0.15, pastey 0.1.1, pin-project 1.1.13, pin-project-internal 1.1.13, pin-project-lite 0.2.17, piper 0.2.5, polling 3.11.0, proc-macro-crate 3.5.0, proc-macro2 1.0.107, quote 1.0.47, ref-cast 1.0.27, ref-cast-impl 1.0.27, rustc-hash 2.1.3, rustix 1.1.6, rustversion 1.0.23, semver 1.0.28, serde 1.0.229, serde-saphyr 1.3.0, serde_core 1.0.229, serde_derive 1.0.229, serde_derive_internals 0.30.0, serde_json 1.0.154, serde_repr 0.1.21, smol 2.0.2, smol_str 0.3.7, syn 2.0.119, syn 3.0.10, thiserror 2.0.21, thiserror-impl 2.0.21, unicode-ident 1.0.27, utf-8 0.7.6, waker-fn 1.2.0, zed-font-kit 0.14.1-zed, zmij 1.0.23
+Used by: accesskit 0.24.1, accesskit_consumer 0.38.0, accesskit_macos 0.26.3, accesskit_windows 0.34.0, adler2 2.0.1, allocator-api2 0.2.21, anyhow 1.0.105, async-channel 2.5.0, async-executor 1.14.1, async-fs 2.2.0, async-io 2.6.0, async-lock 3.5.0, async-net 2.0.0, async-process 2.5.0, async-signal 0.2.14, async-task 4.7.1, atomic-waker 1.1.2, blocking 1.7.0, concurrent-queue 2.5.0, displaydoc 0.2.7, dyn-clone 1.0.20, enumn 0.1.14, event-listener 5.4.2, event-listener-strategy 0.5.4, fastrand 2.5.0, flume 0.12.0, futures-lite 2.6.1, inventory 0.3.25, itoa 1.0.19, lazy_static 1.5.1, once_cell 1.21.4, parking 2.2.1, paste 1.0.15, pastey 0.1.1, pin-project 1.1.13, pin-project-internal 1.1.13, pin-project-lite 0.2.17, piper 0.2.5, polling 3.11.0, proc-macro-crate 3.5.0, proc-macro2 1.0.107, quote 1.0.47, ref-cast 1.0.27, ref-cast-impl 1.0.27, rustc-hash 2.1.3, rustix 1.1.6, rustversion 1.0.23, semver 1.0.28, serde 1.0.229, serde-saphyr 1.3.0, serde_core 1.0.229, serde_derive 1.0.229, serde_derive_internals 0.30.0, serde_json 1.0.154, serde_repr 0.1.21, smol 2.0.2, smol_str 0.3.7, syn 2.0.119, syn 3.0.10, thiserror 2.0.21, thiserror-impl 2.0.21, unicode-ident 1.0.27, utf-8 0.7.6, waker-fn 1.2.0, zed-font-kit 0.14.1-zed, zmij 1.0.23
 
 <pre>
 Permission is hereby granted, free of charge, to any
@@ -752,7 +754,7 @@ DEALINGS IN THE SOFTWARE.
 
 ### LICENSE / LICENSE-APACHE / aclysma__profiling / master__LICENSE-APACHE / servo__pathfinder / main__LICENSE-APACHE / servo__pathfinder / master__LICENSE-APACHE
 
-Used by: addr2line 0.27.1, aligned 0.4.3, arc-swap 1.9.5, arrayvec 0.7.8, as-slice 0.2.1, async-channel 2.5.0, async-executor 1.14.1, async-fs 2.2.0, async-io 2.6.0, async-lock 3.5.0, async-net 2.0.0, async-process 2.5.0, async-signal 0.2.14, async-task 4.7.1, atomic-waker 1.1.2, backtrace 0.3.77, base64 0.22.1, base64 0.23.1, bitflags 1.3.2, bitflags 2.13.2, bitstream-io 4.10.0, blocking 1.7.0, bstr 1.13.1, bumpalo 3.20.4, cfg-if 1.0.5, concurrent-queue 2.5.0, core-foundation 0.10.1, core-foundation-sys 0.8.7, core-graphics 0.24.0, core-graphics-types 0.2.0, core-text 21.0.0, core_detect 1.0.0, crossbeam-deque 0.8.8, crossbeam-epoch 0.9.21, crossbeam-utils 0.8.23, data-url 0.3.2, displaydoc 0.2.7, either 1.19.0, encoding_rs_io 0.1.8, equivalent 1.0.3, errno 0.3.15, euclid 0.22.14, event-listener 5.4.2, event-listener-strategy 0.5.4, fastrand 2.5.0, flate2 1.1.11, form_urlencoded 1.2.2, futf 0.1.5, futures-lite 2.6.1, gif 0.13.3, gif 0.14.2, gimli 0.34.0, glob 0.3.4, hash32 0.3.1, hashbrown 0.16.1, hashbrown 0.17.1, heapless 0.9.3, heck 0.5.0, html5ever 0.27.0, idna 1.1.0, idna_adapter 1.2.2, indexmap 2.14.2, itertools 0.11.0, itertools 0.13.0, itertools 0.14.0, lazy_static 1.5.1, lock_api 0.4.14, log 0.4.35, markup5ever 0.12.1, markup5ever_rcdom 0.3.0, mime 0.3.18, num-bigint 0.4.8, num-derive 0.4.2, num-integer 0.1.47, num-rational 0.4.2, num-traits 0.2.19, num_cpus 1.17.0, object 0.40.0, once_cell 1.21.4, parking 2.2.1, parking_lot 0.12.5, parking_lot_core 0.9.12, pathfinder_geometry 0.5.1, pathfinder_simd 0.5.6, percent-encoding 2.3.2, piper 0.2.5, png 0.17.16, png 0.18.1, polling 3.11.0, pollster 0.4.0, profiling 1.0.18, profiling-procmacros 1.0.18, rayon 1.12.0, rayon-core 1.13.0, regex 1.13.1, regex-automata 0.4.18, regex-syntax 0.8.11, roxmltree 0.20.0, roxmltree 0.21.2, rustc-demangle 0.1.28, rustix 1.1.6, scopeguard 1.2.0, shellexpand 3.1.2, signal-hook-registry 1.4.8, similar 2.7.0, simplecss 0.2.2, smallvec 1.16.5, smol 2.0.2, smol_str 0.3.7, stable_deref_trait 1.2.1, string_cache 0.8.9, svgtypes 0.15.3, svgtypes 0.16.2, tendril 0.4.3, ttf-parser 0.25.1, unicase 2.10.0, unicode-bidi 0.3.18, unicode-bidi-mirroring 0.4.0, unicode-ccc 0.4.0, unicode-id 0.3.7, unicode-properties 0.1.5, unicode-segmentation 1.13.3, unicode-vo 0.1.0, unicode-width 0.2.3, url 2.5.8, uuid 1.29.2, waker-fn 1.2.0, wasm-bindgen 0.2.130, wasm-bindgen-macro 0.2.130, wasm-bindgen-macro-support 0.2.130, wasm-bindgen-shared 0.2.130, weezl 0.1.12, xml5ever 0.18.1, zed-font-kit 0.14.1-zed
+Used by: addr2line 0.27.1, aligned 0.4.3, arc-swap 1.9.5, arrayvec 0.7.8, as-slice 0.2.1, async-channel 2.5.0, async-executor 1.14.1, async-fs 2.2.0, async-io 2.6.0, async-lock 3.5.0, async-net 2.0.0, async-process 2.5.0, async-signal 0.2.14, async-task 4.7.1, atomic-waker 1.1.2, backtrace 0.3.77, base64 0.22.1, base64 0.23.1, bitflags 1.3.2, bitflags 2.13.2, bitstream-io 4.10.0, blocking 1.7.0, bstr 1.13.1, bumpalo 3.20.4, cfg-if 1.0.5, concurrent-queue 2.5.0, core-foundation 0.10.1, core-foundation-sys 0.8.7, core-graphics 0.24.0, core-graphics-types 0.2.0, core-text 21.0.0, core_detect 1.0.0, crossbeam-deque 0.8.8, crossbeam-epoch 0.9.21, crossbeam-utils 0.8.23, data-url 0.3.2, displaydoc 0.2.7, either 1.19.0, encoding_rs_io 0.1.8, equivalent 1.0.3, errno 0.3.15, euclid 0.22.14, event-listener 5.4.2, event-listener-strategy 0.5.4, fastrand 2.5.0, flate2 1.1.11, form_urlencoded 1.2.3, futf 0.1.5, futures-lite 2.6.1, gif 0.13.3, gif 0.14.2, gimli 0.34.0, glob 0.3.4, hash32 0.3.1, hashbrown 0.16.1, hashbrown 0.17.1, heapless 0.9.4, heck 0.5.0, html5ever 0.27.0, idna 1.1.0, idna_adapter 1.2.2, indexmap 2.14.2, itertools 0.11.0, itertools 0.13.0, itertools 0.14.0, lazy_static 1.5.1, lock_api 0.4.14, log 0.4.35, markup5ever 0.12.1, markup5ever_rcdom 0.3.0, mime 0.3.18, num-bigint 0.4.8, num-derive 0.4.2, num-integer 0.1.47, num-rational 0.4.2, num-traits 0.2.19, num_cpus 1.17.0, object 0.40.0, once_cell 1.21.4, parking 2.2.1, parking_lot 0.12.5, parking_lot_core 0.9.12, pathfinder_geometry 0.5.1, pathfinder_simd 0.5.6, percent-encoding 2.3.2, piper 0.2.5, png 0.17.16, png 0.18.1, polling 3.11.0, pollster 0.4.0, profiling 1.0.18, profiling-procmacros 1.0.18, rayon 1.12.0, rayon-core 1.13.0, regex 1.13.1, regex-automata 0.4.18, regex-syntax 0.8.11, roxmltree 0.20.0, roxmltree 0.21.2, rustc-demangle 0.1.28, rustix 1.1.6, scopeguard 1.2.0, shellexpand 3.1.2, signal-hook-registry 1.4.8, similar 2.7.0, simplecss 0.2.2, smallvec 1.16.5, smol 2.0.2, smol_str 0.3.7, stable_deref_trait 1.2.1, string_cache 0.8.9, svgtypes 0.15.3, svgtypes 0.16.2, tendril 0.4.3, ttf-parser 0.25.1, unicase 2.10.0, unicode-bidi 0.3.18, unicode-bidi-mirroring 0.4.0, unicode-ccc 0.4.0, unicode-id 0.3.7, unicode-properties 0.1.5, unicode-segmentation 1.13.3, unicode-vo 0.1.0, unicode-width 0.2.3, url 2.5.9, uuid 1.29.2, waker-fn 1.2.0, wasm-bindgen 0.2.130, wasm-bindgen-macro 0.2.130, wasm-bindgen-macro-support 0.2.130, wasm-bindgen-shared 0.2.130, weezl 0.1.12, xml5ever 0.18.1, zed-font-kit 0.14.1-zed
 
 <pre>
 Apache License
@@ -1219,7 +1221,7 @@ limitations under the License.
 
 ### COPYING
 
-Used by: aho-corasick 1.1.5, byteorder 1.5.0, globset 0.4.21, ignore 0.4.34, memchr 2.8.3, same-file 1.0.6, walkdir 2.5.0, winapi-util 0.1.11
+Used by: aho-corasick 1.1.5, byteorder 1.5.0, globset 0.4.21, ignore 0.4.34, jiff 1.0.2, jiff-core 1.0.1, jiff-static 1.0.2, jiff-tzdb 1.0.0, jiff-tzdb-platform 1.0.0, memchr 2.8.3, same-file 1.0.6, walkdir 2.5.0, winapi-util 0.1.11
 
 <pre>
 This project is dual-licensed under the Unlicense and MIT licenses.
@@ -1229,7 +1231,7 @@ You may use this code under the terms of either license.
 
 ### LICENSE-MIT
 
-Used by: aho-corasick 1.1.5, byteorder 1.5.0, byteorder-lite 0.1.0, encoding_rs_io 0.1.8, globset 0.4.21, ignore 0.4.34, memchr 2.8.3, walkdir 2.5.0
+Used by: aho-corasick 1.1.5, byteorder 1.5.0, byteorder-lite 0.1.0, encoding_rs_io 0.1.8, globset 0.4.21, ignore 0.4.34, jiff 1.0.2, jiff-core 1.0.1, jiff-static 1.0.2, jiff-tzdb 1.0.0, jiff-tzdb-platform 1.0.0, memchr 2.8.3, walkdir 2.5.0
 
 <pre>
 The MIT License (MIT)
@@ -1257,7 +1259,7 @@ THE SOFTWARE.
 
 ### UNLICENSE
 
-Used by: aho-corasick 1.1.5, byteorder 1.5.0, byteorder-lite 0.1.0, globset 0.4.21, ignore 0.4.34, memchr 2.8.3, same-file 1.0.6, walkdir 2.5.0, winapi-util 0.1.11
+Used by: aho-corasick 1.1.5, byteorder 1.5.0, byteorder-lite 0.1.0, globset 0.4.21, ignore 0.4.34, jiff 1.0.2, jiff-core 1.0.1, jiff-static 1.0.2, jiff-tzdb 1.0.0, jiff-tzdb-platform 1.0.0, memchr 2.8.3, same-file 1.0.6, walkdir 2.5.0, winapi-util 0.1.11
 
 <pre>
 This is free and unencumbered software released into the public domain.
@@ -1288,7 +1290,7 @@ For more information, please refer to <http://unlicense.org/>
 
 ### LICENSE-MIT
 
-Used by: aligned 0.4.3, heapless 0.9.3
+Used by: aligned 0.4.3, heapless 0.9.4
 
 <pre>
 Copyright (c) 2017 Jorge Aparicio
@@ -1348,7 +1350,7 @@ SOFTWARE.
 
 ### LICENSE-APACHE
 
-Used by: annotate-snippets 0.12.18, serde_spanned 1.1.3, toml 1.2.1+spec-1.1.0, toml_datetime 1.1.3+spec-1.1.0, toml_edit 0.25.19+spec-1.1.0, toml_parser 1.1.5+spec-1.1.0, toml_writer 1.2.0+spec-1.1.0
+Used by: annotate-snippets 0.12.18, serde_spanned 1.1.3, toml 1.2.2+spec-1.1.0, toml_datetime 1.1.3+spec-1.1.0, toml_edit 0.25.19+spec-1.1.0, toml_parser 1.1.6+spec-1.1.0, toml_writer 1.2.0+spec-1.1.0
 
 <pre>
 Apache License
@@ -1556,7 +1558,7 @@ Apache License
 
 ### LICENSE-MIT
 
-Used by: annotate-snippets 0.12.18, anstyle 1.0.14, serde_spanned 0.6.9, serde_spanned 1.1.3, toml 0.8.23, toml 1.2.1+spec-1.1.0, toml_datetime 0.6.11, toml_datetime 1.1.3+spec-1.1.0, toml_edit 0.22.27, toml_edit 0.25.19+spec-1.1.0, toml_parser 1.1.5+spec-1.1.0, toml_write 0.1.2, toml_writer 1.2.0+spec-1.1.0
+Used by: annotate-snippets 0.12.18, anstyle 1.0.14, serde_spanned 0.6.9, serde_spanned 1.1.3, toml 0.8.23, toml 1.2.2+spec-1.1.0, toml_datetime 0.6.11, toml_datetime 1.1.3+spec-1.1.0, toml_edit 0.22.27, toml_edit 0.25.19+spec-1.1.0, toml_parser 1.1.6+spec-1.1.0, toml_write 0.1.2, toml_writer 1.2.0+spec-1.1.0
 
 <pre>
 Copyright (c) Individual contributors
@@ -3829,7 +3831,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 ### LICENSE-MIT
 
-Used by: data-url 0.3.2, idna 1.1.0, percent-encoding 2.3.2, url 2.5.8
+Used by: data-url 0.3.2, idna 1.1.0, percent-encoding 2.3.2, url 2.5.9
 
 <pre>
 Copyright (c) 2013-2025 The rust-url developers
@@ -4985,36 +4987,6 @@ SOFTWARE.
 
 ### LICENSE
 
-Used by: float_next_after 1.0.0
-
-<pre>
-MIT License
-
-Copyright (c) 2020 Scripta Qumranica Electronica
-
-Created by Bronson Brown-deVost
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-</pre>
-
-### LICENSE
-
 Used by: fluent-uri 0.1.4
 
 <pre>
@@ -5123,7 +5095,7 @@ SOFTWARE.
 
 ### LICENSE-MIT
 
-Used by: form_urlencoded 1.2.2
+Used by: form_urlencoded 1.2.3
 
 <pre>
 Copyright (c) 2013-2016 The rust-url developers
@@ -5789,7 +5761,7 @@ SOFTWARE.
 
 ### LICENSE-APACHE / longbridge__gpui-kit / main__LICENSE-APACHE / longbridge__gpui-kit / master__LICENSE-APACHE
 
-Used by: gpui-base 0.10.0, gpui-component 0.10.0, gpui-component-macros 0.10.0, gpui-kit 0.10.0
+Used by: gpui-base 0.11.0, gpui-component 0.11.0, gpui-component-macros 0.11.0, gpui-kit 0.11.0
 
 <pre>
 Copyright 2024 - 2026 Longbridge <https://longbridge.com>
@@ -5987,7 +5959,7 @@ END OF TERMS AND CONDITIONS
 
 ### LICENSE-LUCIDE
 
-Used by: gpui-kit-assets 0.10.0
+Used by: gpui-kit-assets 0.11.0
 
 <pre>
 ISC License
@@ -6037,7 +6009,7 @@ SOFTWARE.
 
 ### LICENSE-APACHE
 
-Used by: gpui-pre 0.3.12, gpui-pre-apple 0.3.12, gpui-pre-collections 0.3.12, gpui-pre-derive-refineable 0.3.12, gpui-pre-http-client 0.3.12, gpui-pre-macos 0.3.12, gpui-pre-macros 0.3.12, gpui-pre-platform 0.3.12, gpui-pre-refineable 0.3.12, gpui-pre-scheduler 0.3.12, gpui-pre-shared-string 0.3.12, gpui-pre-sum-tree 0.3.12, gpui-pre-util 0.3.12, gpui-pre-windows 0.3.12, gpui-pre-ztracing 0.3.12, gpui-pre-ztracing-macro 0.3.12
+Used by: gpui-pre 0.3.14, gpui-pre-apple 0.3.14, gpui-pre-collections 0.3.14, gpui-pre-derive-refineable 0.3.14, gpui-pre-http-client 0.3.14, gpui-pre-macos 0.3.14, gpui-pre-macros 0.3.14, gpui-pre-platform 0.3.14, gpui-pre-refineable 0.3.14, gpui-pre-scheduler 0.3.14, gpui-pre-shared-string 0.3.14, gpui-pre-sum-tree 0.3.14, gpui-pre-util 0.3.14, gpui-pre-windows 0.3.14, gpui-pre-ztracing 0.3.14, gpui-pre-ztracing-macro 0.3.14
 
 <pre>
 Copyright 2022 - 2025 Zed Industries, Inc.
@@ -7804,7 +7776,7 @@ THE SOFTWARE.
 
 ### nical__lyon / main__LICENSE-APACHE / nical__lyon / master__LICENSE-APACHE
 
-Used by: lyon 1.0.19, lyon_algorithms 1.0.22, lyon_geom 1.0.20, lyon_path 1.0.19, lyon_tessellation 1.0.23
+Used by: lyon_geom 1.0.20, lyon_path 1.0.19
 
 <pre>
 Copyright 2016 Nicolas Silva
@@ -7824,7 +7796,7 @@ limitations under the License.
 
 ### nical__lyon / main__LICENSE-MIT / nical__lyon / master__LICENSE-MIT
 
-Used by: lyon 1.0.19, lyon_algorithms 1.0.22, lyon_geom 1.0.20, lyon_path 1.0.19, lyon_tessellation 1.0.23
+Used by: lyon_geom 1.0.20, lyon_path 1.0.19
 
 <pre>
 The MIT License (MIT)
@@ -12412,7 +12384,7 @@ SOFTWARE.
 
 ### LICENSE
 
-Used by: sysinfo 0.31.4, sysinfo 0.40.3
+Used by: sysinfo 0.31.4, sysinfo 0.40.4
 
 <pre>
 The MIT License (MIT)
@@ -13773,7 +13745,7 @@ SOFTWARE.
 
 ### license-apache-2.0
 
-Used by: windows 0.57.0, windows 0.58.0, windows 0.61.3, windows 0.62.2, windows-collections 0.2.0, windows-collections 0.3.2, windows-core 0.57.0, windows-core 0.58.0, windows-core 0.61.2, windows-core 0.62.2, windows-future 0.2.1, windows-future 0.3.2, windows-implement 0.57.0, windows-implement 0.58.0, windows-implement 0.60.2, windows-interface 0.57.0, windows-interface 0.58.0, windows-interface 0.59.3, windows-link 0.1.3, windows-link 0.2.1, windows-numerics 0.2.0, windows-numerics 0.3.1, windows-registry 0.6.1, windows-result 0.1.2, windows-result 0.2.0, windows-result 0.3.4, windows-result 0.4.1, windows-strings 0.1.0, windows-strings 0.4.2, windows-strings 0.5.1, windows-sys 0.61.2, windows-targets 0.52.6, windows-threading 0.1.0, windows-threading 0.2.1, windows_aarch64_msvc 0.52.6, windows_x86_64_msvc 0.52.6
+Used by: windows 0.57.0, windows 0.58.0, windows 0.61.3, windows 0.62.2, windows-collections 0.2.0, windows-collections 0.3.2, windows-core 0.57.0, windows-core 0.58.0, windows-core 0.61.2, windows-core 0.62.2, windows-future 0.2.1, windows-future 0.3.2, windows-implement 0.57.0, windows-implement 0.58.0, windows-implement 0.60.2, windows-interface 0.57.0, windows-interface 0.58.0, windows-interface 0.59.3, windows-link 0.1.3, windows-link 0.2.1, windows-numerics 0.2.0, windows-numerics 0.3.1, windows-registry 0.6.1, windows-result 0.1.2, windows-result 0.2.0, windows-result 0.3.4, windows-result 0.4.1, windows-strings 0.1.0, windows-strings 0.4.2, windows-strings 0.5.1, windows-sys 0.52.0, windows-sys 0.61.2, windows-targets 0.52.6, windows-threading 0.1.0, windows-threading 0.2.1, windows_aarch64_msvc 0.52.6, windows_x86_64_msvc 0.52.6
 
 <pre>
 Apache License
@@ -13981,7 +13953,7 @@ Apache License
 
 ### license-mit
 
-Used by: windows 0.57.0, windows 0.58.0, windows 0.61.3, windows 0.62.2, windows-collections 0.2.0, windows-collections 0.3.2, windows-core 0.57.0, windows-core 0.58.0, windows-core 0.61.2, windows-core 0.62.2, windows-future 0.2.1, windows-future 0.3.2, windows-implement 0.57.0, windows-implement 0.58.0, windows-implement 0.60.2, windows-interface 0.57.0, windows-interface 0.58.0, windows-interface 0.59.3, windows-link 0.1.3, windows-link 0.2.1, windows-numerics 0.2.0, windows-numerics 0.3.1, windows-registry 0.6.1, windows-result 0.1.2, windows-result 0.2.0, windows-result 0.3.4, windows-result 0.4.1, windows-strings 0.1.0, windows-strings 0.4.2, windows-strings 0.5.1, windows-sys 0.61.2, windows-targets 0.52.6, windows-threading 0.1.0, windows-threading 0.2.1, windows_aarch64_msvc 0.52.6, windows_x86_64_msvc 0.52.6
+Used by: windows 0.57.0, windows 0.58.0, windows 0.61.3, windows 0.62.2, windows-collections 0.2.0, windows-collections 0.3.2, windows-core 0.57.0, windows-core 0.58.0, windows-core 0.61.2, windows-core 0.62.2, windows-future 0.2.1, windows-future 0.3.2, windows-implement 0.57.0, windows-implement 0.58.0, windows-implement 0.60.2, windows-interface 0.57.0, windows-interface 0.58.0, windows-interface 0.59.3, windows-link 0.1.3, windows-link 0.2.1, windows-numerics 0.2.0, windows-numerics 0.3.1, windows-registry 0.6.1, windows-result 0.1.2, windows-result 0.2.0, windows-result 0.3.4, windows-result 0.4.1, windows-strings 0.1.0, windows-strings 0.4.2, windows-strings 0.5.1, windows-sys 0.52.0, windows-sys 0.61.2, windows-targets 0.52.6, windows-threading 0.1.0, windows-threading 0.2.1, windows_aarch64_msvc 0.52.6, windows_x86_64_msvc 0.52.6
 
 <pre>
 MIT License
