@@ -6,7 +6,7 @@ pub(crate) unsafe fn refresh_theme() {
     WIN11_CENTERED.store(u32::MAX, Ordering::Relaxed);
     AUTO_HIDE.store(u32::MAX, Ordering::Relaxed);
     LIGHT_THEME.store(
-        hkcu_dword(THEME_KEY, THEME_VALUE).unwrap_or(1).min(1),
+        hkcu_dword(PERSONALIZE_KEY, THEME_VALUE).unwrap_or(1).min(1),
         Ordering::Relaxed,
     );
     let weight = if LIGHT_THEME.load(Ordering::Relaxed) == 1 {

@@ -213,6 +213,8 @@ pub fn poll_config(watcher: &mut sysvitals_core::ConfigWatcher, error_prefix: &s
     }
 }
 
+pub const PERSONALIZE_KEY: &str =
+    "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize";
 pub const PANEL_SETTINGS: &str = "settings";
 pub const PANEL_HISTORY: &str = "history";
 pub const PANEL_REQUEST_POLL_MS: u64 = 50;

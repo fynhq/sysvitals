@@ -169,11 +169,10 @@ pub const CONTROL_RADIUS: f32 = 6.0;
 
 #[cfg(windows)]
 pub fn detect_material() -> Material {
-    const PERSONALIZE_KEY: &str =
-        "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize";
-    let transparency = sysvitals_support::hkcu_dword(PERSONALIZE_KEY, "EnableTransparency")
-        .map(|v| v != 0)
-        .unwrap_or(true);
+    let transparency =
+        sysvitals_support::hkcu_dword(sysvitals_support::PERSONALIZE_KEY, "EnableTransparency")
+            .map(|v| v != 0)
+            .unwrap_or(true);
     choose_windows_material(sysvitals_support::os_build_number(), transparency)
 }
 

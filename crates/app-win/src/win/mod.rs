@@ -31,7 +31,7 @@ use sysvitals_core::{
 use sysvitals_support::{
     acquire_instance_lock, hkcu_dword, log_event, log_sanitize_issues, os_build_number,
     resolve_wait_cursor, taskbar_al, utf16, AutoStartController, AutoStartOutcome, ConfigEvent,
-    InstanceLock, RespawnPolicy, WaitCursorNext, SV_BUILD_ID,
+    InstanceLock, RespawnPolicy, WaitCursorNext, PERSONALIZE_KEY, SV_BUILD_ID,
 };
 use windows::core::{Interface, BOOL, PCWSTR};
 use windows::Win32::Foundation::{
@@ -114,7 +114,6 @@ const WIDTH_SLACK_PX: i32 = 8;
 const VERTICAL_FONT_HUNDREDTHS: i32 = 75;
 const VERTICAL_PAD_PX: i32 = 3;
 const VERTICAL_WIDTH_SLACK_PX: i32 = 4;
-const THEME_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize";
 const THEME_VALUE: &str = "SystemUsesLightTheme";
 const STARTUP_LINK_NAME: &str = "SysVitals.lnk";
 const LEGACY_RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
