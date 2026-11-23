@@ -324,8 +324,6 @@ jobs:
             (Join-Path $env:ProgramFiles "Inno Setup $pinnedMajor\ISCC.exe")
           ) | Where-Object { Test-Path $_ } | Select-Object -First 1
           if (-not $iscc) { throw "ISCC.exe for Inno Setup $pinnedMajor was not found" }
-          # The banner only carries the major version, so the file version is
-          # what proves the pin actually landed.
           $previousPreference = $ErrorActionPreference
           $ErrorActionPreference = 'SilentlyContinue'
           $banner = (& $iscc '/?' 2>&1 | Out-String)
@@ -336,12 +334,10 @@ jobs:
           if ($Matches[1] -ne $pinnedMajor) {
             throw "ISCC major version $($Matches[1]) does not match the pinned $pinned"
           }
-          $product = (Get-Item $iscc).VersionInfo.ProductVersion
-          if (-not $product) { $product = (Get-Item $iscc).VersionInfo.FileVersion }
-          if ($product -and "$product".TrimStart('v') -ne $pinned) {
-            throw "ISCC $product does not match the pinned Inno Setup $pinned"
-          }
-          Write-Host "Inno Setup verified: banner major $($Matches[1]), product '$product', pinned $pinned"
+          # The exact minor is already enforced by `choco upgrade --version`,
+          # which fails when the pinned package cannot be installed; the
+          # banner only carries the major, so do not pretend to read more.
+          Write-Host "Inno Setup verified: banner major $($Matches[1]), pinned $pinned"
           $numeric = ($version -replace '[^0-9.].*$', '')
           $parts = @($numeric.Split('.') | Where-Object { $_ -ne '' })
           while ($parts.Count -lt 4) { $parts += '0' }
