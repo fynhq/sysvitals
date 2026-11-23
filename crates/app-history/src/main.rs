@@ -24,9 +24,9 @@ use sysvitals_panel::set_per_monitor_dpi_aware;
 use sysvitals_panel::{
     acquire_instance_lock, anchor_arg, anchor_monitor_arg, anchor_visible_bounds, backdrop_for,
     detect_material, layout_rect, log_event, log_sanitize_issues, observe_system_appearance,
-    prewarm_arg, spawn_accent_watch, take_panel_request, trim_working_set, unix_ms,
-    window_display_id, ConfigEvent, InstanceLock, PanelAction, PanelSurface, CONTROL_RADIUS,
-    PANEL_HISTORY, PANEL_REQUEST_MAX_AGE_MS, PANEL_REQUEST_POLL_MS,
+    prewarm_arg, resolve_panel_target, spawn_accent_watch, take_panel_request, trim_working_set,
+    unix_ms, window_display_id, ConfigEvent, InstanceLock, PanelAction, PanelSurface, PanelTarget,
+    CONTROL_RADIUS, PANEL_HISTORY, PANEL_REQUEST_MAX_AGE_MS, PANEL_REQUEST_POLL_MS,
 };
 #[cfg(windows)]
 use sysvitals_panel::{
@@ -324,7 +324,7 @@ fn apply_history_request(
             .ok()
             .flatten();
         let same_monitor = monitor.is_none() || existing_display == monitor;
-        if action == PanelAction::Toggle && same_monitor {
+        if resolve_panel_target(action, same_monitor, true) == PanelTarget::Close {
             let removed = handle
                 .update(cx, |_, window, _| window.remove_window())
                 .is_ok();
@@ -335,7 +335,7 @@ fn apply_history_request(
             log_event("WARN", "history: remove_window failed");
             return Ok(());
         }
-        if action == PanelAction::Open && same_monitor {
+        if resolve_panel_target(action, same_monitor, true) == PanelTarget::Focus {
             let _ = handle.update(cx, |_, window, _| window.activate_window());
             return Ok(());
         }

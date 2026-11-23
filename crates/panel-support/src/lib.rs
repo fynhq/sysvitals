@@ -14,9 +14,9 @@ use sysvitals_core::backdrop::{
 pub use sysvitals_support::{
     acquire_instance_lock, anchor_arg, anchor_monitor_arg, clear_panel_request, install_panic_hook,
     log_event, log_sanitize_issues, parent_pid_arg, poll_config, prewarm_arg, ready_file_arg,
-    take_panel_request, unix_ms, write_panel_request, ConfigEvent, InstanceLock, PanelAction,
-    PanelRequest, PANEL_HISTORY, PANEL_REQUEST_MAX_AGE_MS, PANEL_REQUEST_POLL_MS, PANEL_SETTINGS,
-    SV_BUILD_ID,
+    resolve_panel_target, take_panel_request, unix_ms, write_panel_request, ConfigEvent,
+    InstanceLock, PanelAction, PanelRequest, PanelTarget, PANEL_HISTORY, PANEL_REQUEST_MAX_AGE_MS,
+    PANEL_REQUEST_POLL_MS, PANEL_SETTINGS, SV_BUILD_ID,
 };
 #[cfg(windows)]
 pub use sysvitals_support::{hkcu_dword, os_build_number, taskbar_al, utf16, ParentProcess};
