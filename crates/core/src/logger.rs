@@ -5,11 +5,16 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
-pub const DEFAULT_RETENTION_DAYS: u32 = 7;
+pub const LOG_RETENTION_DAYS: u32 = 7;
+
+// A failing open must not be retried on every line; the 2 s sampler would storm syscalls.
+const OPEN_RETRY_COOLDOWN: Duration = Duration::from_secs(60);
 
 static LOG_FILE: Mutex<Option<File>> = Mutex::new(None);
 static LOG_DATE: Mutex<String> = Mutex::new(String::new());
+static LOG_RETRY_AT: Mutex<Option<Instant>> = Mutex::new(None);
 
 pub fn log_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("logs")
@@ -60,27 +65,44 @@ fn open_for_date(dir: &Path, date: &str) -> Option<File> {
     OpenOptions::new().create(true).append(true).open(path).ok()
 }
 
-pub fn log_line(data_dir: &Path, date: &str, time: &str, level: &str, message: &str) {
+pub fn log_line(data_dir: &Path, date: &str, time: &str, level: &str, message: &str) -> bool {
+    log_line_at(data_dir, date, time, level, message, Instant::now())
+}
+
+fn log_line_at(
+    data_dir: &Path,
+    date: &str,
+    time: &str,
+    level: &str,
+    message: &str,
+    now: Instant,
+) -> bool {
     let mut file_guard = LOG_FILE.lock().unwrap_or_else(|e| e.into_inner());
     let mut date_guard = LOG_DATE.lock().unwrap_or_else(|e| e.into_inner());
-    if *date_guard != date {
+    let mut retry_guard = LOG_RETRY_AT.lock().unwrap_or_else(|e| e.into_inner());
+
+    let rolled = *date_guard != date;
+    if rolled {
         *file_guard = None;
+        *retry_guard = None;
+        *date_guard = date.to_string();
+        prune_logs(data_dir, date, LOG_RETENTION_DAYS);
     }
-    if *date_guard != date || file_guard.is_none() {
-        if let Some(file) = open_for_date(&log_dir(data_dir), date) {
-            let rolled = *date_guard != date;
-            *file_guard = Some(file);
-            *date_guard = date.to_string();
-            if rolled {
-                prune_logs(data_dir, date, DEFAULT_RETENTION_DAYS);
+    if file_guard.is_none() && !retry_guard.is_some_and(|at| now < at) {
+        match open_for_date(&log_dir(data_dir), date) {
+            Some(file) => {
+                *file_guard = Some(file);
+                *retry_guard = None;
             }
+            None => *retry_guard = Some(now + OPEN_RETRY_COOLDOWN),
         }
     }
-    if let Some(file) = file_guard.as_mut() {
-        let message = one_line(message);
-        let line = format!("{date} {time} [{level}] {} {message}\n", process_tag());
-        let _ = file.write_all(line.as_bytes());
-    }
+    let Some(file) = file_guard.as_mut() else {
+        return false;
+    };
+    let message = one_line(message);
+    let line = format!("{date} {time} [{level}] {} {message}\n", process_tag());
+    file.write_all(line.as_bytes()).is_ok()
 }
 
 pub fn prune_logs(data_dir: &Path, today: &str, retention_days: u32) {
@@ -123,35 +145,50 @@ fn parse_log_name(name: &str) -> Option<String> {
 }
 
 fn date_to_days(date: &str) -> Option<i64> {
-    let y: i64 = date.get(0..4)?.parse().ok()?;
-    let m: u32 = date.get(5..7)?.parse().ok()?;
-    let d: u32 = date.get(8..10)?.parse().ok()?;
-    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
-        return None;
-    }
-    Some(days_from_civil(y, m, d))
-}
-
-fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
-    let y = if m <= 2 { y - 1 } else { y };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = y - era * 400;
-    let mp = if m > 2 { m - 3 } else { m + 9 } as i64;
-    let doy = (153 * mp + 2) / 5 + d as i64 - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146097 + doe - 719468
+    let year: i32 = date.get(0..4)?.parse().ok()?;
+    let month: u32 = date.get(5..7)?.parse().ok()?;
+    let day: u32 = date.get(8..10)?.parse().ok()?;
+    let parsed = chrono::NaiveDate::from_ymd_opt(year, month, day)?;
+    let epoch = chrono::NaiveDate::from_ymd_opt(1970, 1, 1)?;
+    Some((parsed - epoch).num_days())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    static LOG_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn reset_log_state() -> std::sync::MutexGuard<'static, ()> {
+        let guard = LOG_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        *LOG_FILE.lock().unwrap() = None;
+        *LOG_DATE.lock().unwrap() = String::new();
+        *LOG_RETRY_AT.lock().unwrap() = None;
+        guard
+    }
+
+    fn temp_log_dir(tag: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        std::env::temp_dir().join(format!("sysvitals-log{tag}-{}-{nanos}", std::process::id()))
+    }
+
     #[test]
-    fn days_from_civil_known_dates() {
-        assert_eq!(days_from_civil(1970, 1, 1), 0);
-        assert_eq!(days_from_civil(1970, 1, 2), 1);
-        assert_eq!(days_from_civil(2000, 3, 1), 11017);
-        assert!(days_from_civil(2024, 3, 1) > days_from_civil(2024, 2, 28));
+    fn date_to_days_uses_the_proleptic_gregorian_calendar() {
+        assert_eq!(date_to_days("1970-01-01"), Some(0));
+        assert_eq!(date_to_days("1970-01-02"), Some(1));
+        assert_eq!(date_to_days("2000-03-01"), Some(11_017));
+        assert_eq!(
+            date_to_days("2024-03-01").unwrap() - date_to_days("2024-02-28").unwrap(),
+            2,
+            "2024 is a leap year"
+        );
+        assert_eq!(date_to_days("2026-02-30"), None);
+        assert_eq!(date_to_days("2026-13-01"), None);
+        assert_eq!(date_to_days("2026-10-1"), None);
+        assert_eq!(date_to_days("nope"), None);
     }
 
     #[test]
@@ -182,7 +219,7 @@ mod tests {
 
     #[test]
     fn prune_removes_only_old_matching_files() {
-        let dir = std::env::temp_dir().join(format!("sysvitals-logtest-{}", std::process::id()));
+        let dir = temp_log_dir("prune");
         let _ = fs::remove_dir_all(&dir);
         let logs = log_dir(&dir);
         fs::create_dir_all(&logs).unwrap();
@@ -194,7 +231,7 @@ mod tests {
         ] {
             fs::write(logs.join(name), b"x").unwrap();
         }
-        prune_logs(&dir, "2026-10-19", DEFAULT_RETENTION_DAYS);
+        prune_logs(&dir, "2026-10-19", LOG_RETENTION_DAYS);
         assert!(
             !logs.join("sysvitals-2026-10-09.log").exists(),
             "old removed"
@@ -210,14 +247,22 @@ mod tests {
 
     #[test]
     fn log_line_writes_and_rolls() {
-        let dir = std::env::temp_dir().join(format!("sysvitals-logwrite-{}", std::process::id()));
+        let _guard = reset_log_state();
+        let dir = temp_log_dir("write");
         let _ = fs::remove_dir_all(&dir);
         let logs = log_dir(&dir);
         fs::create_dir_all(&logs).unwrap();
         for name in ["sysvitals-2026-09-01.log", "sysvitals-2026-10-12.log"] {
             fs::write(logs.join(name), b"x").unwrap();
         }
-        log_line(&dir, "2026-10-19", "13:00:00", "INFO", "hello");
+        assert!(log_line_at(
+            &dir,
+            "2026-10-19",
+            "13:00:00",
+            "INFO",
+            "hello",
+            Instant::now()
+        ));
         assert!(
             !logs.join("sysvitals-2026-09-01.log").exists(),
             "stale file pruned on first line"
@@ -226,7 +271,14 @@ mod tests {
             logs.join("sysvitals-2026-10-12.log").exists(),
             "file inside the window kept"
         );
-        log_line(&dir, "2026-10-19", "13:01:00", "WARN", "world");
+        assert!(log_line_at(
+            &dir,
+            "2026-10-19",
+            "13:01:00",
+            "WARN",
+            "world",
+            Instant::now()
+        ));
         let f1 = log_dir(&dir).join("sysvitals-2026-10-19.log");
         let content = fs::read_to_string(&f1).unwrap();
         assert!(content.contains("2026-10-19 13:00:00 [INFO]"));
@@ -237,14 +289,142 @@ mod tests {
             content.contains(&format!("[{}]", std::process::id())),
             "every line carries the process tag: {content}"
         );
-        log_line(&dir, "2026-10-20", "09:00:00", "INFO", "next day");
+        assert!(log_line_at(
+            &dir,
+            "2026-10-20",
+            "09:00:00",
+            "INFO",
+            "next day",
+            Instant::now()
+        ));
         assert!(log_dir(&dir).join("sysvitals-2026-10-20.log").exists());
         assert!(
             !logs.join("sysvitals-2026-10-12.log").exists(),
             "file pruned on date roll"
         );
-        *LOG_FILE.lock().unwrap() = None;
-        *LOG_DATE.lock().unwrap() = String::new();
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_open_reports_false_and_backs_off_until_the_cooldown_expires() {
+        let _guard = reset_log_state();
+        let dir = temp_log_dir("blocked");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(log_dir(&dir), b"blocker").unwrap();
+
+        let start = Instant::now();
+        assert!(
+            !log_line_at(&dir, "2026-10-19", "13:00:00", "INFO", "blocked", start),
+            "an unopenable log directory must be reported"
+        );
+
+        fs::remove_file(log_dir(&dir)).unwrap();
+        fs::create_dir_all(log_dir(&dir)).unwrap();
+        assert!(
+            !log_line_at(
+                &dir,
+                "2026-10-19",
+                "13:00:01",
+                "INFO",
+                "suppressed",
+                start + Duration::from_secs(1)
+            ),
+            "the cooldown must suppress the retry"
+        );
+        assert!(
+            log_line_at(
+                &dir,
+                "2026-10-19",
+                "13:01:02",
+                "INFO",
+                "recovered",
+                start + OPEN_RETRY_COOLDOWN + Duration::from_secs(1)
+            ),
+            "the cooldown must expire"
+        );
+
+        let content = fs::read_to_string(log_dir(&dir).join("sysvitals-2026-10-19.log")).unwrap();
+        assert!(content.contains("recovered"));
+        assert!(
+            !content.contains("suppressed"),
+            "a suppressed line is dropped, not queued"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_date_change_forces_a_retry_inside_the_cooldown() {
+        let _guard = reset_log_state();
+        let dir = temp_log_dir("rollblocked");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(log_dir(&dir), b"blocker").unwrap();
+
+        let start = Instant::now();
+        assert!(!log_line_at(
+            &dir,
+            "2026-10-19",
+            "13:00:00",
+            "INFO",
+            "blocked",
+            start
+        ));
+
+        fs::remove_file(log_dir(&dir)).unwrap();
+        assert!(
+            log_line_at(
+                &dir,
+                "2026-10-20",
+                "09:00:00",
+                "INFO",
+                "next day",
+                start + Duration::from_secs(1)
+            ),
+            "a new date must retry at once instead of waiting out the cooldown"
+        );
+        assert!(log_dir(&dir).join("sysvitals-2026-10-20.log").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prune_runs_even_when_the_log_file_cannot_be_opened() {
+        let _guard = reset_log_state();
+        let dir = temp_log_dir("pruneblocked");
+        let _ = fs::remove_dir_all(&dir);
+        let logs = log_dir(&dir);
+        fs::create_dir_all(&logs).unwrap();
+        fs::write(logs.join("sysvitals-2026-10-09.log"), b"x").unwrap();
+        assert!(log_line_at(
+            &dir,
+            "2026-10-19",
+            "13:00:00",
+            "INFO",
+            "first",
+            Instant::now()
+        ));
+        assert!(
+            !logs.join("sysvitals-2026-10-09.log").exists(),
+            "stale file pruned"
+        );
+
+        fs::create_dir_all(logs.join("sysvitals-2026-10-20.log")).unwrap();
+        fs::write(logs.join("sysvitals-2026-10-11.log"), b"x").unwrap();
+        assert!(
+            !log_line_at(
+                &dir,
+                "2026-10-20",
+                "09:00:00",
+                "INFO",
+                "blocked",
+                Instant::now()
+            ),
+            "today's log path is a directory, so it cannot be opened"
+        );
+        assert!(
+            !logs.join("sysvitals-2026-10-11.log").exists(),
+            "pruning must not depend on a successful open"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 }
