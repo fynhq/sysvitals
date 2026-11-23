@@ -2,14 +2,21 @@ name: CI
 
 on:
   push:
-    # Any branch push and PR runs only the quality gate below. Packaging is
+    # Only the two integration branches run on push; a same-repo pull request
+    # already triggers the `pull_request` event, so listing every branch would
+    # run the quality and platform legs twice per change. Packaging is
     # tag-triggered: `build-*` tags build the four-arch dev packages for
     # acceptance testing, `v*` tags run the full release pipeline. Dev tags
     # are disposable: the newest successful `build-*` run deletes older
     # `build-*` tags, and a published `v*` release deletes all of them.
-    branches: ["**"]
+    branches: [main, dev]
     tags: ["v*", "build-*"]
   pull_request:
+
+# Every job inherits read-only unless it declares its own override below, so a
+# compromised step cannot push to the repository with the workflow token.
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -28,6 +35,7 @@ jobs:
   quality:
     name: Quality (fmt / clippy / test)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -36,7 +44,8 @@ jobs:
         if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
         shell: bash
         run: |
-          version=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          set -euo pipefail
+          version=$(python3 .github/scripts/read_version.py)
           if [ "$GITHUB_REF_NAME" != "v$version" ]; then
             echo "tag $GITHUB_REF_NAME does not match workspace version v$version" >&2
             exit 1
@@ -56,50 +65,99 @@ jobs:
             exit 1
           fi
           echo "release tag verified: annotated, on main"
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
-        with:
-          toolchain: stable
-          components: rustfmt, clippy
+      - name: Install the pinned toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          channel=$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' rust-toolchain.toml | head -1)
+          test -n "$channel" || { echo "rust-toolchain.toml declares no channel" >&2; exit 1; }
+          rustup toolchain install "$channel"
+          rustup show active-toolchain
+      - name: Verify the pinned toolchain satisfies the declared MSRV
+        shell: bash
+        run: |
+          set -euo pipefail
+          msrv=$(sed -n 's/^rust-version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' Cargo.toml | head -1)
+          active=$(rustc --version | sed -n 's/^rustc \([0-9][0-9.]*\).*/\1/p')
+          pinned=$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' rust-toolchain.toml | head -1)
+          test -n "$msrv" || { echo "rust-version is missing from Cargo.toml" >&2; exit 1; }
+          test -n "$pinned" || { echo "channel is missing from rust-toolchain.toml" >&2; exit 1; }
+          if [ "$active" != "$pinned" ]; then
+            echo "active toolchain $active is not the pinned $pinned" >&2
+            exit 1
+          fi
+          lowest=$(printf '%s\n%s\n' "$msrv" "$active" | sort -V | head -1)
+          if [ "$lowest" != "$msrv" ]; then
+            echo "toolchain $active is older than rust-version $msrv" >&2
+            exit 1
+          fi
+          echo "toolchain $active satisfies rust-version $msrv"
       - uses: Swatinem/rust-cache@e9d7b9f1e587218970671bac74e5511ed9506e6a # v2
       - name: Verify third-party notices are current
         run: python3 .github/scripts/check_third_party_notices.py
       - name: Format check (all workspace members)
-        run: cargo fmt --check
+        run: cargo fmt --all --check
       - name: Clippy (default members)
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Tests (default members)
         run: cargo test --locked
 
   # ---------------------------------------------------------------------------
+  # Dependency advisory gate. Every dependency is `=`-exact-pinned, so a
+  # published advisory would otherwise never surface. The job is deliberately
+  # not in any `needs:` list and is not a required check: a new advisory must
+  # not be able to block a release, it is reported for a human to triage.
+  # ---------------------------------------------------------------------------
+  advisories:
+    name: Dependency advisories
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.ref }}
+      - uses: EmbarkStudios/cargo-deny-action@17aeb3c839e42274e2b8adf721c8c65edfdc74dd # v2.1.3
+        with:
+          command: check advisories licenses bans sources
+          log-level: error
+
+  # ---------------------------------------------------------------------------
   # Platform type-check gate: the quality job only builds the cross-platform
   # default members (core) on Linux. These platform crates otherwise compile
   # for the first time on a tag-triggered packaging run, so a type error could
   # reach main and only surface when a dev/release package is requested.
-  # Tag pushes are skipped here because the packaging jobs already compile
-  # every platform crate with the release profile.
+  #
+  # Each leg also type-checks the architecture its runner cannot host, because
+  # the packaging matrix builds all four targets and a cross-arch type error
+  # would otherwise only appear on a tag run.
   # ---------------------------------------------------------------------------
   platform-check:
     name: Platform check (${{ matrix.os }})
-    if: github.ref_type != 'tag'
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: windows-latest
             packages: "-p app-win -p app-settings -p app-history"
-            test_packages: "-p app-win -p app-settings -p app-history"
+            cross_target: aarch64-pc-windows-msvc
           - os: macos-latest
             packages: "-p app-mac -p app-settings -p app-history"
-            test_packages: "-p app-mac -p app-settings -p app-history"
+            cross_target: x86_64-apple-darwin
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.ref }}
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
-        with:
-          toolchain: stable
-          components: clippy
+      - name: Install the pinned toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          channel=$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' rust-toolchain.toml | head -1)
+          test -n "$channel" || { echo "rust-toolchain.toml declares no channel" >&2; exit 1; }
+          rustup toolchain install "$channel"
+          rustup target add "${{ matrix.cross_target }}"
+          rustup show active-toolchain
       - uses: Swatinem/rust-cache@e9d7b9f1e587218970671bac74e5511ed9506e6a # v2
         with:
           key: platform-check-${{ matrix.os }}
@@ -116,6 +174,17 @@ jobs:
           set -o pipefail
           cargo clippy --locked --all-targets ${{ matrix.packages }} \
             --message-format=json -- -D warnings 2>&1 | tee clippy.json
+      # Native unit tests for the platform crates. They must not create a
+      # GPUI application or a window: the runners have no interactive desktop,
+      # so only the pure helpers, placement math and shared-memory state
+      # machine are exercised here. Real-window behavior stays in ACCEPTANCE.
+      - name: Test platform crates
+        run: cargo test --locked ${{ matrix.packages }}
+      - name: Type-check the cross architecture
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo check --locked --target "${{ matrix.cross_target }}" ${{ matrix.packages }}
       - name: Report clippy diagnostics
         if: failure()
         shell: bash
@@ -148,12 +217,6 @@ jobs:
               else:
                   print(f"::error::{text}")
           PY
-      # Native unit tests for the platform crates. They must not create a
-      # GPUI application or a window: the runners have no interactive desktop,
-      # so only the pure helpers, placement math and shared-memory state
-      # machine are exercised here. Real-window behavior stays in ACCEPTANCE.
-      - name: Test platform crates
-        run: cargo test --locked ${{ matrix.test_packages }}
 
   # ---------------------------------------------------------------------------
   # Public-surface guard: reject private-document references, local environment
@@ -164,6 +227,7 @@ jobs:
   public-surface:
     name: Public surface
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -172,6 +236,7 @@ jobs:
       - name: Check public surface
         shell: bash
         run: |
+          set -euo pipefail
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             before="${{ github.event.pull_request.base.sha }}"
             after="${{ github.event.pull_request.head.sha }}"
@@ -179,13 +244,23 @@ jobs:
             before="${{ github.event.before }}"
             after="${{ github.sha }}"
           fi
-          if ! git cat-file -e "$before" 2>/dev/null; then
-            if git cat-file -e "$after^" 2>/dev/null; then
-              before="$after^"
+          # An unknown `before` (force push, new branch, first commit) used to
+          # collapse into an empty `X..X` range, which scanned nothing and still
+          # reported OK. Fall back to the root commit so the whole history is
+          # covered instead of silently asserting nothing.
+          if [ "$before" = "$after" ] || ! git cat-file -e "${before}^{commit}" 2>/dev/null; then
+            if [ "$before" != "$after" ] && git cat-file -e "${after}^{commit}" 2>/dev/null \
+              && git cat-file -e "${after}^" 2>/dev/null; then
+              before="${after}^"
             else
-              before="$after"
+              before=$(git rev-list --max-parents=0 "$after" | tail -n 1)
             fi
           fi
+          if [ -z "$before" ] || [ "$before" = "$after" ]; then
+            echo "public_surface: cannot derive a commit range for $after" >&2
+            exit 1
+          fi
+          echo "public_surface: scanning ${before}..${after}"
           python3 .github/scripts/check_public_surface.py --range "$before..$after" --tree
           if [ "${{ github.ref_type }}" = "tag" ]; then
             python3 .github/scripts/check_public_surface.py --tag "${{ github.ref_name }}"
@@ -194,9 +269,11 @@ jobs:
   # ---------------------------------------------------------------------------
   # Build gate + distribution packaging (tag pushes only).
   #
-  # Ordinary branch pushes and PRs run only the quality gate above; these
-  # packaging jobs run on tag pushes — `build-*` tags produce the dev
-  # packages for acceptance testing, `v*` tags feed the release job below.
+  # Ordinary branch pushes and PRs run only the quality, platform-check,
+  # advisory and public-surface gates above; these packaging jobs run on tag
+  # pushes — `build-*` tags produce the dev packages for acceptance testing,
+  # `v*` tags feed the release job below. Both wait on the gates, so a red
+  # quality or public-surface check cannot spend four architecture builds.
   # Both platform jobs run an architecture matrix: Windows x64/arm64 and
   # macOS arm64/x64. Each leg cross-compiles with an explicit Rust target, so
   # the runner's host architecture never decides the package architecture.
@@ -206,7 +283,9 @@ jobs:
   build-windows:
     name: Build & package (Windows ${{ matrix.arch }})
     if: github.ref_type == 'tag'
+    needs: [quality, public-surface]
     runs-on: windows-latest
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -217,15 +296,21 @@ jobs:
             target: aarch64-pc-windows-msvc
     env:
       SV_BUILD_ID_OVERRIDE: ${{ github.ref_type == 'tag' && startsWith(github.ref_name, 'v') && github.ref_name || '' }}
+      INNO_SETUP_VERSION: "6.7.1"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.ref }}
           fetch-tags: true
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
-        with:
-          toolchain: stable
-          targets: ${{ matrix.target }}
+      - name: Install the pinned toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          channel=$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' rust-toolchain.toml | head -1)
+          test -n "$channel" || { echo "rust-toolchain.toml declares no channel" >&2; exit 1; }
+          rustup toolchain install "$channel"
+          rustup target add "${{ matrix.target }}"
+          rustup show active-toolchain
       - uses: Swatinem/rust-cache@e9d7b9f1e587218970671bac74e5511ed9506e6a # v2
         with:
           key: ${{ matrix.target }}
@@ -239,13 +324,20 @@ jobs:
       # (no-install) zip and a per-user Inno Setup installer. Tag builds use
       # the exact tag version; main builds keep the dev name with the
       # workspace version, short commit hash and `_dev` suffix.
-      - name: Install or upgrade Inno Setup
+      - name: Install the pinned Inno Setup
         shell: pwsh
-        run: choco upgrade innosetup --no-progress -y
+        run: |
+          $pinned = $env:INNO_SETUP_VERSION
+          if (-not $pinned) { throw "INNO_SETUP_VERSION is not set" }
+          choco upgrade innosetup --version=$pinned --allow-downgrade --force --no-progress -y
+          if ($LASTEXITCODE -ne 0) { throw "choco failed to install innosetup $pinned" }
       - name: Package Windows distributions
         shell: pwsh
         run: |
-          $version = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+          $version = (python .github/scripts/read_version.py)
+          if ($LASTEXITCODE -ne 0) { throw "read_version.py failed with exit code $LASTEXITCODE" }
+          $version = "$version".Trim()
+          if (-not $version) { throw "read_version.py returned an empty version" }
           $arch = "${{ matrix.arch }}"
           $target = "${{ matrix.target }}"
           # Only `v*` release tags use the formal asset names; branch pushes
@@ -255,6 +347,9 @@ jobs:
             $assetBase = "SysVitals_Windows_${arch}_v${releaseVersion}"
           } else {
             $commit = (git rev-parse --short HEAD)
+            if ($LASTEXITCODE -ne 0) { throw "git rev-parse --short HEAD failed with exit code $LASTEXITCODE" }
+            $commit = "$commit".Trim()
+            if ($commit -notmatch '^[0-9a-f]{7,40}$') { throw "git rev-parse returned an unusable hash: '$commit'" }
             $assetBase = "SysVitals_Windows_${arch}_v${version}_${commit}_dev"
           }
           $zip = "${assetBase}_portable.zip"
@@ -276,18 +371,32 @@ jobs:
           Compress-Archive -Path $stage -DestinationPath $zip -Force
           $repoRoot = (Get-Location).Path
           $sourceDir = (Resolve-Path $stage).Path
-          $iscc = $null
-          $isccCommand = Get-Command iscc -ErrorAction SilentlyContinue
-          if ($isccCommand) { $iscc = $isccCommand.Source }
-          if (-not $iscc) {
-            $iscc = @(
-              (Join-Path ${env:ProgramFiles(x86)} "Inno Setup 7\ISCC.exe"),
-              (Join-Path $env:ProgramFiles "Inno Setup 7\ISCC.exe"),
-              (Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"),
-              (Join-Path $env:ProgramFiles "Inno Setup 6\ISCC.exe")
-            ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          $pinned = $env:INNO_SETUP_VERSION
+          if (-not $pinned) { throw "INNO_SETUP_VERSION is not set" }
+          $pinnedMajor = $pinned.Split('.')[0]
+          $iscc = @(
+            (Join-Path ${env:ProgramFiles(x86)} "Inno Setup $pinnedMajor\ISCC.exe"),
+            (Join-Path $env:ProgramFiles "Inno Setup $pinnedMajor\ISCC.exe")
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $iscc) { throw "ISCC.exe for Inno Setup $pinnedMajor was not found" }
+          # The banner only carries the major version, so the file version is
+          # what proves the pin actually landed.
+          $previousPreference = $ErrorActionPreference
+          $ErrorActionPreference = 'SilentlyContinue'
+          $banner = (& $iscc '/?' 2>&1 | Out-String)
+          $ErrorActionPreference = $previousPreference
+          if ($banner -notmatch 'Inno Setup (\d+)') {
+            throw "cannot read the ISCC version banner: $banner"
           }
-          if (-not $iscc) { throw "ISCC.exe not found" }
+          if ($Matches[1] -ne $pinnedMajor) {
+            throw "ISCC major version $($Matches[1]) does not match the pinned $pinned"
+          }
+          $product = (Get-Item $iscc).VersionInfo.ProductVersion
+          if (-not $product) { $product = (Get-Item $iscc).VersionInfo.FileVersion }
+          if ($product -and "$product".TrimStart('v') -ne $pinned) {
+            throw "ISCC $product does not match the pinned Inno Setup $pinned"
+          }
+          Write-Host "Inno Setup verified: banner major $($Matches[1]), product '$product', pinned $pinned"
           $numeric = ($version -replace '[^0-9.].*$', '')
           $parts = @($numeric.Split('.') | Where-Object { $_ -ne '' })
           while ($parts.Count -lt 4) { $parts += '0' }
@@ -494,7 +603,9 @@ jobs:
   build-macos:
     name: Build & package (macOS ${{ matrix.arch }})
     if: github.ref_type == 'tag'
+    needs: [quality, public-surface]
     runs-on: macos-latest
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -511,10 +622,15 @@ jobs:
         with:
           ref: ${{ github.ref }}
           fetch-tags: true
-      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
-        with:
-          toolchain: stable
-          targets: ${{ matrix.target }}
+      - name: Install the pinned toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          channel=$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' rust-toolchain.toml | head -1)
+          test -n "$channel" || { echo "rust-toolchain.toml declares no channel" >&2; exit 1; }
+          rustup toolchain install "$channel"
+          rustup target add "${{ matrix.target }}"
+          rustup show active-toolchain
       - uses: Swatinem/rust-cache@e9d7b9f1e587218970671bac74e5511ed9506e6a # v2
         with:
           key: ${{ matrix.target }}
@@ -533,7 +649,8 @@ jobs:
       # under Contents/Resources.
       - name: Package macOS app bundle and dmg
         run: |
-          version=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          version=$(python3 .github/scripts/read_version.py)
+          test -n "$version" || { echo "read_version.py returned an empty version" >&2; exit 1; }
           arch="${{ matrix.arch }}"
           target="${{ matrix.target }}"
           # Only `v*` release tags use the formal asset names; branch pushes
@@ -542,7 +659,9 @@ jobs:
             release_version="${GITHUB_REF_NAME#v}"
             short_version="${release_version%%-*}"
           else
-            commit=$(git rev-parse --short HEAD)
+            commit=$(git rev-parse --short HEAD) || {
+              echo "git rev-parse --short HEAD failed" >&2; exit 1; }
+            test -n "$commit" || { echo "git rev-parse returned an empty hash" >&2; exit 1; }
             release_version="$version"
             short_version="${version%%-*}"
           fi
@@ -640,6 +759,7 @@ jobs:
           trap - EXIT
           echo "Packaged $dmg_name"
       - name: Upload macOS dmg
+        if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: SysVitals-macos-${{ matrix.arch }}
@@ -663,8 +783,9 @@ jobs:
   release:
     name: Release
     if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
-    needs: [quality, public-surface, build-windows, build-macos]
+    needs: [quality, public-surface, platform-check, build-windows, build-macos]
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: write
     steps:
@@ -677,7 +798,9 @@ jobs:
         id: meta
         shell: bash
         run: |
-          version=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          set -euo pipefail
+          version=$(python3 .github/scripts/read_version.py)
+          test -n "$version" || { echo "read_version.py returned an empty version" >&2; exit 1; }
           if [ "$GITHUB_REF_NAME" != "v$version" ]; then
             echo "tag $GITHUB_REF_NAME does not match workspace version v$version" >&2
             exit 1
@@ -808,40 +931,65 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # Dev tag hygiene: `build-*` tags are one-shot acceptance triggers. Once the
-  # four-arch dev packages and the quality gate are green, delete every other
-  # `build-*` tag so only the tag that produced this run survives. A failed
-  # run keeps the previous tag untouched. Deleting a tag ref does not delete
-  # the workflow run or its uploaded artifacts — both stay reachable from the
-  # Actions tab.
+  # four-arch dev packages and every gate are green, delete the `build-*` tags
+  # this one supersedes. A tag is only deleted when its commit is an ancestor
+  # of the kept tag's commit, so a concurrently running newer `build-*` tag is
+  # never deleted out from under its own build legs. A failed run keeps the
+  # previous tag untouched. Deleting a tag ref does not delete the workflow run
+  # or its uploaded artifacts — both stay reachable from the Actions tab.
   # ---------------------------------------------------------------------------
   prune-build-tags:
     name: Prune previous build tags
     if: github.ref_type == 'tag' && startsWith(github.ref_name, 'build-')
-    needs: [quality, build-windows, build-macos]
+    needs: [quality, public-surface, platform-check, build-windows, build-macos]
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       contents: write
     concurrency:
       group: prune-build-tags
       cancel-in-progress: false
     steps:
-      - name: Delete previous build tags
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+          fetch-tags: true
+      - name: Delete superseded build tags
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           KEEP_TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
+          commit_of() { git rev-parse --verify --quiet "$1^{commit}" || true; }
+          keep=$(commit_of "refs/tags/$KEEP_TAG")
+          if [ -z "$keep" ]; then
+            echo "kept tag $KEEP_TAG does not resolve to a commit; pruning nothing" >&2
+            exit 1
+          fi
           gh api --paginate "repos/${GITHUB_REPOSITORY}/git/matching-refs/tags/build-" \
             --jq '.[].ref' |
             sed 's#^refs/tags/##' |
-            while IFS= read -r tag; do
-              if [ "$tag" = "$KEEP_TAG" ]; then
-                continue
-              fi
-              echo "deleting tag $tag"
+            LC_ALL=C sort > /tmp/build-tags
+          while IFS= read -r tag; do
+            if [ "$tag" = "$KEEP_TAG" ]; then
+              continue
+            fi
+            git fetch --no-tags --force origin "refs/tags/${tag}:refs/tags/${tag}" \
+              >/dev/null 2>&1 || true
+            sha=$(commit_of "refs/tags/$tag")
+            if [ -z "$sha" ]; then
+              echo "keeping tag $tag: it does not resolve to a commit locally"
+              continue
+            fi
+            if git merge-base --is-ancestor "$sha" "$keep"; then
+              echo "deleting superseded tag $tag"
               gh api --method DELETE "repos/${GITHUB_REPOSITORY}/git/refs/tags/${tag}"
-            done
+            else
+              echo "keeping tag $tag: not an ancestor of $KEEP_TAG (a newer build may be running)"
+            fi
+          done < /tmp/build-tags
 
   # ---------------------------------------------------------------------------
   # Release tag hygiene: after a `v*` Release is published, every `build-*`
@@ -854,6 +1002,7 @@ jobs:
     if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
     needs: [release]
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       contents: write
     concurrency:
