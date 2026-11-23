@@ -313,21 +313,22 @@ pub(crate) fn clock_anchor_left(bar: HWND, bar_rect: RECT) -> Option<i32> {
         drop(guard);
         if changed {
             match left {
-                    Some(left) => log_event(
+                Some(left) => {
+                    log_event(
                         "INFO",
-                        &format!(
-                            "taskbar 0x{:x}: clock anchor at x={left}",
-                            bar.0 as usize
-                        ),
-                    ),
-                    None => log_event(
+                        &format!("taskbar 0x{:x}: clock anchor at x={left}", bar.0 as usize),
+                    );
+                }
+                None => {
+                    log_event(
                         "WARN",
                         &format!(
                             "taskbar 0x{:x}: no tray or clock anchor; falling back to the bar's right edge",
                             bar.0 as usize
                         ),
-                    ),
+                    );
                 }
+            }
         }
     }
     left

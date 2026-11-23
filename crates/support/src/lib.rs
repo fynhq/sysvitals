@@ -40,7 +40,11 @@ pub fn local_now() -> (String, String) {
     )
 }
 
-pub fn log_event(level: &str, message: &str) -> bool {
+pub fn log_event(level: &str, message: &str) {
+    let _ = log_event_ok(level, message);
+}
+
+pub fn log_event_ok(level: &str, message: &str) -> bool {
     let Ok(dir) = sysvitals_core::config::data_dir() else {
         return false;
     };
@@ -579,7 +583,7 @@ pub fn install_panic_hook() {
         let backtrace = std::backtrace::Backtrace::force_capture();
         let line =
             format!("panic in thread {thread} at {location}: {message} | backtrace: {backtrace}");
-        if !log_event("FATAL", &line) {
+        if !log_event_ok("FATAL", &line) {
             write_panic_fallback(&std::env::temp_dir(), &line);
         }
         previous(info);

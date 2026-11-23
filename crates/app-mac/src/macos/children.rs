@@ -186,7 +186,9 @@ fn launch_panel(
     prepare(&mut cmd);
     match cmd.spawn() {
         Ok(child) => record(child),
-        Err(e) => log_event("WARN", &format!("{label}: spawn failed: {e}")),
+        Err(e) => {
+            log_event("WARN", &format!("{label}: spawn failed: {e}"));
+        }
     }
 }
 
@@ -279,7 +281,9 @@ pub(crate) fn open_activity_monitor() {
                     let _ = child.wait();
                 });
         }
-        Err(e) => log_event("WARN", &format!("open Activity Monitor failed: {e}")),
+        Err(e) => {
+            log_event("WARN", &format!("open Activity Monitor failed: {e}"));
+        }
     }
 }
 

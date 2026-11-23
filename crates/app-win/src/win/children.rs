@@ -716,9 +716,11 @@ pub(crate) fn restart_self() {
             close_children();
             unsafe { shutdown_and_quit() };
         }
-        Err(e) => log_event(
-            "WARN",
-            &format!("restart_self: relaunch failed ({e}), keeping the running instance"),
-        ),
+        Err(e) => {
+            log_event(
+                "WARN",
+                &format!("restart_self: relaunch failed ({e}), keeping the running instance"),
+            );
+        }
     }
 }
