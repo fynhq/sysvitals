@@ -26,7 +26,7 @@ use sysvitals_panel::{
     acquire_instance_lock, anchor_arg, anchor_monitor_arg, anchor_visible_bounds, backdrop_for,
     detect_material, layout_rect, log_event, observe_system_appearance, parent_pid_arg,
     spawn_accent_watch, take_panel_request, window_display_id, InstanceLock, PanelAction,
-    PanelSurface, CONTROL_RADIUS, PANEL_SETTINGS,
+    PanelSurface, CONTROL_RADIUS, PANEL_REQUEST_MAX_AGE_MS, PANEL_REQUEST_POLL_MS, PANEL_SETTINGS,
 };
 #[cfg(windows)]
 use sysvitals_panel::{preplace_hidden_window, taskbar_al, window_hwnd, window_is_visible};
@@ -51,8 +51,6 @@ pub(crate) use widgets::*;
 const INSTANCE_LOCK_NAME: &str = "Local\\SysVitalsSettings_SingleInstance";
 #[cfg(not(windows))]
 const INSTANCE_LOCK_NAME: &str = "settings.lock";
-const REQUEST_MAX_AGE_MS: u64 = 10_000;
-const REQUEST_POLL_MS: u64 = 50;
 
 fn main() {
     let started = Instant::now();
@@ -355,7 +353,7 @@ fn show_settings(
 fn start_request_loop(cx: &mut App) {
     cx.spawn(async move |cx| loop {
         cx.background_executor()
-            .timer(Duration::from_millis(REQUEST_POLL_MS))
+            .timer(Duration::from_millis(PANEL_REQUEST_POLL_MS))
             .await;
         let request = match take_panel_request(PANEL_SETTINGS) {
             Ok(Some(request)) => request,
@@ -365,7 +363,7 @@ fn start_request_loop(cx: &mut App) {
                 continue;
             }
         };
-        if request.is_stale(REQUEST_MAX_AGE_MS) {
+        if request.is_stale(PANEL_REQUEST_MAX_AGE_MS) {
             log_event("INFO", "settings: stale panel request ignored");
             continue;
         }

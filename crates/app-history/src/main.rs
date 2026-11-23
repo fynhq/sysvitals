@@ -26,7 +26,7 @@ use sysvitals_panel::{
     detect_material, layout_rect, log_event, log_sanitize_issues, observe_system_appearance,
     prewarm_arg, spawn_accent_watch, take_panel_request, trim_working_set, unix_ms,
     window_display_id, ConfigEvent, InstanceLock, PanelAction, PanelSurface, CONTROL_RADIUS,
-    PANEL_HISTORY,
+    PANEL_HISTORY, PANEL_REQUEST_MAX_AGE_MS, PANEL_REQUEST_POLL_MS,
 };
 #[cfg(windows)]
 use sysvitals_panel::{
@@ -80,8 +80,6 @@ pub(crate) use window::*;
 const INSTANCE_LOCK_NAME: &str = "Local\\SysVitalsHistory_SingleInstance";
 #[cfg(not(windows))]
 const INSTANCE_LOCK_NAME: &str = "history.lock";
-const REQUEST_MAX_AGE_MS: u64 = 10_000;
-const REQUEST_POLL_MS: u64 = 50;
 
 fn main() {
     sysvitals_panel::install_panic_hook();
@@ -252,7 +250,7 @@ fn start_history_host(
         let mut idle_handled = false;
         loop {
             cx.background_executor()
-                .timer(Duration::from_millis(REQUEST_POLL_MS))
+                .timer(Duration::from_millis(PANEL_REQUEST_POLL_MS))
                 .await;
             if resident {
                 let empty = cx.update(|app| app.windows().is_empty());
@@ -287,7 +285,7 @@ fn start_history_host(
                 "INFO",
                 &format!("history: panel request reached the host {age_ms}ms after the click"),
             );
-            if request.is_stale(REQUEST_MAX_AGE_MS) {
+            if request.is_stale(PANEL_REQUEST_MAX_AGE_MS) {
                 log_event("INFO", "history: stale panel request ignored");
                 continue;
             }

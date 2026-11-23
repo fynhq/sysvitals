@@ -211,6 +211,8 @@ pub fn poll_config(watcher: &mut sysvitals_core::ConfigWatcher, error_prefix: &s
 
 pub const PANEL_SETTINGS: &str = "settings";
 pub const PANEL_HISTORY: &str = "history";
+pub const PANEL_REQUEST_POLL_MS: u64 = 50;
+pub const PANEL_REQUEST_MAX_AGE_MS: u64 = 10_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PanelAction {
