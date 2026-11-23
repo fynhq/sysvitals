@@ -274,8 +274,13 @@ fn start_history_host(
                 }
             }
 
-            let Some(request) = take_panel_request(PANEL_HISTORY) else {
-                continue;
+            let request = match take_panel_request(PANEL_HISTORY) {
+                Ok(Some(request)) => request,
+                Ok(None) => continue,
+                Err(error) => {
+                    log_event("WARN", &format!("history: {error}"));
+                    continue;
+                }
             };
             let age_ms = unix_ms().saturating_sub(request.requested_at_ms);
             log_event(

@@ -357,8 +357,13 @@ fn start_request_loop(cx: &mut App) {
         cx.background_executor()
             .timer(Duration::from_millis(REQUEST_POLL_MS))
             .await;
-        let Some(request) = take_panel_request(PANEL_SETTINGS) else {
-            continue;
+        let request = match take_panel_request(PANEL_SETTINGS) {
+            Ok(Some(request)) => request,
+            Ok(None) => continue,
+            Err(error) => {
+                log_event("WARN", &format!("settings: {error}"));
+                continue;
+            }
         };
         if request.is_stale(REQUEST_MAX_AGE_MS) {
             log_event("INFO", "settings: stale panel request ignored");

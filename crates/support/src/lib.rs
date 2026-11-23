@@ -40,12 +40,12 @@ pub fn local_now() -> (String, String) {
     )
 }
 
-pub fn log_event(level: &str, message: &str) {
+pub fn log_event(level: &str, message: &str) -> bool {
     let Ok(dir) = sysvitals_core::config::data_dir() else {
-        return;
+        return false;
     };
     let (date, time) = local_now();
-    sysvitals_core::logger::log_line(&dir, &date, &time, level, message);
+    sysvitals_core::logger::log_line(&dir, &date, &time, level, message)
 }
 
 pub fn log_sanitize_issues(prefix: &str, issues: &[sysvitals_core::config::SanitizeIssue]) {
@@ -57,22 +57,30 @@ pub fn log_sanitize_issues(prefix: &str, issues: &[sysvitals_core::config::Sanit
     }
 }
 
+fn history_log_fn() -> sysvitals_core::history_writer::LogFn {
+    static LOG: OnceLock<sysvitals_core::history_writer::LogFn> = OnceLock::new();
+    LOG.get_or_init(|| {
+        Arc::new(|level: &str, message: &str| {
+            log_event(level, message);
+        })
+    })
+    .clone()
+}
+
 pub fn record_history_sample(
     slot: &mut sysvitals_core::HistoryWriterSlot,
     cfg: &sysvitals_core::Config,
     now: i64,
     snapshot: &sysvitals_core::Snapshot,
 ) {
-    static LOG: OnceLock<sysvitals_core::history_writer::LogFn> = OnceLock::new();
-    let log = LOG
-        .get_or_init(|| Arc::new(|level: &str, message: &str| log_event(level, message)))
-        .clone();
+    if !slot.has_log() {
+        slot.set_log(history_log_fn());
+    }
     let _ = slot.record(
         now,
         snapshot.cpu_pct,
         snapshot.mem_pct,
         cfg.history.retention_days,
-        log,
     );
 }
 
@@ -132,17 +140,18 @@ impl AutoStartController {
                     AutoStartOutcome::Unchanged => {}
                     AutoStartOutcome::Changed { detail } => {
                         let state = if desired { "enabled" } else { "disabled" };
-                        match detail {
-                            Some(detail) => {
-                                log_event("INFO", &format!("auto-start {state} ({detail})"))
-                            }
-                            None => log_event("INFO", &format!("auto-start {state}")),
-                        }
+                        let text = match detail {
+                            Some(detail) => format!("auto-start {state} ({detail})"),
+                            None => format!("auto-start {state}"),
+                        };
+                        log_event("INFO", &text);
                     }
-                    AutoStartOutcome::PendingApproval => log_event(
-                        "INFO",
-                        "auto-start requires approval in System Settings > Login Items",
-                    ),
+                    AutoStartOutcome::PendingApproval => {
+                        log_event(
+                            "INFO",
+                            "auto-start requires approval in System Settings > Login Items",
+                        );
+                    }
                 }
             }
             Err(error) => {
@@ -303,56 +312,253 @@ pub fn unix_ms() -> u64 {
         .unwrap_or(0)
 }
 
+fn panels_dir() -> Result<std::path::PathBuf, String> {
+    sysvitals_core::config::data_dir()
+        .map(|dir| dir.join("panels"))
+        .map_err(|error| format!("data directory unavailable: {error}"))
+}
+
 pub fn write_panel_request(
     panel: &str,
     action: PanelAction,
     anchor: Option<sysvitals_core::cli::AnchorRect>,
     monitor: Option<u64>,
 ) -> Result<(), String> {
-    let dir = sysvitals_core::config::data_dir()
-        .map_err(|error| format!("data directory unavailable: {error}"))?
-        .join("panels");
+    let dir = panels_dir()?;
     std::fs::create_dir_all(&dir)
         .map_err(|error| format!("cannot create {}: {error}", dir.display()))?;
+    write_panel_request_in(
+        &dir,
+        panel,
+        PanelRequest {
+            action,
+            anchor,
+            monitor,
+            requested_at_ms: unix_ms(),
+        },
+    )
+}
+
+fn write_panel_request_in(
+    dir: &std::path::Path,
+    panel: &str,
+    request: PanelRequest,
+) -> Result<(), String> {
     let path = dir.join(format!("{panel}.request"));
     let temp = dir.join(format!("{panel}.request.tmp-{}", std::process::id()));
-    let request = PanelRequest {
-        action,
-        anchor,
-        monitor,
-        requested_at_ms: unix_ms(),
-    };
     std::fs::write(&temp, request.encode())
         .map_err(|error| format!("cannot write {}: {error}", temp.display()))?;
     if let Err(first_error) = std::fs::rename(&temp, &path) {
         let _ = std::fs::remove_file(&path);
-        std::fs::rename(&temp, &path).map_err(|error| {
-            format!(
+        if let Err(error) = std::fs::rename(&temp, &path) {
+            let _ = std::fs::remove_file(&temp);
+            return Err(format!(
                 "cannot replace {} (first attempt: {first_error}): {error}",
                 path.display()
-            )
-        })?;
+            ));
+        }
     }
     Ok(())
 }
 
-pub fn take_panel_request(panel: &str) -> Option<PanelRequest> {
-    let dir = sysvitals_core::config::data_dir().ok()?.join("panels");
+pub fn take_panel_request(panel: &str) -> Result<Option<PanelRequest>, String> {
+    let dir = panels_dir()?;
+    take_panel_request_in(&dir, panel)
+}
+
+// The rename claims the request before it is read, so a click written between the read and the
+// delete can no longer be destroyed unread.
+fn take_panel_request_in(
+    dir: &std::path::Path,
+    panel: &str,
+) -> Result<Option<PanelRequest>, String> {
     let path = dir.join(format!("{panel}.request"));
-    let text = std::fs::read_to_string(&path).ok()?;
-    let _ = std::fs::remove_file(&path);
-    PanelRequest::decode(&text)
+    let claimed = dir.join(format!("{panel}.request.claimed-{}", std::process::id()));
+    if std::fs::rename(&path, &claimed).is_err() {
+        return Ok(None);
+    }
+    let text = match std::fs::read_to_string(&claimed) {
+        Ok(text) => text,
+        Err(error) => {
+            let _ = std::fs::remove_file(&claimed);
+            return Err(format!("cannot read {}: {error}", claimed.display()));
+        }
+    };
+    let _ = std::fs::remove_file(&claimed);
+    match PanelRequest::decode(&text) {
+        Some(request) => Ok(Some(request)),
+        None => Err(format!(
+            "panel request {} is not decodable: {:?}",
+            path.display(),
+            text.trim_end()
+        )),
+    }
 }
 
 pub fn clear_panel_request(panel: &str) {
-    let Ok(dir) = sysvitals_core::config::data_dir() else {
+    let Ok(dir) = panels_dir() else {
         return;
     };
-    let _ = std::fs::remove_file(dir.join("panels").join(format!("{panel}.request")));
+    let _ = std::fs::remove_file(dir.join(format!("{panel}.request")));
+}
+
+pub fn sweep_panel_temp_files() {
+    let Ok(dir) = panels_dir() else {
+        return;
+    };
+    sweep_panel_temp_files_in(&dir);
+}
+
+fn sweep_panel_temp_files_in(dir: &std::path::Path) -> usize {
+    const ORPHAN_AGE_SECS: u64 = 300;
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let cutoff =
+        std::time::SystemTime::now().checked_sub(std::time::Duration::from_secs(ORPHAN_AGE_SECS));
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !name.contains(".request.tmp-") && !name.contains(".request.claimed-") {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .zip(cutoff)
+            .is_some_and(|(modified, cutoff)| modified <= cutoff);
+        if stale && std::fs::remove_file(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PanelTarget {
+    Focus,
+    Close,
+    Open,
+    Move,
+}
+
+// A toggle with a window always closes it; rebuilding on another display belongs to Open only.
+pub fn resolve_panel_target(
+    action: PanelAction,
+    same_monitor: bool,
+    has_window: bool,
+) -> PanelTarget {
+    match (action, has_window) {
+        (_, false) => PanelTarget::Open,
+        (PanelAction::Toggle, true) => PanelTarget::Close,
+        (PanelAction::Open, true) if same_monitor => PanelTarget::Focus,
+        (PanelAction::Open, true) => PanelTarget::Move,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaitCursorNext {
+    Wait,
+    Arrow,
+    Timeout,
+    Terminate,
+}
+
+pub fn resolve_wait_cursor(
+    target_is_set: bool,
+    target_visible: bool,
+    elapsed_ms: u64,
+    timeout_ms: u64,
+    child_alive: bool,
+) -> WaitCursorNext {
+    if !target_is_set || target_visible {
+        return WaitCursorNext::Arrow;
+    }
+    if elapsed_ms < timeout_ms {
+        return WaitCursorNext::Wait;
+    }
+    if child_alive {
+        WaitCursorNext::Terminate
+    } else {
+        WaitCursorNext::Timeout
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChildNext {
+    Spawn,
+    Request,
+    Ignore,
+    Watch,
+}
+
+pub fn resolve_child_next(
+    alive: bool,
+    launching: bool,
+    prewarm: bool,
+    window_visible: bool,
+    elapsed_ms: Option<u64>,
+    grace_ms: u64,
+) -> ChildNext {
+    if launching {
+        return if prewarm {
+            ChildNext::Request
+        } else {
+            ChildNext::Watch
+        };
+    }
+    if !alive {
+        return ChildNext::Spawn;
+    }
+    let in_grace = !window_visible && !prewarm && elapsed_ms.is_some_and(|ms| ms < grace_ms);
+    if in_grace {
+        ChildNext::Ignore
+    } else {
+        ChildNext::Request
+    }
+}
+
+pub const RESPAWN_DELAYS_MS: [u64; 3] = [5_000, 30_000, 120_000];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RespawnPolicy {
+    attempts: u32,
+}
+
+impl RespawnPolicy {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn attempts(&self) -> u32 {
+        self.attempts
+    }
+
+    pub fn reset(&mut self) {
+        self.attempts = 0;
+    }
+
+    pub fn next_delay_ms(&mut self) -> Option<u64> {
+        let delay = RESPAWN_DELAYS_MS.get(self.attempts as usize).copied();
+        if delay.is_some() {
+            self.attempts += 1;
+        }
+        delay
+    }
+}
+
+fn write_panic_fallback(dir: &std::path::Path, line: &str) -> bool {
+    let path = dir.join(format!("sysvitals-panic-{}.log", std::process::id()));
+    std::fs::write(&path, format!("FATAL {line}\n")).is_ok()
 }
 
 pub fn install_panic_hook() {
-    std::panic::set_hook(Box::new(|info| {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
         let message = if let Some(text) = info.payload().downcast_ref::<&str>() {
             (*text).to_string()
         } else if let Some(text) = info.payload().downcast_ref::<String>() {
@@ -369,10 +575,12 @@ pub fn install_panic_hook() {
             .unwrap_or("unnamed")
             .to_string();
         let backtrace = std::backtrace::Backtrace::force_capture();
-        log_event(
-            "FATAL",
-            &format!("panic in thread {thread} at {location}: {message} | backtrace: {backtrace}"),
-        );
+        let line =
+            format!("panic in thread {thread} at {location}: {message} | backtrace: {backtrace}");
+        if !log_event("FATAL", &line) {
+            write_panic_fallback(&std::env::temp_dir(), &line);
+        }
+        previous(info);
     }));
 }
 
@@ -551,7 +759,7 @@ pub fn acquire_instance_lock(_name: &str) -> InstanceLock {
 
 #[cfg(windows)]
 pub struct ParentProcess {
-    handle: isize,
+    handle: windows::Win32::Foundation::HANDLE,
 }
 
 #[cfg(windows)]
@@ -559,27 +767,23 @@ impl ParentProcess {
     pub fn open(pid: u32) -> Result<Self, String> {
         use windows::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE};
         match unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, pid) } {
-            Ok(handle) => Ok(Self {
-                handle: handle.0 as isize,
-            }),
+            Ok(handle) => Ok(Self { handle }),
             Err(error) => Err(error.to_string()),
         }
     }
 
     pub fn exited(&self) -> bool {
-        use windows::Win32::Foundation::{HANDLE, WAIT_TIMEOUT};
+        use windows::Win32::Foundation::WAIT_TIMEOUT;
         use windows::Win32::System::Threading::WaitForSingleObject;
-        unsafe {
-            WaitForSingleObject(HANDLE(self.handle as *mut std::ffi::c_void), 0) != WAIT_TIMEOUT
-        }
+        unsafe { WaitForSingleObject(self.handle, 0) != WAIT_TIMEOUT }
     }
 }
 
 #[cfg(windows)]
 impl Drop for ParentProcess {
     fn drop(&mut self) {
-        use windows::Win32::Foundation::{CloseHandle, HANDLE};
-        let _ = unsafe { CloseHandle(HANDLE(self.handle as *mut std::ffi::c_void)) };
+        use windows::Win32::Foundation::CloseHandle;
+        let _ = unsafe { CloseHandle(self.handle) };
     }
 }
 
@@ -686,5 +890,268 @@ mod tests {
             "incomplete no-anchor marker must be rejected"
         );
         assert_eq!(PanelRequest::decode("close - - - - 0 1"), None);
+    }
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        std::env::temp_dir().join(format!(
+            "sysvitals-support-{tag}-{}-{nanos}",
+            std::process::id()
+        ))
+    }
+
+    fn sample_request() -> PanelRequest {
+        PanelRequest {
+            action: PanelAction::Toggle,
+            anchor: Some(sysvitals_core::cli::AnchorRect {
+                left: 1.0,
+                top: 2.0,
+                right: 101.0,
+                bottom: 42.0,
+            }),
+            monitor: Some(7),
+            requested_at_ms: unix_ms(),
+        }
+    }
+
+    fn dir_names(dir: &std::path::Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn a_written_request_is_taken_exactly_once() {
+        let dir = temp_dir("roundtrip");
+        std::fs::create_dir_all(&dir).unwrap();
+        let request = sample_request();
+        write_panel_request_in(&dir, PANEL_HISTORY, request).unwrap();
+        assert!(dir.join(format!("{PANEL_HISTORY}.request")).exists());
+        assert_eq!(
+            take_panel_request_in(&dir, PANEL_HISTORY).unwrap(),
+            Some(request)
+        );
+        assert_eq!(
+            take_panel_request_in(&dir, PANEL_HISTORY).unwrap(),
+            None,
+            "the claim is consumed"
+        );
+        assert!(
+            dir_names(&dir).is_empty(),
+            "no claimed or temp file may survive: {:?}",
+            dir_names(&dir)
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn take_without_a_request_reports_none() {
+        let dir = temp_dir("absent");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(take_panel_request_in(&dir, PANEL_SETTINGS).unwrap(), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_undecodable_request_is_reported_instead_of_swallowing_the_click() {
+        let dir = temp_dir("corrupt");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(format!("{PANEL_HISTORY}.request")), "toggle 1 2\n").unwrap();
+        let error = take_panel_request_in(&dir, PANEL_HISTORY).unwrap_err();
+        assert!(error.contains("not decodable"), "{error}");
+        assert!(
+            dir_names(&dir).is_empty(),
+            "the claimed file must be removed: {:?}",
+            dir_names(&dir)
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_failed_write_removes_its_temp_file() {
+        let dir = temp_dir("writefail");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(
+            dir.join(format!("{PANEL_HISTORY}.request"))
+                .join("occupied"),
+        )
+        .unwrap();
+        let error = write_panel_request_in(&dir, PANEL_HISTORY, sample_request()).unwrap_err();
+        assert!(error.contains("cannot replace"), "{error}");
+        assert_eq!(
+            dir_names(&dir),
+            vec![format!("{PANEL_HISTORY}.request")],
+            "the temp file must not accumulate"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn sweep_removes_only_stale_panel_temp_files() {
+        let dir = temp_dir("sweep");
+        std::fs::create_dir_all(&dir).unwrap();
+        let stale_tmp = dir.join("history.request.tmp-1111");
+        let stale_claimed = dir.join("history.request.claimed-2222");
+        let fresh_tmp = dir.join("history.request.tmp-3333");
+        let live = dir.join("history.request");
+        let decoy = dir.join("notes.txt");
+        for path in [&stale_tmp, &stale_claimed, &fresh_tmp, &live, &decoy] {
+            std::fs::write(path, b"x").unwrap();
+        }
+        for path in [&stale_tmp, &stale_claimed] {
+            let file = std::fs::File::options().write(true).open(path).unwrap();
+            file.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(600))
+                .unwrap();
+        }
+        assert_eq!(sweep_panel_temp_files_in(&dir), 2);
+        assert!(!stale_tmp.exists());
+        assert!(!stale_claimed.exists());
+        assert!(fresh_tmp.exists(), "a fresh temp belongs to a live writer");
+        assert!(live.exists(), "a pending request is never swept");
+        assert!(decoy.exists(), "an unrelated file is never swept");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_panic_fallback_file_carries_the_fatal_line() {
+        let dir = temp_dir("panic");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(write_panic_fallback(
+            &dir,
+            "panic in thread main at x.rs:1:1: boom"
+        ));
+        let path = dir.join(format!("sysvitals-panic-{}.log", std::process::id()));
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content, "FATAL panic in thread main at x.rs:1:1: boom\n");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_toggle_with_a_window_always_closes() {
+        for same_monitor in [true, false] {
+            assert_eq!(
+                resolve_panel_target(PanelAction::Toggle, same_monitor, true),
+                PanelTarget::Close,
+                "a toggle never rebuilds the window on another display"
+            );
+            assert_eq!(
+                resolve_panel_target(PanelAction::Toggle, same_monitor, false),
+                PanelTarget::Open
+            );
+            assert_eq!(
+                resolve_panel_target(PanelAction::Open, same_monitor, false),
+                PanelTarget::Open
+            );
+        }
+        assert_eq!(
+            resolve_panel_target(PanelAction::Open, true, true),
+            PanelTarget::Focus
+        );
+        assert_eq!(
+            resolve_panel_target(PanelAction::Open, false, true),
+            PanelTarget::Move
+        );
+    }
+
+    #[test]
+    fn the_wait_cursor_escalates_to_terminating_a_deaf_host() {
+        assert_eq!(
+            resolve_wait_cursor(false, false, 0, 10_000, true),
+            WaitCursorNext::Arrow
+        );
+        assert_eq!(
+            resolve_wait_cursor(true, true, 99_999, 10_000, true),
+            WaitCursorNext::Arrow
+        );
+        assert_eq!(
+            resolve_wait_cursor(true, false, 9_999, 10_000, true),
+            WaitCursorNext::Wait
+        );
+        assert_eq!(
+            resolve_wait_cursor(true, false, 9_999, 10_000, false),
+            WaitCursorNext::Wait
+        );
+        assert_eq!(
+            resolve_wait_cursor(true, false, 10_000, 10_000, true),
+            WaitCursorNext::Terminate,
+            "a live but unresponsive host must be killed so the next click respawns it"
+        );
+        assert_eq!(
+            resolve_wait_cursor(true, false, 60_000, 10_000, true),
+            WaitCursorNext::Terminate
+        );
+        assert_eq!(
+            resolve_wait_cursor(true, false, 10_000, 10_000, false),
+            WaitCursorNext::Timeout
+        );
+    }
+
+    #[test]
+    fn the_history_click_decision_matches_the_launch_states() {
+        assert_eq!(
+            resolve_child_next(true, true, true, false, Some(100), 3_000),
+            ChildNext::Request
+        );
+        assert_eq!(
+            resolve_child_next(false, true, true, false, None, 3_000),
+            ChildNext::Request
+        );
+        assert_eq!(
+            resolve_child_next(false, true, false, false, Some(100), 3_000),
+            ChildNext::Watch,
+            "a one-shot launch is already on its way; the ready message will arrive"
+        );
+        assert_eq!(
+            resolve_child_next(false, false, false, false, None, 3_000),
+            ChildNext::Spawn
+        );
+        assert_eq!(
+            resolve_child_next(false, false, true, false, Some(100), 3_000),
+            ChildNext::Spawn
+        );
+        assert_eq!(
+            resolve_child_next(true, false, false, false, Some(2_999), 3_000),
+            ChildNext::Ignore,
+            "inside the cold-start grace the window is not up yet"
+        );
+        assert_eq!(
+            resolve_child_next(true, false, false, false, Some(3_000), 3_000),
+            ChildNext::Request
+        );
+        assert_eq!(
+            resolve_child_next(true, false, false, false, None, 3_000),
+            ChildNext::Request
+        );
+        assert_eq!(
+            resolve_child_next(true, false, false, true, Some(10), 3_000),
+            ChildNext::Request,
+            "a visible window ends the grace"
+        );
+        assert_eq!(
+            resolve_child_next(true, false, true, false, Some(10), 3_000),
+            ChildNext::Request,
+            "a prewarmed host has no cold-start grace"
+        );
+    }
+
+    #[test]
+    fn respawn_backoff_caps_at_three_attempts() {
+        let mut policy = RespawnPolicy::new();
+        assert_eq!(policy.attempts(), 0);
+        assert_eq!(policy.next_delay_ms(), Some(5_000));
+        assert_eq!(policy.next_delay_ms(), Some(30_000));
+        assert_eq!(policy.next_delay_ms(), Some(120_000));
+        assert_eq!(policy.next_delay_ms(), None, "the cap must stop the loop");
+        assert_eq!(policy.next_delay_ms(), None);
+        assert_eq!(policy.attempts(), 3);
+        policy.reset();
+        assert_eq!(policy.attempts(), 0);
+        assert_eq!(policy.next_delay_ms(), Some(5_000));
+        assert_eq!(RESPAWN_DELAYS_MS, [5_000, 30_000, 120_000]);
     }
 }
