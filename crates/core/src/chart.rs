@@ -1,7 +1,5 @@
 //! Pure history-chart ranges, buckets, and axis logic.
 
-use std::collections::HashMap;
-
 use chrono::{DateTime, FixedOffset, Local};
 
 use crate::i18n::{t, Language};
@@ -84,19 +82,34 @@ pub fn points(query: VisibleQuery, buckets: &[Bucket]) -> Vec<ChartPoint> {
     let Some(first) = buckets.first().copied() else {
         return Vec::new();
     };
-    let mut by_ts: HashMap<i64, Bucket> =
-        buckets.iter().map(|bucket| (bucket.ts, *bucket)).collect();
     let bucket = query.bucket.max(1);
+    debug_assert!(
+        (first.ts - query.from).rem_euclid(bucket) == 0,
+        "query.from {} is off the bucket grid of {}",
+        query.from,
+        first.ts
+    );
     let mut last = first;
     let mut points = Vec::new();
+    let mut index = 0;
     let mut ts = query.from;
     while ts <= query.to {
-        if let Some(bucket) = by_ts.remove(&ts) {
-            last = bucket;
+        // `buckets` arrives ordered by ts, so a merge cursor replaces the per-call hash map.
+        while index < buckets.len() && buckets[index].ts < ts {
+            index += 1;
+        }
+        if index < buckets.len() && buckets[index].ts == ts {
+            let mut current = buckets[index];
+            index += 1;
+            while index < buckets.len() && buckets[index].ts == ts {
+                current = buckets[index];
+                index += 1;
+            }
+            last = current;
             points.push(ChartPoint {
                 ts,
-                cpu: bucket.cpu,
-                mem: bucket.mem,
+                cpu: current.cpu,
+                mem: current.mem,
                 has_data: true,
             });
         } else {
@@ -204,7 +217,9 @@ where
             continue;
         }
         last_shown = Some(text.clone());
-        labels.push((frac, text));
+        // The label text is rendered from the floored timestamp, so its position must be too.
+        let position = (((clean - query.from) as f64 / span) as f32).clamp(0.0, 1.0);
+        labels.push((position, text));
     }
     labels
 }
@@ -473,6 +488,152 @@ mod tests {
         });
         let texts: Vec<&str> = labels.iter().map(|(_, text)| text.as_str()).collect();
         assert_eq!(texts, ["01-01 00:00", "01:10"]);
+    }
+
+    fn assert_positions(labels: &[(f32, String)], expected: &[f64]) {
+        assert_eq!(labels.len(), expected.len(), "label count");
+        for (index, want) in expected.iter().enumerate() {
+            let got = f64::from(labels[index].0);
+            assert!(
+                (got - want).abs() < 1e-6,
+                "label {index} sits at {got}, expected {want} ({})",
+                labels[index].1
+            );
+        }
+    }
+
+    #[test]
+    fn axis_label_positions_follow_the_floored_label_time() {
+        let buckets = vec![bucket(0, 0.0, 0.0)];
+        for (range, to, expected) in [
+            (
+                TimeRange::Hour1,
+                3_600i64,
+                [0.0, 1.0 / 6.0, 1.0 / 3.0, 0.5, 2.0 / 3.0, 1.0],
+            ),
+            (
+                TimeRange::Day1,
+                86_400,
+                [0.0, 1.0 / 6.0, 1.0 / 3.0, 7.0 / 12.0, 0.75, 1.0],
+            ),
+            (
+                TimeRange::Month1,
+                2_592_000,
+                [0.0, 1.0 / 6.0, 1.0 / 3.0, 0.5, 2.0 / 3.0, 1.0],
+            ),
+        ] {
+            let query = VisibleQuery {
+                from: 0,
+                to,
+                bucket: range.bucket_secs(),
+            };
+            let labels = axis_labels_with_offset(range, query, &buckets, 6, |_| 0);
+            assert_positions(&labels, &expected);
+            assert_eq!(labels[0].0, 0.0, "the first tick stays pinned to the start");
+            assert_eq!(labels.last().unwrap().0, 1.0, "the last tick stays pinned");
+        }
+    }
+
+    #[test]
+    fn axis_label_positions_survive_a_trimmed_unaligned_start() {
+        let buckets = vec![
+            bucket(20, 1.0, 2.0),
+            bucket(120, 3.0, 4.0),
+            bucket(300, 5.0, 6.0),
+        ];
+        let mut query = VisibleQuery {
+            from: 0,
+            to: 320,
+            bucket: 10,
+        };
+        trim_leading_gap(&mut query, &buckets);
+        assert_eq!(query.from, 20, "the trimmed start is not on the label grid");
+        let labels = axis_labels_with_offset(TimeRange::Min5, query, &buckets, 3, |_| 0);
+        assert_positions(&labels, &[0.0, 100.0 / 300.0, 280.0 / 300.0]);
+        assert!(points(query, &buckets)[0].has_data);
+    }
+
+    fn points_by_map(query: VisibleQuery, buckets: &[Bucket]) -> Vec<ChartPoint> {
+        let Some(first) = buckets.first().copied() else {
+            return Vec::new();
+        };
+        let mut by_ts: std::collections::HashMap<i64, Bucket> =
+            buckets.iter().map(|item| (item.ts, *item)).collect();
+        let bucket = query.bucket.max(1);
+        let mut last = first;
+        let mut out = Vec::new();
+        let mut ts = query.from;
+        while ts <= query.to {
+            if let Some(hit) = by_ts.remove(&ts) {
+                last = hit;
+                out.push(ChartPoint {
+                    ts,
+                    cpu: hit.cpu,
+                    mem: hit.mem,
+                    has_data: true,
+                });
+            } else {
+                out.push(ChartPoint {
+                    ts,
+                    cpu: last.cpu,
+                    mem: last.mem,
+                    has_data: false,
+                });
+            }
+            ts = match ts.checked_add(bucket) {
+                Some(next) => next,
+                None => break,
+            };
+        }
+        out
+    }
+
+    fn assert_same_points(left: &[ChartPoint], right: &[ChartPoint]) {
+        assert_eq!(left.len(), right.len(), "point count");
+        for (a, b) in left.iter().zip(right) {
+            assert_eq!(
+                (a.ts, a.cpu, a.mem, a.has_data),
+                (b.ts, b.cpu, b.mem, b.has_data)
+            );
+        }
+    }
+
+    #[test]
+    fn the_merge_cursor_matches_a_hash_map_lookup_for_gappy_buckets() {
+        let buckets = vec![
+            bucket(0, 2.0, 3.0),
+            bucket(0, 9.0, 9.0),
+            bucket(40, 4.0, 5.0),
+            bucket(50, 6.0, 7.0),
+            bucket(80, 8.0, 9.0),
+            bucket(200, 10.0, 11.0),
+        ];
+        for (from, to, step) in [
+            (0i64, 100i64, 10i64),
+            (0, 100, 20),
+            (0, 80, 40),
+            (20, 100, 20),
+            (0, 200, 100),
+        ] {
+            let query = VisibleQuery {
+                from,
+                to,
+                bucket: step,
+            };
+            assert_same_points(&points(query, &buckets), &points_by_map(query, &buckets));
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "off the bucket grid")]
+    fn points_reject_a_query_start_off_the_bucket_grid() {
+        let buckets = vec![bucket(3, 1.0, 2.0)];
+        let query = VisibleQuery {
+            from: 0,
+            to: 30,
+            bucket: 10,
+        };
+        let _ = points(query, &buckets);
     }
 
     #[test]
