@@ -37,6 +37,42 @@ pub(crate) fn reload_config_if_changed() {
     log_event("INFO", &format!("config reloaded: {}", cfg.summary()));
 }
 
+fn nsstring_lossy(value: *mut AnyObject) -> String {
+    if value.is_null() {
+        return String::new();
+    }
+    // SAFETY: `value` is a live NSString owned by the error object;
+    // `UTF8String` yields a valid NUL-terminated pointer or null.
+    unsafe {
+        let utf8: *const std::ffi::c_char = msg_send![value, UTF8String];
+        if utf8.is_null() {
+            return String::new();
+        }
+        std::ffi::CStr::from_ptr(utf8)
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
+fn nserror_detail(error: *mut AnyObject) -> Option<String> {
+    if error.is_null() {
+        return None;
+    }
+    // SAFETY: `error` is the NSError filled in by the SMAppService
+    // out-param; `domain`, `code` and `localizedDescription` are documented
+    // NSError members and return valid objects or values.
+    let (domain, code, description) = unsafe {
+        let domain: *mut AnyObject = msg_send![error, domain];
+        let code: isize = msg_send![error, code];
+        let description: *mut AnyObject = msg_send![error, localizedDescription];
+        (nsstring_lossy(domain), code, nsstring_lossy(description))
+    };
+    if domain.is_empty() && description.is_empty() {
+        return None;
+    }
+    Some(format!("{domain}({code}): {description}"))
+}
+
 pub(crate) fn set_launch_at_login(enabled: bool) -> Result<Option<isize>, String> {
     let cls = AnyClass::get(c"SMAppService")
         .ok_or_else(|| "SMAppService unavailable (requires macOS 13)".to_string())?;
@@ -70,9 +106,11 @@ pub(crate) fn set_launch_at_login(enabled: bool) -> Result<Option<isize>, String
     };
     let new_status: isize = unsafe { msg_send![service, status] };
     if ok.as_bool() {
-        Ok(Some(new_status))
-    } else {
-        Err(format!("SMAppService status={new_status}"))
+        return Ok(Some(new_status));
+    }
+    match nserror_detail(error) {
+        Some(detail) => Err(format!("SMAppService status={new_status}: {detail}")),
+        None => Err(format!("SMAppService status={new_status}")),
     }
 }
 

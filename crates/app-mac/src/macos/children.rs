@@ -13,6 +13,9 @@ const HISTORY_LAUNCH_GRACE: Duration = Duration::from_secs(3);
 
 const HISTORY_READY_FILE: &str = "history-window.ready";
 
+const SETTINGS_LABEL: &str = "settings window";
+const HISTORY_LABEL: &str = "history popup";
+
 thread_local! {
     static HISTORY_LAUNCHED_AT: std::cell::Cell<Option<Instant>> =
         const { std::cell::Cell::new(None) };
@@ -59,12 +62,17 @@ pub(crate) fn relaunch_target() -> Option<std::path::PathBuf> {
     Some(bundle.to_path_buf())
 }
 
-fn live_child_pid(slot: &RefCell<Option<Child>>) -> Option<u32> {
+fn log_child_exit(label: &str, status: std::process::ExitStatus) {
+    log_event("WARN", &format!("{label} exited: {status}"));
+}
+
+fn live_child_pid(slot: &RefCell<Option<Child>>, label: &str) -> Option<u32> {
     let mut borrow = slot.borrow_mut();
     match borrow.as_mut() {
         Some(child) => match child.try_wait() {
-            Ok(Some(_status)) => {
+            Ok(Some(status)) => {
                 *borrow = None;
+                log_child_exit(label, status);
                 None
             }
             Ok(None) => Some(child.id()),
@@ -78,25 +86,29 @@ fn live_child_pid(slot: &RefCell<Option<Child>>) -> Option<u32> {
     }
 }
 
-pub(crate) fn child_alive(slot: &RefCell<Option<Child>>) -> bool {
-    live_child_pid(slot).is_some()
+pub(crate) fn child_alive(slot: &RefCell<Option<Child>>, label: &str) -> bool {
+    live_child_pid(slot, label).is_some()
 }
 
 pub(crate) fn reap_children() {
     SETTINGS_CHILD.with(|slot| {
         let mut borrow = slot.borrow_mut();
         if let Some(child) = borrow.as_mut() {
-            if matches!(child.try_wait(), Ok(Some(_))) {
+            let exited = child.try_wait();
+            if let Ok(Some(status)) = exited {
                 *borrow = None;
+                log_child_exit(SETTINGS_LABEL, status);
             }
         }
     });
     HISTORY_CHILD.with(|slot| {
         let mut borrow = slot.borrow_mut();
         if let Some(child) = borrow.as_mut() {
-            if matches!(child.try_wait(), Ok(Some(_))) {
+            let exited = child.try_wait();
+            if let Ok(Some(status)) = exited {
                 *borrow = None;
                 forget_history_launch();
+                log_child_exit(HISTORY_LABEL, status);
             }
         }
     });
@@ -113,8 +125,9 @@ pub(crate) fn terminate_child(slot: &RefCell<Option<Child>>, label: &str) -> boo
         return false;
     };
     match child.try_wait() {
-        Ok(Some(_)) => {
+        Ok(Some(status)) => {
             *borrow = None;
+            log_child_exit(label, status);
             false
         }
         _ => {
@@ -128,7 +141,7 @@ pub(crate) fn terminate_child(slot: &RefCell<Option<Child>>, label: &str) -> boo
 }
 
 pub(crate) fn close_settings() -> bool {
-    SETTINGS_CHILD.with(|slot| terminate_child(slot, "settings window"))
+    SETTINGS_CHILD.with(|slot| terminate_child(slot, SETTINGS_LABEL))
 }
 
 pub(crate) fn close_children() {
@@ -190,7 +203,7 @@ fn panel_request(panel: &str, action: PanelAction) -> Result<(), String> {
 }
 
 pub(crate) fn launch_settings() {
-    if SETTINGS_CHILD.with(child_alive) {
+    if SETTINGS_CHILD.with(|slot| child_alive(slot, SETTINGS_LABEL)) {
         if let Err(error) = panel_request(PANEL_SETTINGS, PanelAction::Open) {
             log_event("WARN", &format!("settings: request failed: {error}"));
         }
@@ -208,7 +221,7 @@ pub(crate) fn launch_settings() {
 }
 
 pub(crate) fn launch_history() {
-    if HISTORY_CHILD.with(child_alive) {
+    if HISTORY_CHILD.with(|slot| child_alive(slot, HISTORY_LABEL)) {
         return;
     }
     clear_panel_request(PANEL_HISTORY);
@@ -230,13 +243,13 @@ pub(crate) fn launch_history() {
 }
 
 pub(crate) fn close_history() -> bool {
-    let closed = HISTORY_CHILD.with(|slot| terminate_child(slot, "history popup"));
+    let closed = HISTORY_CHILD.with(|slot| terminate_child(slot, HISTORY_LABEL));
     forget_history_launch();
     closed
 }
 
 pub(crate) fn toggle_history() {
-    if let Some(pid) = HISTORY_CHILD.with(live_child_pid) {
+    if let Some(pid) = HISTORY_CHILD.with(|slot| live_child_pid(slot, HISTORY_LABEL)) {
         let ready = history_ready_pid() == Some(pid);
         let elapsed = HISTORY_LAUNCHED_AT.with(|launched| launched.get().map(|at| at.elapsed()));
         if !ready && history_starting(elapsed) {
@@ -274,9 +287,9 @@ pub(crate) fn restart_self() {
     let Some(target) = relaunch_target().or_else(|| std::env::current_exe().ok()) else {
         return;
     };
-    let target_str = target.to_string_lossy().to_string();
     let _ = std::process::Command::new("/bin/sh")
-        .args(["-c", "sleep 2; open \"$1\"", "sh", target_str.as_str()])
+        .args(["-c", "sleep 2; open \"$1\"", "sh"])
+        .arg(target)
         .spawn();
     close_children();
     let mtm = mtm();

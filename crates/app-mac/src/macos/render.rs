@@ -103,6 +103,7 @@ pub(crate) fn render_indicator(row: &FormattedRow, cfg: &Config) {
     let dual = cfg.display.dual_row && row.lines.len() > 1;
     let spacing = f64::from(cfg.display.item_spacing);
     if !cfg.display.show_resources && !cfg.display.show_network {
+        clear_indicator();
         return;
     }
     let img_h = NSStatusBar::systemStatusBar().thickness();
@@ -238,6 +239,7 @@ pub(crate) fn render_indicator(row: &FormattedRow, cfg: &Config) {
             v
         };
         if parts.is_empty() {
+            clear_indicator();
             return;
         }
         let metrics = visible_metrics(cfg);
@@ -269,6 +271,7 @@ pub(crate) fn render_indicator(row: &FormattedRow, cfg: &Config) {
         width = slot_start - spacing;
     }
     if items.is_empty() || width <= 0.0 {
+        clear_indicator();
         return;
     }
 
@@ -316,14 +319,16 @@ fn invalidate_draw_signature() {
     RENDER_INPUT_SIGNATURE.with(|s| s.borrow_mut().clear());
 }
 
+fn clear_indicator() {
+    STATUS_IMAGE.with(|slot| *slot.borrow_mut() = None);
+    apply_status_image();
+}
+
 pub(crate) fn apply_status_image() {
     let mtm = mtm();
     STATUS_IMAGE.with(|slot| {
         let slot = slot.borrow();
-        let Some(images) = slot.as_ref() else {
-            invalidate_draw_signature();
-            return;
-        };
+        let cleared = slot.is_none();
         STATUS_ITEM.with(|si| {
             let si_borrow = si.borrow();
             let Some(item) = si_borrow.as_ref() else {
@@ -334,30 +339,30 @@ pub(crate) fn apply_status_image() {
                 invalidate_draw_signature();
                 return;
             };
+            match slot.as_ref() {
+                Some(images) => {
+                    button.setImage(Some(&images.image));
+                    button.setImagePosition(NSCellImagePosition::ImageOnly);
+                    button.setImageScaling(NSImageScaling::ScaleNone);
+                    item.setLength(images.width);
+                }
+                None => {
+                    button.setImage(None);
+                    item.setLength(NSVariableStatusItemLength);
+                }
+            }
             button.setTitle(&NSString::from_str(""));
-            button.setImage(Some(&images.image));
-            button.setImagePosition(NSCellImagePosition::ImageOnly);
-            button.setImageScaling(NSImageScaling::ScaleNone);
-            item.setLength(images.width);
             let view: &NSView = &button;
             view.setNeedsDisplay(true);
             view.displayIfNeeded();
+            if cleared {
+                invalidate_draw_signature();
+            }
         });
     });
 }
 
 pub(crate) fn update_accessibility(text: String) {
-    if text.is_empty() {
-        return;
-    }
-    ACCESSIBILITY_TEXT.with(|slot| *slot.borrow_mut() = text);
-    if IN_RUN_LOOP.get() {
-        apply_pending_accessibility();
-    }
-}
-
-pub(crate) fn apply_pending_accessibility() {
-    let text = ACCESSIBILITY_TEXT.with(|slot| slot.borrow().clone());
     if text.is_empty() {
         return;
     }
@@ -372,22 +377,12 @@ pub(crate) fn apply_accessibility(value: &str) {
     if value.is_empty() {
         return;
     }
-    let mtm = mtm();
-    STATUS_ITEM.with(|si| {
-        let si_borrow = si.borrow();
-        let Some(item) = si_borrow.as_ref() else {
-            return;
-        };
-        let Some(button) = item.button(mtm) else {
-            return;
-        };
-        let label = NSString::from_str("SysVitals");
-        let value = NSString::from_str(value);
-        unsafe {
-            let _: () = msg_send![&*button, setAccessibilityLabel: &*label];
-            let _: () = msg_send![&*button, setAccessibilityValue: &*value];
-            let _: () = msg_send![&*button, setToolTip: &*value];
-        }
+    let label = NSString::from_str("SysVitals");
+    let text = NSString::from_str(value);
+    with_status_button(mtm(), |button| unsafe {
+        let _: () = msg_send![button, setAccessibilityLabel: &*label];
+        let _: () = msg_send![button, setAccessibilityValue: &*text];
+        let _: () = msg_send![button, setToolTip: &*text];
     });
 }
 

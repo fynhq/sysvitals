@@ -2,25 +2,20 @@
 
 use super::*;
 
-pub(crate) fn timer_tick() {
-    IN_RUN_LOOP.set(true);
-    tick();
-    IN_RUN_LOOP.set(false);
-}
-
 pub(crate) fn reschedule_if_interval_changed() {
     let interval_ms = CONFIG.with(|c| c.borrow().sample.interval_ms);
     if APPLIED_INTERVAL_MS.get() == interval_ms {
         return;
     }
+    let interval_secs = interval_ms as f64 / 1000.0;
     let block = block2::RcBlock::new(|_timer: std::ptr::NonNull<NSTimer>| {
-        timer_tick();
+        tick();
     });
     // SAFETY: the block captures nothing non-Send and fires on the main run
     // loop, same contract as the other timers here.
-    let timer = unsafe {
-        NSTimer::timerWithTimeInterval_repeats_block(interval_ms as f64 / 1000.0, true, &block)
-    };
+    let timer =
+        unsafe { NSTimer::timerWithTimeInterval_repeats_block(interval_secs, true, &block) };
+    timer.setTolerance(interval_secs * 0.1);
     let run_loop = NSRunLoop::mainRunLoop();
     unsafe { run_loop.addTimer_forMode(&timer, NSRunLoopCommonModes) };
     let prev = SAMPLE_TIMER.with(|slot| slot.replace(Some(timer)));
@@ -53,7 +48,4 @@ pub(crate) fn tick() {
 
     let row = format_frame(&snapshot, &cfg);
     render_indicator(&row, &cfg);
-    if IN_RUN_LOOP.get() {
-        apply_pending_accessibility();
-    }
 }

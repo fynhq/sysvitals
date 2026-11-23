@@ -25,15 +25,7 @@ pub(crate) fn show_context_menu() {
     let Some(target) = target.as_ref() else {
         return;
     };
-    STATUS_ITEM.with(|si| {
-        let si_borrow = si.borrow();
-        let Some(item) = si_borrow.as_ref() else {
-            return;
-        };
-        let Some(button) = item.button(mtm) else {
-            return;
-        };
-
+    with_status_button(mtm, |button| {
         let menu = NSMenu::new(mtm);
         let app = NSApplication::sharedApplication(mtm);
         let appearance = app.effectiveAppearance();
@@ -63,7 +55,7 @@ pub(crate) fn show_context_menu() {
             target,
         ));
 
-        let view: &NSView = &button;
+        let view: &NSView = button;
         let location = NSPoint::new(0.0, button.bounds().size.height);
         let _ = menu.popUpMenuPositioningItem_atLocation_inView(None, location, Some(view));
     });
