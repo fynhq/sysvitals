@@ -514,26 +514,60 @@ pub(crate) fn wait_cursor_clear() {
 
 pub(crate) fn wait_cursor_reconcile() {
     let target = WAIT_TARGET.load(Ordering::Relaxed);
-    if target == WAIT_NONE {
-        return;
-    }
-    if launch_window_visible(target) {
-        wait_cursor_clear();
-        return;
-    }
     let waited_ms = now_ms().saturating_sub(WAIT_SINCE_MS.load(Ordering::Relaxed));
-    if waited_ms >= WAIT_CURSOR_TIMEOUT_MS {
-        let what = match target {
-            WAIT_HISTORY => "history popup",
-            WAIT_SETTINGS => "settings window",
-            WAIT_TASKMGR => "task manager window",
-            _ => "window",
-        };
-        log_event(
-            "WARN",
-            &format!("launch feedback: {what} never became visible; clearing the wait cursor"),
-        );
-        wait_cursor_clear();
+    let alive = match target {
+        WAIT_HISTORY => child_alive(&mut lock(&HISTORY), "history"),
+        WAIT_SETTINGS => child_alive(&mut lock(&SETTINGS), "settings"),
+        _ => false,
+    };
+    match resolve_wait_cursor(
+        target != WAIT_NONE,
+        launch_window_visible(target),
+        waited_ms,
+        WAIT_CURSOR_TIMEOUT_MS,
+        alive,
+    ) {
+        WaitCursorNext::Wait => {}
+        WaitCursorNext::Arrow => wait_cursor_clear(),
+        WaitCursorNext::Timeout => {
+            log_event(
+                "WARN",
+                &format!(
+                    "launch feedback: {} never became visible; clearing the wait cursor",
+                    target_label(target)
+                ),
+            );
+            wait_cursor_clear();
+        }
+        WaitCursorNext::Terminate => {
+            log_event(
+                "WARN",
+                &format!(
+                    "launch feedback: {} is still running but never showed a window; \
+                     terminating it so the next click relaunches",
+                    target_label(target)
+                ),
+            );
+            match target {
+                WAIT_HISTORY => {
+                    let _ = terminate(&HISTORY, false, "history");
+                }
+                WAIT_SETTINGS => {
+                    let _ = terminate(&SETTINGS, false, "settings");
+                }
+                _ => {}
+            }
+            wait_cursor_clear();
+        }
+    }
+}
+
+fn target_label(target: u32) -> &'static str {
+    match target {
+        WAIT_HISTORY => "history popup",
+        WAIT_SETTINGS => "settings window",
+        WAIT_TASKMGR => "task manager window",
+        _ => "window",
     }
 }
 

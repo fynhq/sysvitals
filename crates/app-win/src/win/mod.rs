@@ -29,8 +29,9 @@ use sysvitals_core::{
     Sampler, Theme,
 };
 use sysvitals_support::{
-    acquire_instance_lock, hkcu_dword, log_event, log_sanitize_issues, os_build_number, taskbar_al,
-    utf16, AutoStartController, AutoStartOutcome, ConfigEvent, InstanceLock, SV_BUILD_ID,
+    acquire_instance_lock, hkcu_dword, log_event, log_sanitize_issues, os_build_number,
+    resolve_wait_cursor, taskbar_al, utf16, AutoStartController, AutoStartOutcome, ConfigEvent,
+    InstanceLock, WaitCursorNext, SV_BUILD_ID,
 };
 use windows::core::{Interface, BOOL, PCWSTR};
 use windows::Win32::Foundation::{
