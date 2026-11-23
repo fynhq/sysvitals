@@ -63,8 +63,8 @@ use windows::Win32::System::LibraryLoader::{
 };
 use windows::Win32::System::Registry::{RegDeleteKeyValueW, HKEY_CURRENT_USER};
 use windows::Win32::System::Threading::{
-    CreateProcessW, GetCurrentProcessId, GetProcessId, TerminateProcess, WaitForSingleObject,
-    PROCESS_INFORMATION, STARTF_FORCEOFFFEEDBACK, STARTUPINFOW,
+    CreateProcessW, GetCurrentProcessId, GetExitCodeProcess, GetProcessId, TerminateProcess,
+    WaitForSingleObject, PROCESS_INFORMATION, STARTF_FORCEOFFFEEDBACK, STARTUPINFOW,
 };
 use windows::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
 use windows::Win32::UI::HiDpi::{

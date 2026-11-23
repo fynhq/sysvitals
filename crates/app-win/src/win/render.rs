@@ -110,6 +110,13 @@ pub(crate) unsafe fn resize_overlay(hwnd: HWND, row: &FormattedRow, vertical: bo
     let cfg = config();
     let spacing_px = cfg.display.item_spacing as i32;
     let hdc = GetDC(Some(hwnd));
+    if hdc.is_invalid() {
+        log_event(
+            "WARN",
+            "resize_overlay: GetDC returned no DC; overlay will not be sized",
+        );
+        return;
+    }
     let font = make_font_for(hwnd, vertical);
     let old = SelectObject(hdc, font.into());
     let m = measure_frame(hdc, row, spacing_px, vertical, 2);
@@ -206,6 +213,16 @@ pub(crate) unsafe fn draw_frame(
 
     let screen_dc = GetDC(None);
     let mem_dc = CreateCompatibleDC(Some(screen_dc));
+    if mem_dc.is_invalid() {
+        if !screen_dc.is_invalid() {
+            let _ = ReleaseDC(None, screen_dc);
+        }
+        log_event(
+            "WARN",
+            "render: no compatible DC for the supersample buffer",
+        );
+        return None;
+    }
 
     const SS: i32 = 2;
     let sw = width * SS;
@@ -224,6 +241,16 @@ pub(crate) unsafe fn draw_frame(
         let _ = ReleaseDC(None, screen_dc);
         return None;
     };
+    if ss_bits.is_null() {
+        let _ = DeleteObject(ss_bmp.into());
+        let _ = DeleteDC(mem_dc);
+        let _ = ReleaseDC(None, screen_dc);
+        log_event(
+            "WARN",
+            "render: CreateDIBSection returned a null pixel buffer",
+        );
+        return None;
+    }
     let old_ss_bmp = SelectObject(mem_dc, ss_bmp.into());
     let ss_font = create_font(font_height * SS, font_weight, face);
     let old_ss_font = SelectObject(mem_dc, ss_font.into());
@@ -398,6 +425,13 @@ pub(crate) unsafe fn render_layered(hwnd: HWND, row: &FormattedRow, vertical: bo
 
     let screen_dc = GetDC(None);
     let mem_dc = CreateCompatibleDC(Some(screen_dc));
+    if mem_dc.is_invalid() {
+        if !screen_dc.is_invalid() {
+            let _ = ReleaseDC(None, screen_dc);
+        }
+        log_event("WARN", "render_layered: no compatible DC");
+        return;
+    }
 
     let mut bmi = BITMAPINFO::default();
     bmi.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
@@ -412,6 +446,16 @@ pub(crate) unsafe fn render_layered(hwnd: HWND, row: &FormattedRow, vertical: bo
         let _ = ReleaseDC(None, screen_dc);
         return;
     };
+    if bits.is_null() {
+        let _ = DeleteObject(bmp.into());
+        let _ = DeleteDC(mem_dc);
+        let _ = ReleaseDC(None, screen_dc);
+        log_event(
+            "WARN",
+            "render_layered: CreateDIBSection returned a null pixel buffer",
+        );
+        return;
+    }
     std::ptr::copy_nonoverlapping(pixels.as_ptr(), bits as *mut u32, pixels.len());
 
     let old_bmp = SelectObject(mem_dc, bmp.into());

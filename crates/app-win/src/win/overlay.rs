@@ -750,7 +750,9 @@ pub(crate) unsafe fn apply_position_with_info(hwnd: HWND, info: TaskbarInfo) {
 
 pub(crate) unsafe fn find_taskbar() -> Option<HWND> {
     let cls = utf16("Shell_TrayWnd");
-    FindWindowW(windows::core::PCWSTR(cls.as_ptr()), None).ok()
+    FindWindowW(windows::core::PCWSTR(cls.as_ptr()), None)
+        .ok()
+        .filter(|h| !h.is_invalid())
 }
 
 pub(crate) unsafe fn create_overlay(owner: Option<HWND>) -> Option<HWND> {

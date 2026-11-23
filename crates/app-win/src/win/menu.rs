@@ -114,6 +114,7 @@ pub(crate) unsafe fn perform_menu_choice(hwnd: HWND, choice: usize) {
         id if id == IDM_SETTINGS => launch_settings(hwnd),
         id if id == IDM_RESTART => restart_self(),
         id if id == IDM_QUIT => {
+            begin_quit();
             close_children();
             shutdown_and_quit();
         }
@@ -121,8 +122,12 @@ pub(crate) unsafe fn perform_menu_choice(hwnd: HWND, choice: usize) {
     }
 }
 
-pub(crate) unsafe fn shutdown_and_quit() {
+pub(crate) fn begin_quit() {
     QUITTING.store(true, Ordering::Relaxed);
+}
+
+pub(crate) unsafe fn shutdown_and_quit() {
+    begin_quit();
     let hwnds: Vec<HWND> = OVERLAYS.with(|slot| slot.borrow().iter().map(|o| o.hwnd).collect());
     for hwnd in hwnds {
         let _ = DestroyWindow(hwnd);

@@ -274,6 +274,7 @@ unsafe extern "system" fn sentinel_wndproc(
     if msg == WM_ENDSESSION {
         if wparam.0 != 0 {
             log_event("INFO", "system session ending; closing panels and exiting");
+            begin_quit();
             close_children();
             shutdown_and_quit();
         }
@@ -346,6 +347,7 @@ unsafe extern "system" fn sentinel_wndproc(
                             log_event("INFO", "SetTimer(TIMER_SAMPLE) recovered");
                         }
                     }
+                    init_child_job();
                     AUTO_HIDE.store(u32::MAX, Ordering::Relaxed);
                     WIN11_CENTERED.store(u32::MAX, Ordering::Relaxed);
                     reconcile_overlays();

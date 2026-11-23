@@ -76,8 +76,18 @@ fn child_alive(child: &mut Child, label: &str) -> bool {
     match unsafe { process_state(handle) } {
         ProcessState::Alive => true,
         ProcessState::Exited => {
+            let mut code = 0u32;
+            let read = unsafe { GetExitCodeProcess(handle, &mut code) }.is_ok();
             let _ = unsafe { CloseHandle(handle) };
             child.take();
+            log_event(
+                "WARN",
+                &if read {
+                    format!("{label} exited unexpectedly with code {code:#x}")
+                } else {
+                    format!("{label} exited unexpectedly; exit code unavailable")
+                },
+            );
             false
         }
         ProcessState::Failed => {
