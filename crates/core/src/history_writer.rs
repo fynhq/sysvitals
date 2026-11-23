@@ -8,7 +8,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::config::history_path;
-use crate::store::{is_corruption_error, Store};
+use crate::store::{is_corruption_error, Store, RAW_RETENTION_SECS};
 
 const WRITE_FAILURE_LIMIT: u32 = 3;
 
@@ -32,12 +32,8 @@ pub struct HistoryWriter {
 
 impl HistoryWriter {
     pub fn spawn(log: LogFn) -> std::io::Result<Self> {
-        let path = history_path().map_err(|e| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("history path unavailable: {e}"),
-            )
-        })?;
+        let path = history_path()
+            .map_err(|e| std::io::Error::other(format!("history path unavailable: {e}")))?;
         Self::spawn_at(log, path)
     }
 
@@ -64,6 +60,7 @@ impl HistoryWriter {
 pub struct HistoryWriterSlot {
     writer: Option<HistoryWriter>,
     failed_at: Option<Instant>,
+    log: Option<LogFn>,
 }
 
 impl Default for HistoryWriterSlot {
@@ -77,14 +74,26 @@ impl HistoryWriterSlot {
         Self {
             writer: None,
             failed_at: None,
+            log: None,
         }
     }
 
-    pub fn record(&mut self, ts: i64, cpu: f64, mem: f64, retention_days: u32, log: LogFn) -> bool {
+    pub fn has_log(&self) -> bool {
+        self.log.is_some()
+    }
+
+    pub fn set_log(&mut self, log: LogFn) {
+        self.log = Some(log);
+    }
+
+    pub fn record(&mut self, ts: i64, cpu: f64, mem: f64, retention_days: u32) -> bool {
         let retry_due = self
             .failed_at
             .is_none_or(|at| at.elapsed() >= SPAWN_RETRY_COOLDOWN);
         if self.writer.is_none() && retry_due {
+            let Some(log) = self.log.clone() else {
+                return false;
+            };
             match HistoryWriter::spawn(log.clone()) {
                 Ok(started) => {
                     self.writer = Some(started);
@@ -111,19 +120,22 @@ impl HistoryWriterSlot {
         if !send_ok {
             self.writer = None;
             self.failed_at = Some(Instant::now());
-            log(
-                "WARN",
-                &format!(
-                    "history writer stopped; retrying in {}s",
-                    SPAWN_RETRY_COOLDOWN.as_secs()
-                ),
-            );
+            if let Some(log) = self.log.as_ref() {
+                log(
+                    "WARN",
+                    &format!(
+                        "history writer stopped; retrying in {}s",
+                        SPAWN_RETRY_COOLDOWN.as_secs()
+                    ),
+                );
+            }
         }
         send_ok
     }
 }
 
-// Corrupt database: move the DB and its -wal/-shm sidecars aside (sidecars first), then retry with a fresh file.
+// Corrupt database: move the main file aside first, then its -wal/-shm sidecars, rolling the main
+// file back if a sidecar cannot follow so the database never loses uncommitted WAL frames.
 fn quarantine_corrupt_db(path: &Path) -> std::io::Result<Option<PathBuf>> {
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -134,8 +146,13 @@ fn quarantine_corrupt_db(path: &Path) -> std::io::Result<Option<PathBuf>> {
     backup_os.push(format!(".corrupt-{stamp}-{}", std::process::id()));
     let backup = PathBuf::from(backup_os);
 
-    let mut main_moved = false;
-    for suffix in ["-wal", "-shm", ""] {
+    if !path.exists() {
+        return Ok(None);
+    }
+    fs::rename(path, &backup)?;
+
+    let mut moved: Vec<(PathBuf, PathBuf)> = Vec::new();
+    for suffix in ["-wal", "-shm"] {
         let mut src_os = base.to_os_string();
         src_os.push(suffix);
         let src = PathBuf::from(src_os);
@@ -145,12 +162,16 @@ fn quarantine_corrupt_db(path: &Path) -> std::io::Result<Option<PathBuf>> {
         let mut dest_os = backup.as_os_str().to_os_string();
         dest_os.push(suffix);
         let dest = PathBuf::from(dest_os);
-        fs::rename(&src, &dest)?;
-        if suffix.is_empty() {
-            main_moved = true;
+        if let Err(error) = fs::rename(&src, &dest) {
+            for (from, to) in moved.iter().rev() {
+                let _ = fs::rename(from, to);
+            }
+            let _ = fs::rename(&backup, path);
+            return Err(error);
         }
+        moved.push((dest, src));
     }
-    Ok(main_moved.then_some(backup))
+    Ok(Some(backup))
 }
 
 fn quarantine_and_log(path: &Path, log: &LogFn, error_logged: &mut bool) -> bool {
@@ -306,7 +327,7 @@ fn run(rx: Receiver<HistorySample>, log: LogFn, path: PathBuf) {
         let mut drop_store = false;
 
         match store_ref.insert(msg.ts, msg.cpu, msg.mem) {
-            Ok(_) => {
+            Ok(()) => {
                 write_failures = 0;
                 write_error_logged = false;
             }
@@ -323,9 +344,17 @@ fn run(rx: Receiver<HistorySample>, log: LogFn, path: PathBuf) {
 
         if tick.is_multiple_of(300) {
             match store_ref.prune(msg.ts, msg.retention_days) {
-                Ok(_) => {
+                Ok(report) => {
                     write_failures = 0;
                     write_error_logged = false;
+                    if let Some((now, newest)) = report.clock_skew {
+                        log(
+                            "WARN",
+                            &format!(
+                                "history prune skipped: clock {now} is more than {RAW_RETENTION_SECS}s past the newest stored sample {newest}"
+                            ),
+                        );
+                    }
                 }
                 Err(e) => note_write_failure(
                     "prune",
@@ -381,6 +410,119 @@ mod tests {
             sink.lock().unwrap().push(format!("{level} {message}"));
         });
         (log, logs)
+    }
+
+    #[test]
+    fn a_blocked_sidecar_rolls_the_main_file_back() {
+        let dir = temp_history_path("helper-rollback");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("history.db");
+        let wal = PathBuf::from(format!("{}-wal", path.display()));
+        fs::write(&path, b"not a database").unwrap();
+        fs::write(&wal, b"wal").unwrap();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let mut blocked = Vec::new();
+        for offset in 0..3 {
+            let dest = dir.join(format!(
+                "history.db.corrupt-{}-{}-wal",
+                stamp + offset,
+                std::process::id()
+            ));
+            fs::create_dir_all(&dest).unwrap();
+            fs::write(dest.join("occupied"), b"x").unwrap();
+            blocked.push(dest);
+        }
+
+        assert!(
+            quarantine_corrupt_db(&path).is_err(),
+            "an unmovable sidecar must fail the quarantine"
+        );
+        assert!(path.exists(), "the main file must be rolled back");
+        assert!(wal.exists(), "the WAL must stay attached to its database");
+
+        for dest in blocked {
+            fs::remove_file(dest.join("occupied")).unwrap();
+            fs::remove_dir(dest).unwrap();
+        }
+        fs::remove_file(&wal).unwrap();
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_slot_stores_its_log_once_and_refuses_to_record_without_one() {
+        let mut slot = HistoryWriterSlot::new();
+        assert!(!slot.has_log());
+        assert!(
+            !slot.record(1_700_000_000, 1.0, 2.0, 30),
+            "without a stored log there is no writer thread to start"
+        );
+        let (log, _) = capture_log();
+        slot.set_log(log);
+        assert!(slot.has_log());
+    }
+
+    #[test]
+    fn a_forward_clock_jump_is_logged_and_never_drops_the_store() {
+        let dir = temp_history_path("skew");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("history.db");
+        let (log_for_test, logs) = capture_log();
+        let writer = HistoryWriter::spawn_at(log_for_test, path.clone()).unwrap();
+        let base = 1_700_000_000i64;
+        let jumped = base + 400 * 86_400;
+        for tick in 1..=900u32 {
+            // The jumped ticks carry no readable CPU, so they never reach the store and the
+            // newest stored minute stays pre-jump for every prune round.
+            let (ts, cpu) = if tick.is_multiple_of(300) {
+                (jumped, f64::NAN)
+            } else {
+                (base, 10.0)
+            };
+            assert!(writer.record(ts, cpu, 20.0, 30));
+        }
+
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            let skipped = logs
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|line| line.contains("prune skipped"))
+                .count();
+            if skipped >= 3 {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "only {skipped} skew warnings; logs={logs:?}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        let logged = logs.lock().unwrap();
+        assert!(
+            !logged
+                .iter()
+                .any(|line| line.contains("dropped after repeated")),
+            "a skew skip must not feed the write-failure strikes: {logged:?}"
+        );
+        assert!(
+            !logged.iter().any(|line| line.contains("prune failed")),
+            "a skew skip is not a prune error: {logged:?}"
+        );
+        drop(logged);
+
+        let reader = Store::open_read_only(&path).unwrap();
+        let buckets = reader.buckets_offset(base - 60, base + 60, 60, 0).unwrap();
+        assert_eq!(buckets.len(), 1, "the jumped clock must not delete history");
+        assert!((buckets[0].cpu - 10.0).abs() < 1e-9);
+
+        drop(writer);
+        drop(reader);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

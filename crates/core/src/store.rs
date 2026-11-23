@@ -6,17 +6,28 @@ use std::time::Duration;
 use rusqlite::{params, Connection, ErrorCode, TransactionBehavior};
 
 // Raw 2 s samples cover 24 h; 1-min rollups cover retention; wider ranges read rollups, never raw.
-const RAW_RETENTION_SECS: i64 = 24 * 60 * 60;
+pub(crate) const RAW_RETENTION_SECS: i64 = 24 * 60 * 60;
 
 const ROLLUP_MIN_BUCKET_SECS: i64 = 60;
 
 // Schema v2 = raw + 1-min rollup; a failed backfill leaves the store raw-only until a retry succeeds.
 const SCHEMA_VERSION: i32 = 2;
 
-// A large prune runs VACUUM once; SQLite otherwise keeps the old file size.
-const VACUUM_AFTER_ROWS: usize = 100_000;
+// Retention deletes free pages without shrinking the file; VACUUM once the freelist grows past 2 MiB.
+const VACUUM_AFTER_FREE_PAGES: i64 = 512;
 
 const PAGE_CACHE_KIB: i64 = 512;
+
+// Integer floor division so SQL bucketing matches floor_to_grid's div_euclid for negative timestamps.
+const BUCKET_START_SQL: &str = "((ts + ?4) / ?3 - (((ts + ?4) % ?3) < 0)) * ?3 - ?4";
+
+// Summing `n` over the surviving raw window replaces a per-row LEFT JOIN scan at every open; an
+// existing rollup minute keeps its `n`, so this can only over-report coverage by one partial minute.
+const COVERAGE_PROBE_SQL: &str = "SELECT COALESCE(
+             (SELECT SUM(n) FROM samples_1m
+              WHERE ts >= (SELECT MIN(ts) FROM samples) / 60 * 60),
+             0
+         ) < (SELECT COUNT(*) FROM samples)";
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Bucket {
@@ -24,6 +35,24 @@ pub struct Bucket {
     pub cpu: f64,
     pub mem: f64,
 }
+
+// `clock_skew` is (now, newest stored ts) when a forward wall-clock jump suppressed the round.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PruneReport {
+    pub removed: usize,
+    pub clock_skew: Option<(i64, i64)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EmptyDatabase;
+
+impl std::fmt::Display for EmptyDatabase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("history database is empty")
+    }
+}
+
+impl std::error::Error for EmptyDatabase {}
 
 pub struct Store {
     conn: Connection,
@@ -51,6 +80,10 @@ pub(crate) fn is_corruption_error(error: &anyhow::Error) -> bool {
     })
 }
 
+fn rollup_backfill_needed(conn: &Connection) -> rusqlite::Result<bool> {
+    conn.query_row(COVERAGE_PROBE_SQL, [], |row| row.get(0))
+}
+
 impl Store {
     pub fn open(path: &std::path::Path) -> anyhow::Result<Self> {
         if let Some(parent) = path.parent() {
@@ -74,6 +107,14 @@ impl Store {
 
     pub fn open_read_only(path: &std::path::Path) -> anyhow::Result<Self> {
         use rusqlite::OpenFlags;
+        match std::fs::metadata(path) {
+            Ok(meta) if meta.len() > 0 => {}
+            Ok(_) => anyhow::bail!(EmptyDatabase),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                anyhow::bail!(EmptyDatabase)
+            }
+            Err(error) => return Err(error.into()),
+        }
         let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         conn.busy_timeout(Duration::from_millis(250))?;
         conn.pragma_update(None, "cache_size", -PAGE_CACHE_KIB)?;
@@ -128,15 +169,7 @@ impl Store {
         let needs_backfill = if version < SCHEMA_VERSION {
             true
         } else {
-            conn.query_row(
-                "SELECT EXISTS (
-                     SELECT 1 FROM samples s
-                     LEFT JOIN samples_1m b ON (s.ts / 60) * 60 = b.ts
-                     WHERE b.ts IS NULL
-                 )",
-                [],
-                |row| row.get(0),
-            )?
+            rollup_backfill_needed(conn)?
         };
         if !needs_backfill {
             return Ok(true);
@@ -173,9 +206,9 @@ impl Store {
         })
     }
 
-    pub fn insert(&self, ts: i64, cpu: f64, mem: f64) -> anyhow::Result<bool> {
+    pub fn insert(&self, ts: i64, cpu: f64, mem: f64) -> anyhow::Result<()> {
         if !cpu.is_finite() || !mem.is_finite() {
-            return Ok(false);
+            return Ok(());
         }
         let tx = self.conn.unchecked_transaction()?;
         let inserted = tx.execute(
@@ -183,7 +216,7 @@ impl Store {
             params![ts, cpu, mem],
         )?;
         if inserted == 0 {
-            return Ok(false);
+            return Ok(());
         }
         if self.rollup_ready {
             let minute = (ts / 60) * 60;
@@ -197,10 +230,21 @@ impl Store {
             )?;
         }
         tx.commit()?;
-        Ok(true)
+        Ok(())
     }
 
-    pub fn prune(&self, now: i64, retention_days: u32) -> anyhow::Result<usize> {
+    pub fn prune(&self, now: i64, retention_days: u32) -> anyhow::Result<PruneReport> {
+        let newest: Option<i64> =
+            self.conn
+                .query_row("SELECT MAX(ts) FROM samples_1m", [], |row| row.get(0))?;
+        if let Some(newest) = newest {
+            if now > newest + RAW_RETENTION_SECS {
+                return Ok(PruneReport {
+                    removed: 0,
+                    clock_skew: Some((now, newest)),
+                });
+            }
+        }
         let retention_cutoff = now - i64::from(retention_days) * 86_400;
         let mut removed = self.conn.execute(
             "DELETE FROM samples_1m WHERE ts < ?1",
@@ -214,7 +258,7 @@ impl Store {
         removed += self
             .conn
             .execute("DELETE FROM samples WHERE ts < ?1", params![raw_cutoff])?;
-        if removed >= VACUUM_AFTER_ROWS {
+        if self.freelist_count()? >= VACUUM_AFTER_FREE_PAGES {
             self.vacuum_pending.set(true);
         }
         if self.vacuum_pending.get() {
@@ -223,7 +267,16 @@ impl Store {
                 self.vacuum_pending.set(false);
             }
         }
-        Ok(removed)
+        Ok(PruneReport {
+            removed,
+            clock_skew: None,
+        })
+    }
+
+    fn freelist_count(&self) -> anyhow::Result<i64> {
+        Ok(self
+            .conn
+            .pragma_query_value(None, "freelist_count", |row| row.get(0))?)
     }
 
     pub fn buckets_offset(
@@ -249,11 +302,13 @@ impl Store {
         offset_secs: i64,
     ) -> anyhow::Result<Vec<Bucket>> {
         self.query_buckets(
-            "SELECT ((ts + ?4) / ?3) * ?3 - ?4 AS b, AVG(cpu), AVG(mem)
-             FROM samples
-             WHERE ts >= ?1 AND ts <= ?2
-             GROUP BY b
-             ORDER BY b",
+            &format!(
+                "SELECT {BUCKET_START_SQL} AS b, AVG(cpu), AVG(mem)
+                 FROM samples
+                 WHERE ts >= ?1 AND ts <= ?2
+                 GROUP BY b
+                 ORDER BY b"
+            ),
             from,
             to,
             bucket,
@@ -269,13 +324,15 @@ impl Store {
         offset_secs: i64,
     ) -> anyhow::Result<Vec<Bucket>> {
         self.query_buckets(
-            "SELECT ((ts + ?4) / ?3) * ?3 - ?4 AS b,
-                    SUM(cpu_sum) / SUM(n),
-                    SUM(mem_sum) / SUM(n)
-             FROM samples_1m
-             WHERE ts >= ?1 AND ts <= ?2
-             GROUP BY b
-             ORDER BY b",
+            &format!(
+                "SELECT {BUCKET_START_SQL} AS b,
+                        SUM(cpu_sum) / SUM(n),
+                        SUM(mem_sum) / SUM(n)
+                 FROM samples_1m
+                 WHERE ts >= ?1 AND ts <= ?2
+                 GROUP BY b
+                 ORDER BY b"
+            ),
             from,
             to,
             bucket,
@@ -370,8 +427,8 @@ mod tests {
     #[test]
     fn duplicate_timestamp_is_ignored() {
         let s = Store::in_memory().unwrap();
-        assert!(s.insert(100, 10.0, 10.0).unwrap());
-        assert!(!s.insert(100, 90.0, 90.0).unwrap());
+        s.insert(100, 10.0, 10.0).unwrap();
+        s.insert(100, 90.0, 90.0).unwrap();
         assert_eq!(s.row_count(), 1);
         assert_eq!(s.latest_row(), Some((100, 10.0, 10.0)));
         let (cpu_sum, n): (f64, i64) = s
@@ -386,13 +443,13 @@ mod tests {
     #[test]
     fn nan_sample_is_skipped_not_error() {
         let s = Store::in_memory().unwrap();
-        assert!(!s.insert(100, f64::NAN, 50.0).unwrap());
-        assert!(!s.insert(101, 50.0, f64::NAN).unwrap());
-        assert!(!s.insert(102, f64::NAN, f64::NAN).unwrap());
-        assert!(!s.insert(104, f64::INFINITY, 50.0).unwrap());
+        s.insert(100, f64::NAN, 50.0).unwrap();
+        s.insert(101, 50.0, f64::NAN).unwrap();
+        s.insert(102, f64::NAN, f64::NAN).unwrap();
+        s.insert(104, f64::INFINITY, 50.0).unwrap();
         assert_eq!(s.row_count(), 0, "non-finite rows must not be stored");
         assert_eq!(s.rollup_row_count(), 0, "no rollup row either");
-        assert!(s.insert(103, 50.0, 50.0).unwrap());
+        s.insert(103, 50.0, 50.0).unwrap();
         assert_eq!(s.row_count(), 1);
         assert_eq!(s.rollup_row_count(), 1);
         assert_eq!(s.latest_row().unwrap().0, 103);
@@ -416,15 +473,61 @@ mod tests {
     fn prune_drops_old_raw_but_keeps_rollup_within_retention() {
         let s = Store::in_memory().unwrap();
         let now = 4_000_000_020i64;
+        s.insert(now - 3_600, 0.5, 0.5).unwrap();
         s.insert(now - 2 * 86_400, 1.0, 1.0).unwrap();
         s.insert(now - 60 * 86_400, 2.0, 2.0).unwrap();
-        let removed = s.prune(now, 30).unwrap();
-        assert_eq!(removed, 3, "two raw rows and the 60-day rollup minute");
-        assert_eq!(s.row_count(), 0);
-        assert_eq!(s.rollup_row_count(), 1);
+        let report = s.prune(now, 30).unwrap();
+        assert_eq!(report.clock_skew, None);
+        assert_eq!(
+            report.removed, 3,
+            "two raw rows past 24h and the 60-day rollup minute"
+        );
+        assert_eq!(s.row_count(), 1, "the recent raw row stays");
+        assert_eq!(s.rollup_row_count(), 2);
         let b = s.buckets_offset(now - 30 * 86_400, now, 120, 0).unwrap();
-        assert_eq!(b.len(), 1);
-        assert!((b[0].cpu - 1.0).abs() < 1e-9);
+        assert_eq!(b.len(), 2);
+        assert!(
+            (b[1].cpu - 0.5).abs() < 1e-9,
+            "the surviving minute reads back"
+        );
+    }
+
+    #[test]
+    fn forward_clock_jump_past_retention_skips_the_prune_round() {
+        let s = Store::in_memory().unwrap();
+        let now = 1_700_000_000i64;
+        s.insert(now - 120, 10.0, 20.0).unwrap();
+        s.insert(now - 2 * 86_400, 30.0, 40.0).unwrap();
+        let jumped = now + 400 * 86_400;
+        let report = s.prune(jumped, 30).unwrap();
+        assert_eq!(
+            report.clock_skew,
+            Some((jumped, floor_to_grid(now - 120, 60, 0))),
+            "the jump must be reported, not acted on"
+        );
+        assert_eq!(report.removed, 0);
+        assert_eq!(s.row_count(), 2, "no raw row may be deleted");
+        assert_eq!(s.rollup_row_count(), 2, "no rollup row may be deleted");
+
+        let recovered = s.prune(now, 30).unwrap();
+        assert_eq!(recovered.clock_skew, None);
+        assert_eq!(
+            recovered.removed, 1,
+            "the 2-day-old raw row prunes once the clock is sane"
+        );
+    }
+
+    #[test]
+    fn an_empty_store_prunes_without_a_skew_report() {
+        let s = Store::in_memory().unwrap();
+        let report = s.prune(1_700_000_000, 30).unwrap();
+        assert_eq!(
+            report,
+            PruneReport {
+                removed: 0,
+                clock_skew: None
+            }
+        );
     }
 
     #[test]
@@ -435,7 +538,11 @@ mod tests {
         s.insert(now - 2 * 86_400, 1.0, 2.0).unwrap();
         s.insert(now - 60 * 86_400, 3.0, 4.0).unwrap();
         assert_eq!(s.rollup_row_count(), 0);
-        assert_eq!(s.prune(now, 30).unwrap(), 1, "only the 60-day raw row");
+        assert_eq!(
+            s.prune(now, 30).unwrap().removed,
+            1,
+            "only the 60-day raw row"
+        );
         assert_eq!(s.row_count(), 1, "raw keeps the full 30-day window");
         let b = s.buckets_offset(now - 3 * 86_400, now, 3600, 0).unwrap();
         assert_eq!(b.len(), 1, "wide buckets fall back to raw");
@@ -443,25 +550,151 @@ mod tests {
     }
 
     #[test]
-    fn bulk_prune_arms_and_clears_the_one_shot_vacuum() {
+    fn a_large_freelist_arms_and_clears_the_one_shot_vacuum() {
         let s = Store::in_memory().unwrap();
         let tx = s.conn.unchecked_transaction().unwrap();
         {
             let mut stmt = tx
                 .prepare("INSERT INTO samples (ts, cpu, mem) VALUES (?1, 1.0, 1.0)")
                 .unwrap();
-            for ts in 0..VACUUM_AFTER_ROWS as i64 {
+            for ts in 0..100_000i64 {
                 stmt.execute(params![ts]).unwrap();
             }
         }
         tx.commit().unwrap();
-        let removed = s.prune(4_000_000_020, 30).unwrap();
-        assert_eq!(removed, VACUUM_AFTER_ROWS);
+        assert!(
+            s.freelist_count().unwrap() == 0,
+            "nothing is free before the delete"
+        );
+        let report = s.prune(4_000_000_020, 30).unwrap();
+        assert_eq!(report.removed, 100_000);
         assert_eq!(s.row_count(), 0);
         assert!(
             !s.vacuum_pending.get(),
             "a successful one-shot VACUUM must clear the flag"
         );
+        assert!(
+            s.freelist_count().unwrap() < VACUUM_AFTER_FREE_PAGES,
+            "the file gave its free pages back"
+        );
+    }
+
+    #[test]
+    fn a_small_delete_does_not_arm_the_vacuum() {
+        let s = Store::in_memory().unwrap();
+        let now = 1_700_000_000i64;
+        s.insert(now - 60, 1.0, 1.0).unwrap();
+        s.insert(now - 2 * 86_400, 1.0, 1.0).unwrap();
+        let report = s.prune(now, 30).unwrap();
+        assert_eq!(report.removed, 1);
+        assert!(!s.vacuum_pending.get());
+        assert!(s.freelist_count().unwrap() < VACUUM_AFTER_FREE_PAGES);
+    }
+
+    #[test]
+    fn coverage_probe_flags_uncovered_minutes_without_scanning_every_row() {
+        for (raw, rollup, expected) in [
+            (vec![], vec![], false),
+            (vec![60, 65, 120], vec![(60, 2), (120, 1)], false),
+            (vec![60, 65, 120], vec![(120, 1)], true),
+            (vec![60, 65, 120], vec![], true),
+            (vec![60], vec![(60, 4)], false),
+            (vec![60, 65, 120, 180], vec![(60, 3)], true),
+            (vec![120], vec![(60, 2), (120, 1)], false),
+            (vec![120], vec![(60, 200)], true),
+        ] {
+            let conn = Connection::open_in_memory().unwrap();
+            conn.execute_batch(
+                "CREATE TABLE samples (ts INTEGER PRIMARY KEY, cpu REAL NOT NULL, mem REAL NOT NULL);
+                 CREATE TABLE samples_1m (
+                     ts INTEGER PRIMARY KEY, cpu_sum REAL NOT NULL,
+                     mem_sum REAL NOT NULL, n INTEGER NOT NULL
+                 );",
+            )
+            .unwrap();
+            for ts in &raw {
+                conn.execute(
+                    "INSERT INTO samples (ts, cpu, mem) VALUES (?1, 1.0, 1.0)",
+                    params![ts],
+                )
+                .unwrap();
+            }
+            for (ts, n) in &rollup {
+                conn.execute(
+                    "INSERT INTO samples_1m (ts, cpu_sum, mem_sum, n) VALUES (?1, 1.0, 1.0, ?2)",
+                    params![ts, n],
+                )
+                .unwrap();
+            }
+            assert_eq!(
+                rollup_backfill_needed(&conn).unwrap(),
+                expected,
+                "raw {raw:?} rollup {rollup:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn open_read_only_reports_a_zero_byte_database_as_empty() {
+        fn assert_empty(result: anyhow::Result<Store>) {
+            match result {
+                Ok(_) => panic!("an unreadable database must not open"),
+                Err(error) => assert!(
+                    error.downcast_ref::<EmptyDatabase>().is_some(),
+                    "expected an EmptyDatabase error, got {error}"
+                ),
+            }
+        }
+
+        let dir = std::env::temp_dir().join(format!(
+            "sysvitals-store-empty-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        assert_empty(Store::open_read_only(&dir.join("missing.db")));
+
+        let zero = dir.join("zero.db");
+        std::fs::write(&zero, []).unwrap();
+        assert_empty(Store::open_read_only(&zero));
+
+        let real = dir.join("real.db");
+        Store::open(&real).unwrap().insert(60, 1.0, 1.0).unwrap();
+        assert!(Store::open_read_only(&real).is_ok());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn sql_bucketing_matches_floor_to_grid_for_negative_timestamps() {
+        let s = Store::in_memory().unwrap();
+        let raw_ts = [-95i64, -5, 5];
+        for ts in raw_ts {
+            s.insert(ts, 1.0, 1.0).unwrap();
+        }
+        for offset in [0i64, 3, -7] {
+            let mut expected: Vec<i64> = raw_ts
+                .iter()
+                .map(|ts| floor_to_grid(*ts, 10, offset))
+                .collect();
+            expected.sort_unstable();
+            expected.dedup();
+            let raw = s.buckets_from_raw(-100, 10, 10, offset).unwrap();
+            let actual: Vec<i64> = raw.iter().map(|b| b.ts).collect();
+            assert_eq!(actual, expected, "offset {offset}");
+            let rolled = s.buckets_from_rollup(-200, 10, 60, offset).unwrap();
+            for bucket in &rolled {
+                assert_eq!(
+                    bucket.ts,
+                    floor_to_grid(bucket.ts, 60, offset),
+                    "rollup bucket start is on the grid (offset {offset})"
+                );
+            }
+        }
     }
 
     #[test]
@@ -631,7 +864,7 @@ mod tests {
              );
              INSERT INTO samples (ts, cpu, mem) VALUES (60, 10.0, 20.0), (65, 30.0, 40.0);
              INSERT INTO samples_1m (ts, cpu_sum, mem_sum, n) VALUES (60, 75.0, 90.0, 3);
-             INSERT INTO samples (ts, cpu, mem) VALUES (120, 5.0, 6.0);",
+             INSERT INTO samples (ts, cpu, mem) VALUES (120, 5.0, 6.0), (180, 7.0, 8.0);",
         )
         .unwrap();
         conn.pragma_update(None, "user_version", SCHEMA_VERSION)
@@ -648,7 +881,7 @@ mod tests {
         };
         assert_eq!(
             rows,
-            vec![(60, 75.0, 90.0, 3), (120, 5.0, 6.0, 1)],
+            vec![(60, 75.0, 90.0, 3), (120, 5.0, 6.0, 1), (180, 7.0, 8.0, 1)],
             "the existing partial minute must stay authoritative"
         );
     }
