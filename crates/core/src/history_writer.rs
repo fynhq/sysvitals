@@ -654,7 +654,19 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         };
         assert!(backup_seen.is_some());
-        assert!(Store::open_read_only(&path).is_ok());
+        // The writer creates the file before SQLite writes the schema, so a
+        // reader that arrives in between legitimately sees an empty database.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if Store::open_read_only(&path).is_ok() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "recreated database never became readable; logs={logs:?}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
 
         drop(writer);
         let _ = fs::remove_dir_all(&dir);
