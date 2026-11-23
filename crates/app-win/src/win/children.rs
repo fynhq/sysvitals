@@ -574,6 +574,8 @@ fn visible_window_of_pid(pid: u32) -> bool {
         found: bool,
     }
     unsafe extern "system" fn visit(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        // SAFETY: `lparam` is the `&mut Search` handed to EnumWindows below; the
+        // call is synchronous, so it outlives every invocation of this callback.
         let search = &mut *(lparam.0 as *mut Search);
         let mut owner = 0u32;
         GetWindowThreadProcessId(hwnd, Some(&mut owner));

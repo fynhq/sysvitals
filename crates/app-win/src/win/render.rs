@@ -257,6 +257,8 @@ pub(crate) unsafe fn draw_frame(
     SetBkMode(mem_dc, TRANSPARENT);
     SetTextColor(mem_dc, COLORREF(0x00FF_FFFF));
 
+    // SAFETY: CreateDIBSection returned a non-null buffer of `sw * sh` 32-bit
+    // pixels (checked above), and every index below stays inside that count.
     let ss_px = ss_bits as *mut u32;
     let ss_n = (sw * sh) as usize;
     for i in 0..ss_n {
@@ -456,6 +458,8 @@ pub(crate) unsafe fn render_layered(hwnd: HWND, row: &FormattedRow, vertical: bo
         );
         return;
     }
+    // SAFETY: `bits` was checked non-null and sizes `w * h` 32-bit pixels, and
+    // `pixels` was allocated for exactly those dimensions by the caller above.
     std::ptr::copy_nonoverlapping(pixels.as_ptr(), bits as *mut u32, pixels.len());
 
     let old_bmp = SelectObject(mem_dc, bmp.into());
