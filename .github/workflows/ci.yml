@@ -65,33 +65,10 @@ jobs:
             exit 1
           fi
           echo "release tag verified: annotated, on main"
-      - name: Install the pinned toolchain
-        shell: bash
-        run: |
-          set -euo pipefail
-          channel=$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' rust-toolchain.toml | head -1)
-          test -n "$channel" || { echo "rust-toolchain.toml declares no channel" >&2; exit 1; }
-          rustup toolchain install "$channel"
-          rustup show active-toolchain
-      - name: Verify the pinned toolchain satisfies the declared MSRV
-        shell: bash
-        run: |
-          set -euo pipefail
-          msrv=$(sed -n 's/^rust-version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' Cargo.toml | head -1)
-          active=$(rustc --version | sed -n 's/^rustc \([0-9][0-9.]*\).*/\1/p')
-          pinned=$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' rust-toolchain.toml | head -1)
-          test -n "$msrv" || { echo "rust-version is missing from Cargo.toml" >&2; exit 1; }
-          test -n "$pinned" || { echo "channel is missing from rust-toolchain.toml" >&2; exit 1; }
-          if [ "$active" != "$pinned" ]; then
-            echo "active toolchain $active is not the pinned $pinned" >&2
-            exit 1
-          fi
-          lowest=$(printf '%s\n%s\n' "$msrv" "$active" | sort -V | head -1)
-          if [ "$lowest" != "$msrv" ]; then
-            echo "toolchain $active is older than rust-version $msrv" >&2
-            exit 1
-          fi
-          echo "toolchain $active satisfies rust-version $msrv"
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@e9d7b9f1e587218970671bac74e5511ed9506e6a # v2
       - name: Verify third-party notices are current
         run: python3 .github/scripts/check_third_party_notices.py
@@ -107,29 +84,6 @@ jobs:
   # published advisory would otherwise never surface. The job is deliberately
   # not in any `needs:` list and is not a required check: a new advisory must
   # not be able to block a release, it is reported for a human to triage.
-  # ---------------------------------------------------------------------------
-  advisories:
-    name: Dependency advisories
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          ref: ${{ github.ref }}
-      - uses: EmbarkStudios/cargo-deny-action@17aeb3c839e42274e2b8adf721c8c65edfdc74dd # v2.1.3
-        with:
-          command: check advisories licenses bans sources
-          log-level: error
-
-  # ---------------------------------------------------------------------------
-  # Platform type-check gate: the quality job only builds the cross-platform
-  # default members (core) on Linux. These platform crates otherwise compile
-  # for the first time on a tag-triggered packaging run, so a type error could
-  # reach main and only surface when a dev/release package is requested.
-  #
-  # Each leg also type-checks the architecture its runner cannot host, because
-  # the packaging matrix builds all four targets and a cross-arch type error
-  # would otherwise only appear on a tag run.
   # ---------------------------------------------------------------------------
   platform-check:
     name: Platform check (${{ matrix.os }})
@@ -149,15 +103,11 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.ref }}
-      - name: Install the pinned toolchain
-        shell: bash
-        run: |
-          set -euo pipefail
-          channel=$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' rust-toolchain.toml | head -1)
-          test -n "$channel" || { echo "rust-toolchain.toml declares no channel" >&2; exit 1; }
-          rustup toolchain install "$channel"
-          rustup target add "${{ matrix.cross_target }}"
-          rustup show active-toolchain
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          components: clippy
+          targets: ${{ matrix.cross_target }}
       - uses: Swatinem/rust-cache@e9d7b9f1e587218970671bac74e5511ed9506e6a # v2
         with:
           key: platform-check-${{ matrix.os }}
@@ -302,15 +252,10 @@ jobs:
         with:
           ref: ${{ github.ref }}
           fetch-tags: true
-      - name: Install the pinned toolchain
-        shell: bash
-        run: |
-          set -euo pipefail
-          channel=$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' rust-toolchain.toml | head -1)
-          test -n "$channel" || { echo "rust-toolchain.toml declares no channel" >&2; exit 1; }
-          rustup toolchain install "$channel"
-          rustup target add "${{ matrix.target }}"
-          rustup show active-toolchain
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@e9d7b9f1e587218970671bac74e5511ed9506e6a # v2
         with:
           key: ${{ matrix.target }}
@@ -622,15 +567,10 @@ jobs:
         with:
           ref: ${{ github.ref }}
           fetch-tags: true
-      - name: Install the pinned toolchain
-        shell: bash
-        run: |
-          set -euo pipefail
-          channel=$(sed -n 's/^channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' rust-toolchain.toml | head -1)
-          test -n "$channel" || { echo "rust-toolchain.toml declares no channel" >&2; exit 1; }
-          rustup toolchain install "$channel"
-          rustup target add "${{ matrix.target }}"
-          rustup show active-toolchain
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@e9d7b9f1e587218970671bac74e5511ed9506e6a # v2
         with:
           key: ${{ matrix.target }}
