@@ -138,32 +138,36 @@ impl HistoryView {
         lang: Language,
         cx: &mut Context<Self>,
     ) {
+        let rows = buckets.len();
         let csv = build_csv(&buckets, lang);
-
-        match arboard::Clipboard::new() {
-            Ok(mut clipboard) => match clipboard.set_text(csv) {
-                Ok(()) => {
-                    self.copied = true;
-                    self.copy_failed = false;
-                    log_event(
-                        "INFO",
-                        &format!("history: CSV copied ({} rows)", buckets.len()),
-                    );
+        let executor = cx.background_executor().clone();
+        cx.spawn(async move |this, cx| {
+            // The clipboard can block while another process holds it open, so it
+            // is written off the UI thread; the handle never spans an await.
+            let written = executor
+                .spawn(async move {
+                    let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+                    clipboard.set_text(csv).map_err(|e| e.to_string())
+                })
+                .await;
+            let _ = this.update(cx, |view: &mut HistoryView, cx| {
+                match written {
+                    Ok(()) => {
+                        view.copied = true;
+                        view.copy_failed = false;
+                        log_event("INFO", &format!("history: CSV copied ({rows} rows)"));
+                    }
+                    Err(e) => {
+                        view.copied = false;
+                        view.copy_failed = true;
+                        log_event("WARN", &format!("history: clipboard write failed: {e}"));
+                    }
                 }
-                Err(e) => {
-                    self.copied = false;
-                    self.copy_failed = true;
-                    log_event("WARN", &format!("history: clipboard write failed: {e}"));
-                }
-            },
-            Err(e) => {
-                self.copied = false;
-                self.copy_failed = true;
-                log_event("WARN", &format!("history: clipboard unavailable: {e}"));
-            }
-        }
-        self.schedule_copied_reset(cx);
-        cx.notify();
+                view.schedule_copied_reset(cx);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     pub(crate) fn schedule_copied_reset(&mut self, cx: &mut Context<Self>) {
