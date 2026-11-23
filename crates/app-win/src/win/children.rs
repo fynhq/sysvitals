@@ -143,15 +143,57 @@ pub(crate) fn close_children() {
     let _ = terminate(&SETTINGS, false, "settings");
 }
 
+static PREWARM_POLICY: Mutex<Option<RespawnPolicy>> = Mutex::new(None);
+static PREWARM_DUE_MS: AtomicU64 = AtomicU64::new(0);
+
+fn schedule_prewarm_retry() {
+    let mut guard = PREWARM_POLICY
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let policy = guard.get_or_insert_with(RespawnPolicy::new);
+    match policy.next_delay_ms() {
+        Some(delay) => {
+            PREWARM_DUE_MS.store(now_ms().saturating_add(delay).max(1), Ordering::Relaxed);
+            log_event(
+                "WARN",
+                &format!(
+                    "history host exited; re-prewarming in {delay}ms (attempt {})",
+                    policy.attempts()
+                ),
+            );
+        }
+        None => log_event(
+            "WARN",
+            "history host keeps exiting; automatic restarts stopped until the app restarts",
+        ),
+    }
+}
+
+pub(crate) fn prewarm_tick() {
+    let due = PREWARM_DUE_MS.load(Ordering::Relaxed);
+    if due == 0 || now_ms() < due {
+        return;
+    }
+    PREWARM_DUE_MS.store(0, Ordering::Relaxed);
+    prewarm_history();
+}
+
 pub(crate) fn reap_children() {
+    let (was_alive, was_prewarm) = {
+        let child = lock(&HISTORY);
+        (child.handle.is_some(), child.prewarm)
+    };
     let _ = {
         let mut child = lock(&SETTINGS);
         child_alive(&mut child, "settings")
     };
-    let _ = {
+    let alive = {
         let mut child = lock(&HISTORY);
         child_alive(&mut child, "history")
     };
+    if was_alive && was_prewarm && !alive {
+        schedule_prewarm_retry();
+    }
 }
 
 pub(crate) unsafe fn init_child_job() {

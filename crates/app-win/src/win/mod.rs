@@ -31,7 +31,7 @@ use sysvitals_core::{
 use sysvitals_support::{
     acquire_instance_lock, hkcu_dword, log_event, log_sanitize_issues, os_build_number,
     resolve_wait_cursor, taskbar_al, utf16, AutoStartController, AutoStartOutcome, ConfigEvent,
-    InstanceLock, WaitCursorNext, SV_BUILD_ID,
+    InstanceLock, RespawnPolicy, WaitCursorNext, SV_BUILD_ID,
 };
 use windows::core::{Interface, BOOL, PCWSTR};
 use windows::Win32::Foundation::{
@@ -108,6 +108,7 @@ const TIMER_REBIND: usize = 0x51A;
 const REBIND_RETRY_MS: u32 = 500;
 const TIMER_WATCH: usize = 0x51B;
 const WATCHDOG_MS: u32 = 5_000;
+const INSTANCE_LOCK_RETRY_MS: u64 = 3_000;
 const PAD_PX: i32 = 6;
 const WIDTH_SLACK_PX: i32 = 8;
 const VERTICAL_FONT_HUNDREDTHS: i32 = 75;

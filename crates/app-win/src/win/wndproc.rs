@@ -119,20 +119,34 @@ pub(crate) fn run() {
     unsafe {
         install_crash_hooks();
 
-        let _instance = match acquire_instance_lock("Local\\SysVitals_SingleInstance") {
-            InstanceLock::Acquired(guard) => guard,
-            InstanceLock::Busy => {
-                log_event("INFO", "another instance is already running; exiting");
-                return;
+        let mut instance = None;
+        let mut waited_ms = 0u64;
+        loop {
+            match acquire_instance_lock("Local\\SysVitals_SingleInstance") {
+                InstanceLock::Acquired(guard) => {
+                    instance = Some(guard);
+                    break;
+                }
+                InstanceLock::Busy => {
+                    if waited_ms >= INSTANCE_LOCK_RETRY_MS {
+                        log_event("INFO", "another instance is already running; exiting");
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                    waited_ms += 100;
+                }
+                InstanceLock::Unavailable(error) => {
+                    log_event(
+                        "WARN",
+                        &format!(
+                            "single-instance mutex unavailable: {error}; continuing without it"
+                        ),
+                    );
+                    break;
+                }
             }
-            InstanceLock::Unavailable(error) => {
-                log_event(
-                    "WARN",
-                    &format!("single-instance mutex unavailable: {error}; exiting"),
-                );
-                return;
-            }
-        };
+        }
+        let _instance = instance;
 
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         init_child_job();
@@ -348,6 +362,7 @@ unsafe extern "system" fn sentinel_wndproc(
                         }
                     }
                     init_child_job();
+                    prewarm_tick();
                     AUTO_HIDE.store(u32::MAX, Ordering::Relaxed);
                     WIN11_CENTERED.store(u32::MAX, Ordering::Relaxed);
                     reconcile_overlays();
