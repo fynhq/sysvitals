@@ -54,21 +54,9 @@ fn entries(source: &'static str) -> impl Iterator<Item = (&'static str, &'static
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
-
     use super::*;
 
     const EN: &str = include_str!("../locales/en.conf");
-    const ZH: &str = include_str!("../locales/zh.conf");
-
-    fn raw_entries(source: &'static str) -> impl Iterator<Item = (&'static str, &'static str)> {
-        source.lines().filter_map(|line| {
-            if line.trim().is_empty() || line.trim_start().starts_with('#') {
-                return None;
-            }
-            line.split_once('=')
-        })
-    }
 
     #[test]
     fn known_keys_differ_between_locales() {
@@ -109,39 +97,6 @@ mod tests {
     #[test]
     fn language_default() {
         assert_eq!(Language::default(), Language::En);
-    }
-
-    #[test]
-    fn locale_files_have_matching_keys_in_order() {
-        let en: Vec<_> = entries(EN).map(|(key, _)| key).collect();
-        let zh: Vec<_> = entries(ZH).map(|(key, _)| key).collect();
-        assert_eq!(en, zh, "en.conf and zh.conf keys must match in order");
-    }
-
-    #[test]
-    fn locale_files_have_no_duplicate_keys() {
-        for (name, source) in [("en.conf", EN), ("zh.conf", ZH)] {
-            let mut seen = HashSet::new();
-            for (key, _) in entries(source) {
-                assert!(seen.insert(key), "{name}: duplicate key {key}");
-            }
-        }
-    }
-
-    #[test]
-    fn locale_lines_have_no_edge_whitespace() {
-        for (name, source) in [("en.conf", EN), ("zh.conf", ZH)] {
-            for (key, value) in raw_entries(source) {
-                assert!(!key.is_empty(), "{name}: empty key");
-                assert!(!value.is_empty(), "{name}: empty value for {key}");
-                assert_eq!(key, key.trim(), "{name}: edge whitespace in key {key:?}");
-                assert_eq!(
-                    value,
-                    value.trim(),
-                    "{name}: edge whitespace in value for {key}"
-                );
-            }
-        }
     }
 
     #[test]

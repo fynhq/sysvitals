@@ -20,14 +20,6 @@ pub fn format_percent(value: f64) -> String {
 }
 
 // Rate field is fixed width: 4 chars, adapt unit/decimals so rounding to 10.00/100.0 never widens the slot.
-pub fn format_rate(bps: f64) -> String {
-    format_rate_with(bps, true)
-}
-
-pub fn format_rate_compact(bps: f64) -> String {
-    format_rate_with(bps, false)
-}
-
 fn format_rate_with(bps: f64, with_per_sec: bool) -> String {
     if !bps.is_finite() {
         return "--".to_string();
@@ -143,23 +135,10 @@ pub fn format_value_compact(metric: Metric, snapshot: &Snapshot) -> String {
 }
 
 fn format_value_impl(metric: Metric, snapshot: &Snapshot, with_per_sec: bool) -> String {
+    let value = snapshot.value(metric);
     match metric {
-        Metric::Cpu | Metric::Mem => {
-            let v = snapshot.value(metric);
-            if !v.is_finite() {
-                "--%".to_string()
-            } else {
-                format_percent(v)
-            }
-        }
-        Metric::Up | Metric::Down => {
-            let v = snapshot.value(metric);
-            if !v.is_finite() {
-                "--".to_string()
-            } else {
-                format_rate_with(v, with_per_sec)
-            }
-        }
+        Metric::Cpu | Metric::Mem => format_percent(value),
+        Metric::Up | Metric::Down => format_rate_with(value, with_per_sec),
     }
 }
 
@@ -176,8 +155,6 @@ fn metric_cells(metrics: Vec<Metric>, cfg: &Config, snapshot: &Snapshot) -> Vec<
 }
 
 pub fn format_frame(snapshot: &Snapshot, cfg: &Config) -> FormattedRow {
-    let enabled = visible_metrics(cfg);
-
     if cfg.display.dual_row {
         let (left_metrics, right_metrics) = column_metrics(cfg);
         let left = metric_cells(left_metrics, cfg, snapshot);
@@ -208,6 +185,7 @@ pub fn format_frame(snapshot: &Snapshot, cfg: &Config) -> FormattedRow {
             items: Vec::new(),
         }
     } else {
+        let enabled = visible_metrics(cfg);
         let items: Vec<String> = enabled
             .iter()
             .map(|m| join_prefix(metric_prefix(*m, cfg), &format_value(*m, snapshot)))
@@ -270,20 +248,20 @@ mod tests {
 
     #[test]
     fn rate_uses_binary_units_and_decimal_rules() {
-        assert_eq!(format_rate(314.0), "314 B/s");
-        assert_eq!(format_rate(0.0), "0.00 B/s");
-        assert_eq!(format_rate(1023.0), "1023 B/s");
-        assert_eq!(format_rate(1024.0), "1.00 K/s");
-        assert_eq!(format_rate(314.0 * KB), "314 K/s");
-        assert_eq!(format_rate(12.0 * KB + 512.0), "12.5 K/s");
-        assert_eq!(format_rate(1.2 * MB), "1.20 M/s");
-        assert_eq!(format_rate(100.0 * MB), "100 M/s");
-        assert_eq!(format_rate(1.5 * GB), "1.50 G/s");
-        assert_eq!(format_rate(1024.0 * MB), "1.00 G/s");
-        assert_eq!(format_rate(120.0 * GB), "120 G/s");
-        assert_eq!(format_rate(f64::NAN), "--");
-        assert_eq!(format_rate(f64::INFINITY), "--");
-        assert_eq!(format_rate_compact(f64::NAN), "--");
+        assert_eq!(format_rate_with(314.0, true), "314 B/s");
+        assert_eq!(format_rate_with(0.0, true), "0.00 B/s");
+        assert_eq!(format_rate_with(1023.0, true), "1023 B/s");
+        assert_eq!(format_rate_with(1024.0, true), "1.00 K/s");
+        assert_eq!(format_rate_with(314.0 * KB, true), "314 K/s");
+        assert_eq!(format_rate_with(12.0 * KB + 512.0, true), "12.5 K/s");
+        assert_eq!(format_rate_with(1.2 * MB, true), "1.20 M/s");
+        assert_eq!(format_rate_with(100.0 * MB, true), "100 M/s");
+        assert_eq!(format_rate_with(1.5 * GB, true), "1.50 G/s");
+        assert_eq!(format_rate_with(1024.0 * MB, true), "1.00 G/s");
+        assert_eq!(format_rate_with(120.0 * GB, true), "120 G/s");
+        assert_eq!(format_rate_with(f64::NAN, true), "--");
+        assert_eq!(format_rate_with(f64::INFINITY, true), "--");
+        assert_eq!(format_rate_with(f64::NAN, false), "--");
     }
 
     #[test]
@@ -299,39 +277,39 @@ mod tests {
             1023.9 * MB,
             1023.9 * GB,
         ] {
-            let rendered = format_rate(bps);
+            let rendered = format_rate_with(bps, true);
             let numeric = rendered.split(' ').next().unwrap_or_default();
             assert!(
                 numeric.len() <= 4,
                 "{rendered} has a {} character numeric field",
                 numeric.len()
             );
-            let compact = format_rate_compact(bps);
+            let compact = format_rate_with(bps, false);
             let numeric = compact.split(' ').next().unwrap_or_default();
             assert!(numeric.len() <= 4, "{compact}");
         }
-        assert_eq!(format_rate(9.996 * KB), "10.0 K/s");
-        assert_eq!(format_rate(99.96 * KB), "100 K/s");
-        assert_eq!(format_rate(1023.9 * KB), "1024 K/s");
+        assert_eq!(format_rate_with(9.996 * KB, true), "10.0 K/s");
+        assert_eq!(format_rate_with(99.96 * KB, true), "100 K/s");
+        assert_eq!(format_rate_with(1023.9 * KB, true), "1024 K/s");
     }
 
     #[test]
     fn rate_nan_is_no_reading_and_negative_is_zero() {
-        assert_eq!(format_rate(f64::NAN), "--");
-        assert_eq!(format_rate(f64::NEG_INFINITY), "--");
-        assert_eq!(format_rate(-5.0), "0.00 B/s");
-        assert_eq!(format_rate(f64::INFINITY), "--");
+        assert_eq!(format_rate_with(f64::NAN, true), "--");
+        assert_eq!(format_rate_with(f64::NEG_INFINITY, true), "--");
+        assert_eq!(format_rate_with(-5.0, true), "0.00 B/s");
+        assert_eq!(format_rate_with(f64::INFINITY, true), "--");
     }
 
     #[test]
     fn rate_compact_drops_per_sec_suffix() {
-        assert_eq!(format_rate_compact(314.0), "314 B");
-        assert_eq!(format_rate_compact(0.0), "0.00 B");
-        assert_eq!(format_rate_compact(1024.0), "1.00 K");
-        assert_eq!(format_rate_compact(12.0 * KB + 512.0), "12.5 K");
-        assert_eq!(format_rate_compact(1.2 * MB), "1.20 M");
-        assert_eq!(format_rate_compact(1.5 * GB), "1.50 G");
-        assert_eq!(format_rate_compact(f64::NAN), "--");
+        assert_eq!(format_rate_with(314.0, false), "314 B");
+        assert_eq!(format_rate_with(0.0, false), "0.00 B");
+        assert_eq!(format_rate_with(1024.0, false), "1.00 K");
+        assert_eq!(format_rate_with(12.0 * KB + 512.0, false), "12.5 K");
+        assert_eq!(format_rate_with(1.2 * MB, false), "1.20 M");
+        assert_eq!(format_rate_with(1.5 * GB, false), "1.50 G");
+        assert_eq!(format_rate_with(f64::NAN, false), "--");
     }
 
     #[test]
@@ -518,7 +496,7 @@ mod tests {
     #[test]
     fn fixed_slot_reserve_strings_cover_the_formatter() {
         assert_eq!(format_percent(100.0), PERCENT_RESERVE);
-        assert_eq!(format_rate(8888.0 * MB), "8.68 G/s");
+        assert_eq!(format_rate_with(8888.0 * MB, true), "8.68 G/s");
         let numeric = RATE_RESERVE.split(' ').next().unwrap();
         assert_eq!(numeric.len(), 4);
         assert!(RATE_RESERVE.split(' ').nth(1).unwrap().len() >= 3);

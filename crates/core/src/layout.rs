@@ -69,7 +69,7 @@ pub fn anchor_origin(anchor: Rect, size_w: f32, size_h: f32, work: Rect, gap: f3
     }
     if bar_left {
         return (
-            (work.left + gap).min(work.right - size_w),
+            (work.left + gap).min((work.right - size_w).max(work.left)),
             clamp_y(center_y - size_h * 0.5),
         );
     }
@@ -168,6 +168,18 @@ mod tests {
         let work = rect(0.0, 0.0, 1920.0, 300.0);
         let anchor = rect(500.0, 100.0, 600.0, 150.0);
         assert_eq!(anchor_origin(anchor, W, H, work, GAP), (210.0, 0.0));
+    }
+
+    #[test]
+    fn a_popup_wider_than_the_work_area_stays_inside_it() {
+        let work = rect(0.0, 0.0, 100.0, 400.0);
+        let anchor = rect(-40.0, 100.0, 0.0, 200.0);
+        let (x, y) = anchor_origin(anchor, 680.0, 100.0, work, GAP);
+        assert!(
+            x >= work.left,
+            "the left-edge branch must not push the popup off-screen: {x}"
+        );
+        assert_eq!((x, y), (0.0, 100.0));
     }
 
     #[test]

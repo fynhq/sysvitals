@@ -2,69 +2,48 @@
 
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct AnchorRect {
-    pub left: f32,
-    pub top: f32,
-    pub right: f32,
-    pub bottom: f32,
+pub type AnchorRect = crate::layout::Rect;
+
+fn flag_tail<'a>(args: &'a [String], name: &str) -> Option<&'a [String]> {
+    let index = args.iter().position(|arg| arg == name)?;
+    Some(&args[index + 1..])
+}
+
+fn flag_value<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
+    flag_tail(args, name)?.first().map(String::as_str)
 }
 
 pub fn parse_anchor(args: &[String]) -> Option<AnchorRect> {
-    let mut iter = args.iter().map(String::as_str);
-    while let Some(arg) = iter.next() {
-        if arg != "--anchor" {
-            continue;
-        }
-        let mut nums = [0f32; 4];
-        for slot in &mut nums {
-            *slot = iter.next()?.trim().parse().ok()?;
-        }
-        if !nums.iter().all(|n| n.is_finite()) {
-            return None;
-        }
-        let [left, top, right, bottom] = nums;
-        return (right > left && bottom > top).then_some(AnchorRect {
-            left,
-            top,
-            right,
-            bottom,
-        });
+    let mut iter = flag_tail(args, "--anchor")?.iter().map(String::as_str);
+    let mut nums = [0f32; 4];
+    for slot in &mut nums {
+        *slot = iter.next()?.trim().parse().ok()?;
     }
-    None
+    if !nums.iter().all(|n| n.is_finite()) {
+        return None;
+    }
+    let [left, top, right, bottom] = nums;
+    (right > left && bottom > top).then_some(AnchorRect {
+        left,
+        top,
+        right,
+        bottom,
+    })
 }
 
 pub fn parse_anchor_monitor(args: &[String]) -> Option<u64> {
-    let mut iter = args.iter().map(String::as_str);
-    while let Some(arg) = iter.next() {
-        if arg == "--anchor-monitor" {
-            let raw: u64 = iter.next()?.trim().parse().ok()?;
-            return (raw != 0).then_some(raw);
-        }
-    }
-    None
+    let raw: u64 = flag_value(args, "--anchor-monitor")?.trim().parse().ok()?;
+    (raw != 0).then_some(raw)
 }
 
 pub fn parse_parent_pid(args: &[String]) -> Option<u32> {
-    let mut iter = args.iter().map(String::as_str);
-    while let Some(arg) = iter.next() {
-        if arg == "--parent-pid" {
-            let pid: u32 = iter.next()?.parse().ok()?;
-            return (pid != 0).then_some(pid);
-        }
-    }
-    None
+    let pid: u32 = flag_value(args, "--parent-pid")?.parse().ok()?;
+    (pid != 0).then_some(pid)
 }
 
 pub fn parse_ready_file(args: &[String]) -> Option<PathBuf> {
-    let mut iter = args.iter().map(String::as_str);
-    while let Some(arg) = iter.next() {
-        if arg == "--ready-file" {
-            let path = iter.next()?.trim();
-            return (!path.is_empty()).then(|| PathBuf::from(path));
-        }
-    }
-    None
+    let path = flag_value(args, "--ready-file")?.trim();
+    (!path.is_empty()).then(|| PathBuf::from(path))
 }
 
 #[cfg(test)]
@@ -120,6 +99,22 @@ mod tests {
     }
 
     #[test]
+    fn anchor_is_the_shared_rect_type() {
+        let a = parse_anchor(&args(&["--anchor", "10", "20", "110", "60"])).unwrap();
+        assert_eq!(a.width(), 100.0);
+        assert_eq!(a.height(), 40.0);
+        assert_eq!(a, crate::layout::Rect::new(10.0, 20.0, 110.0, 60.0));
+        let placed = crate::layout::anchor_origin(
+            a,
+            80.0,
+            30.0,
+            crate::layout::Rect::new(0.0, 0.0, 1920.0, 1080.0),
+            8.0,
+        );
+        assert_eq!(placed, (20.0, 68.0));
+    }
+
+    #[test]
     fn parent_pid_parses_and_rejects() {
         assert_eq!(
             parse_parent_pid(&args(&["--parent-pid", "4242"])),
@@ -128,6 +123,10 @@ mod tests {
         assert!(parse_parent_pid(&args(&["--parent-pid"])).is_none());
         assert!(parse_parent_pid(&args(&["--parent-pid", "x"])).is_none());
         assert!(parse_parent_pid(&args(&["--parent-pid", "0"])).is_none());
+        assert!(
+            parse_parent_pid(&args(&["--parent-pid", " 4242"])).is_none(),
+            "the indicator formats this value itself, so padding stays rejected"
+        );
         assert!(parse_parent_pid(&args(&["--anchor", "1", "2", "3", "4"])).is_none());
     }
 

@@ -250,7 +250,8 @@ impl Config {
         format!(
             "interval={}ms language={:?} theme={:?} dual_row={} \
              show_resources={} show_network={} item_spacing={}px anchor={:?} \
-             left_margin={}px auto_start={}",
+             left_margin={}px auto_start={} retention_days={} \
+             prefix_cpu={:?} prefix_mem={:?} prefix_up={:?} prefix_down={:?}",
             self.sample.interval_ms,
             self.display.language,
             self.display.theme,
@@ -261,6 +262,11 @@ impl Config {
             self.windows.anchor,
             self.windows.left_margin_px,
             self.startup.auto_start,
+            self.history.retention_days,
+            self.display.prefix.cpu,
+            self.display.prefix.mem,
+            self.display.prefix.up,
+            self.display.prefix.down,
         )
     }
 
@@ -380,17 +386,25 @@ fn repair_enum(
     let Some(value) = table.get_mut(path.1) else {
         return;
     };
-    let Some(current) = value.as_str().map(str::to_owned) else {
-        return;
-    };
-    if allowed.contains(&current.as_str()) {
-        return;
+    match value.as_str().map(str::to_owned) {
+        Some(current) if allowed.contains(&current.as_str()) => {}
+        Some(current) => {
+            *value = toml::Value::String(fallback.to_string());
+            issues.push(SanitizeIssue {
+                field,
+                message: format!("{current:?} is not a valid value, reset to {fallback:?}"),
+            });
+        }
+        // A present-but-non-string value would otherwise reject the whole file at try_into.
+        None => {
+            let found = value.clone();
+            *value = toml::Value::String(fallback.to_string());
+            issues.push(SanitizeIssue {
+                field,
+                message: format!("{found} is not a valid value, reset to {fallback:?}"),
+            });
+        }
     }
-    *value = toml::Value::String(fallback.to_string());
-    issues.push(SanitizeIssue {
-        field,
-        message: format!("{current:?} is not a valid value, reset to {fallback:?}"),
-    });
 }
 
 fn remove_orphan_tmp_files(path: &std::path::Path, own_tmp: &std::path::Path) {
@@ -437,28 +451,29 @@ fn remove_orphan_tmp_files(path: &std::path::Path, own_tmp: &std::path::Path) {
 
 fn sanitize_prefix(value: &mut String) -> Option<String> {
     let original = value.clone();
-    let mut cleaned: String = value
-        .trim()
-        .chars()
-        .filter(|c| !c.is_control())
-        .take(MAX_PREFIX_CHARS)
-        .collect();
-    while cleaned.contains("  ") {
-        cleaned = cleaned.replace("  ", " ");
+    let filtered: String = original.chars().filter(|c| !c.is_control()).collect();
+    let mut collapsed = filtered.clone();
+    while collapsed.contains("  ") {
+        collapsed = collapsed.replace("  ", " ");
     }
-    if cleaned != original {
-        let msg = if original.chars().any(char::is_control) {
-            "control characters removed"
-        } else if original.chars().count() > MAX_PREFIX_CHARS {
-            "truncated to 8 characters"
-        } else {
-            "whitespace normalized"
-        };
-        *value = cleaned;
-        Some(msg.to_string())
-    } else {
-        None
+    let trimmed = collapsed.trim();
+    let taken: String = trimmed.chars().take(MAX_PREFIX_CHARS).collect();
+    let cleaned = taken.trim().to_string();
+    if cleaned == original {
+        return None;
     }
+    let mut reasons: Vec<String> = Vec::new();
+    if filtered != original {
+        reasons.push("control characters removed".to_string());
+    }
+    if collapsed != filtered || trimmed != collapsed {
+        reasons.push("whitespace normalized".to_string());
+    }
+    if taken.chars().count() < trimmed.chars().count() {
+        reasons.push(format!("truncated to {MAX_PREFIX_CHARS} characters"));
+    }
+    *value = cleaned;
+    Some(reasons.join(", "))
 }
 
 fn dir_join(parent: Option<&std::path::Path>, name: &str) -> PathBuf {
@@ -574,7 +589,9 @@ mod tests {
 
     #[test]
     fn summary_mentions_every_user_visible_field() {
-        let c = Config::default();
+        let mut c = Config::default();
+        c.history.retention_days = 14;
+        c.display.prefix.cpu = "C".to_string();
         let summary = c.summary();
         for field in [
             "interval=",
@@ -587,9 +604,124 @@ mod tests {
             "anchor=",
             "left_margin=",
             "auto_start=",
+            "retention_days=",
+            "prefix_cpu=",
+            "prefix_mem=",
+            "prefix_up=",
+            "prefix_down=",
         ] {
             assert!(summary.contains(field), "missing {field}: {summary}");
         }
+        assert!(!summary.contains('\n'), "the summary is one log line");
+        assert!(summary.contains("retention_days=14"), "{summary}");
+        assert!(summary.contains("prefix_cpu=\"C\""), "{summary}");
+    }
+
+    #[test]
+    fn a_wrong_typed_enum_is_repaired_instead_of_rejecting_the_file() {
+        let text = "[display]\ntheme = 1\nlanguage = \"zh\"\n[history]\nretention_days = 14\n";
+        let (cfg, issues) = Config::from_toml_str(text).unwrap();
+        assert_eq!(cfg.display.theme, Theme::Auto);
+        assert_eq!(cfg.display.language, Language::Zh, "the rest still loads");
+        assert_eq!(cfg.history.retention_days, 14);
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].field, "display.theme");
+        assert!(
+            issues[0].message.contains("reset to"),
+            "unexpected message: {}",
+            issues[0].message
+        );
+    }
+
+    #[test]
+    fn enum_repair_keeps_valid_strings_and_fixes_invalid_ones() {
+        let (cfg, issues) = Config::from_toml_str("[windows]\nanchor = \"left\"\n").unwrap();
+        assert_eq!(cfg.windows.anchor, Anchor::Left);
+        assert!(issues.is_empty());
+
+        let (cfg, issues) = Config::from_toml_str("[windows]\nanchor = \"middle\"\n").unwrap();
+        assert_eq!(cfg.windows.anchor, Anchor::Right);
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].field, "windows.anchor");
+
+        let (cfg, issues) = Config::from_toml_str("[windows]\nanchor = true\n").unwrap();
+        assert_eq!(cfg.windows.anchor, Anchor::Right);
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].field, "windows.anchor");
+    }
+
+    #[test]
+    fn a_sanitized_prefix_never_carries_edge_whitespace_into_a_cell() {
+        use crate::format::{format_frame, format_frame_vertical};
+        use crate::model::Snapshot;
+
+        let mut c = Config::default();
+        c.display.prefix.cpu = "AB        CD".to_string();
+        let issues = c.sanitize();
+        assert_eq!(c.display.prefix.cpu, "AB CD");
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.field == "display.prefix.cpu" && i.message.contains("whitespace")),
+            "{issues:?}"
+        );
+
+        let snapshot = Snapshot {
+            ts: 0,
+            cpu_pct: 29.0,
+            mem_pct: 68.0,
+            up_bps: 1024.0,
+            down_bps: 1024.0,
+        };
+        for line in format_frame_vertical(&snapshot, &c).lines {
+            assert!(
+                !line.left.ends_with(' '),
+                "the prefix stands alone on a vertical line: {line:?}"
+            );
+        }
+        for line in format_frame(&snapshot, &c).lines {
+            assert!(!line.left.ends_with(' ') && !line.right.ends_with(' '));
+        }
+    }
+
+    #[test]
+    fn the_prefix_issue_message_describes_the_applied_change() {
+        let mut truncated = Config::default();
+        truncated.display.prefix.cpu = "TOOLONGPREFIX".to_string();
+        let issues = truncated.sanitize();
+        assert_eq!(truncated.display.prefix.cpu, "TOOLONGP");
+        assert_eq!(
+            issues
+                .iter()
+                .find(|i| i.field == "display.prefix.cpu")
+                .map(|i| i.message.as_str()),
+            Some("truncated to 8 characters")
+        );
+
+        let mut spaced = Config::default();
+        spaced.display.prefix.mem = "AB      CD".to_string();
+        let issues = spaced.sanitize();
+        assert_eq!(spaced.display.prefix.mem, "AB CD");
+        assert_eq!(
+            issues
+                .iter()
+                .find(|i| i.field == "display.prefix.mem")
+                .map(|i| i.message.as_str()),
+            Some("whitespace normalized"),
+            "a five character result was not truncated"
+        );
+
+        let mut both = Config::default();
+        both.display.prefix.up = "AB\u{7}CDEFGHIJK".to_string();
+        let issues = both.sanitize();
+        assert_eq!(both.display.prefix.up, "ABCDEFGH");
+        assert_eq!(
+            issues
+                .iter()
+                .find(|i| i.field == "display.prefix.up")
+                .map(|i| i.message.as_str()),
+            Some("control characters removed, truncated to 8 characters")
+        );
     }
 
     #[test]
