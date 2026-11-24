@@ -80,14 +80,18 @@ fn child_alive(child: &mut Child, label: &str) -> bool {
             let read = unsafe { GetExitCodeProcess(handle, &mut code) }.is_ok();
             let _ = unsafe { CloseHandle(handle) };
             child.take();
-            log_event(
-                "WARN",
-                &if read {
-                    format!("{label} exited unexpectedly with code {code:#x}")
-                } else {
-                    format!("{label} exited unexpectedly; exit code unavailable")
-                },
-            );
+            if label == "settings" && read && code == 0 {
+                log_event("INFO", "settings exited with code 0x0");
+            } else {
+                log_event(
+                    "WARN",
+                    &if read {
+                        format!("{label} exited unexpectedly with code {code:#x}")
+                    } else {
+                        format!("{label} exited unexpectedly; exit code unavailable")
+                    },
+                );
+            }
             false
         }
         ProcessState::Failed => {
