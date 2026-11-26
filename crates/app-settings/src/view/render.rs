@@ -3,6 +3,8 @@
 use super::*;
 
 use gpui_kit::component::collapsible::Collapsible;
+#[cfg(not(target_os = "macos"))]
+use sysvitals_core::backdrop::Material;
 
 impl Render for SettingsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -227,10 +229,17 @@ impl Render for SettingsView {
             }
             #[cfg(not(target_os = "macos"))]
             {
-                if dark {
-                    hsla(0., 0., 0.17, 1.)
+                // WinUI CardBackgroundFillColorDefault; opaque when no backdrop material exists.
+                if matches!(detect_material(), Material::Opaque) {
+                    if dark {
+                        hsla(0., 0., 0.17, 1.)
+                    } else {
+                        hsla(0., 0., 0.984, 1.)
+                    }
+                } else if dark {
+                    hsla(0., 0., 1., 0.05)
                 } else {
-                    hsla(0., 0., 0.984, 1.)
+                    hsla(0., 0., 1., 0.70)
                 }
             }
         };
