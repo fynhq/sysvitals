@@ -83,7 +83,7 @@ opt-level = 2
 
 [profile.release]
 opt-level = 3
-lto = "thin"
+lto = "fat"
 codegen-units = 1
 # Keep the symbol table so a release-build panic backtrace is resolvable;
 # only debuginfo is stripped. The crash hook logs a backtrace, and fully
