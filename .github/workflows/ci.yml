@@ -313,9 +313,17 @@ jobs:
             if (!(Test-Path $f)) { throw "missing build output: $f" }
             Copy-Item -Path $f -Destination $stage
           }
-          Compress-Archive -Path $stage -DestinationPath $zip -Force
           $repoRoot = (Get-Location).Path
           $sourceDir = (Resolve-Path $stage).Path
+          # SmallestSize is Deflate level 9; Compress-Archive only exposes the
+          # default level. Keep the standard zip so Explorer opens it.
+          $zipPath = Join-Path $repoRoot $zip
+          Remove-Item -Force $zipPath -ErrorAction SilentlyContinue
+          [System.IO.Compression.ZipFile]::CreateFromDirectory(
+            $sourceDir,
+            $zipPath,
+            [System.IO.Compression.CompressionLevel]::SmallestSize,
+            $true)
           $pinned = $env:INNO_SETUP_VERSION
           if (-not $pinned) { throw "INNO_SETUP_VERSION is not set" }
           $pinnedMajor = $pinned.Split('.')[0]
@@ -652,8 +660,10 @@ jobs:
           mkdir -p "$dmg_root"
           cp -R "$app" "$dmg_root/"
           ln -s /Applications "$dmg_root/Applications"
+          # ULFO (LZFSE) compresses better than UDZO/zlib on the same content
+          # and mounts on every supported macOS version.
           hdiutil create -volname "SysVitals" -srcfolder "$dmg_root" \
-            -ov -format UDZO -fs HFS+ "$dmg_name"
+            -ov -format ULFO -fs HFS+ "$dmg_name"
           rm -rf "$dmg_root"
           # Mount the image and verify the bundle and the drag target before
           # the artifact is uploaded. The release job runs on Linux and cannot
