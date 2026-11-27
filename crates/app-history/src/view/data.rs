@@ -17,6 +17,11 @@ fn open_store_for_read(path: &std::path::Path) -> Result<Store, String> {
     }
 }
 
+fn static_retry_delay(attempts: u32) -> Duration {
+    const STEPS_MS: [u64; 4] = [3_000, 6_000, 12_000, 30_000];
+    Duration::from_millis(STEPS_MS[(attempts as usize).min(STEPS_MS.len() - 1)])
+}
+
 impl HistoryView {
     pub(crate) fn visible_query(&self, now: i64) -> VisibleQuery {
         let step = self.range.label_step_secs();
@@ -36,7 +41,19 @@ impl HistoryView {
         }
     }
 
+    fn arm_static_retry(&mut self) {
+        let delay = static_retry_delay(self.retry_attempts);
+        self.retry_attempts = self.retry_attempts.saturating_add(1);
+        self.retry_at = Some(Instant::now() + delay);
+    }
+
     pub(crate) fn load_data(&mut self, cx: &mut Context<Self>) {
+        let range_changed = self.query.is_none();
+        if range_changed {
+            self.retry_at = None;
+            self.retry_attempts = 0;
+        }
+        let background_retry = !range_changed && self.retry_at.take().is_some();
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
@@ -44,7 +61,7 @@ impl HistoryView {
         let query = self.visible_query(now);
         self.query = Some(query);
         self.load_seq = self.load_seq.wrapping_add(1);
-        if self.buckets.is_empty() {
+        if self.buckets.is_empty() && !background_retry {
             self.data_loading = true;
         }
         let seq = self.load_seq;
@@ -64,6 +81,7 @@ impl HistoryView {
                 view.data_loading = false;
                 match loaded {
                     Ok(buckets) => {
+                        let empty = buckets.is_empty();
                         view.buckets = buckets;
                         view.trim_leading_gap();
                         view.data_error_logged = false;
@@ -78,8 +96,19 @@ impl HistoryView {
                                 ),
                             );
                         }
+                        if empty && !view.range.auto_refresh() {
+                            view.arm_static_retry();
+                        } else {
+                            view.retry_at = None;
+                            view.retry_attempts = 0;
+                        }
                     }
-                    Err(e) => view.log_data_error(format!("history: query failed: {e}")),
+                    Err(e) => {
+                        view.log_data_error(format!("history: query failed: {e}"));
+                        if !view.range.auto_refresh() {
+                            view.arm_static_retry();
+                        }
+                    }
                 }
                 view.note_series_data();
                 cx.notify();
@@ -210,6 +239,16 @@ mod tests {
         for suffix in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{base}{suffix}"));
         }
+    }
+
+    #[test]
+    fn static_retry_delay_backs_off_and_caps() {
+        use std::time::Duration;
+        assert_eq!(super::static_retry_delay(0), Duration::from_secs(3));
+        assert_eq!(super::static_retry_delay(1), Duration::from_secs(6));
+        assert_eq!(super::static_retry_delay(2), Duration::from_secs(12));
+        assert_eq!(super::static_retry_delay(3), Duration::from_secs(30));
+        assert_eq!(super::static_retry_delay(99), Duration::from_secs(30));
     }
 
     #[test]

@@ -44,6 +44,8 @@ pub(crate) struct HistoryView {
     pub(crate) data_loading: bool,
     pub(crate) query: Option<VisibleQuery>,
     pub(crate) load_seq: u64,
+    pub(crate) retry_at: Option<Instant>,
+    pub(crate) retry_attempts: u32,
     pub(crate) data_error_logged: bool,
     pub(crate) first_data_logged: bool,
     pub(crate) copied: bool,
@@ -106,6 +108,8 @@ impl HistoryView {
             data_loading: false,
             query: None,
             load_seq: 0,
+            retry_at: None,
+            retry_attempts: 0,
             data_error_logged: false,
             first_data_logged: false,
             copied: false,
@@ -358,7 +362,9 @@ impl HistoryView {
                     .update(cx, |view: &mut HistoryView, cx| {
                         let config_changed = view.reload_config();
                         let live = view.range.auto_refresh();
-                        if live {
+                        let retry_due =
+                            !live && view.retry_at.is_some_and(|at| Instant::now() >= at);
+                        if live || retry_due {
                             view.load_data(cx);
                         }
                         if live || config_changed {
