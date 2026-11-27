@@ -1,6 +1,6 @@
 [package]
 name = "app-settings"
-description = "GPUI-based settings window for SysVitals, launched by the platform overlay."
+description = "GPUI settings window for SysVitals, linked into the SysVitalsPanel host."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -53,10 +53,3 @@ objc2-app-kit = { version = "=0.3.2", default-features = false, features = [
     "objc2-core-foundation",
 ] }
 objc2-foundation = { version = "=0.3.2", features = ["NSString"] }
-
-[build-dependencies]
-sysvitals-build = { path = "../build-support" }
-
-[[bin]]
-name = "SysVitalsSettings"
-path = "src/main.rs"

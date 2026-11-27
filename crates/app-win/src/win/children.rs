@@ -10,6 +10,8 @@ use sysvitals_support::{
     clear_panel_request, write_panel_request, PanelAction, PANEL_HISTORY, PANEL_SETTINGS,
 };
 
+const PANEL_EXE: &str = "SysVitalsPanel.exe";
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ProcessState {
     Alive,
@@ -401,13 +403,13 @@ fn panel_request(hwnd: HWND, panel: &str, action: PanelAction) -> Result<(), Str
 pub(crate) fn prewarm_history() {
     clear_panel_request(PANEL_SETTINGS);
     clear_panel_request(PANEL_HISTORY);
-    let args = format!("--parent-pid {} --prewarm", unsafe {
+    let args = format!("--history --parent-pid {} --prewarm", unsafe {
         GetCurrentProcessId()
     });
     let _ = spawn_child(
         &HISTORY,
         "history",
-        "SysVitalsHistory.exe",
+        PANEL_EXE,
         args,
         WM_APP_HISTORY_READY,
         true,
@@ -436,8 +438,8 @@ pub(crate) fn launch_settings(hwnd: HWND) {
     if !spawn_child(
         &SETTINGS,
         "settings",
-        "SysVitalsSettings.exe",
-        anchor_args(hwnd, true),
+        PANEL_EXE,
+        format!("--settings {}", anchor_args(hwnd, true)),
         WM_APP_SETTINGS_READY,
         false,
     ) {
@@ -451,8 +453,8 @@ fn launch_history(hwnd: HWND) {
     if !spawn_child(
         &HISTORY,
         "history",
-        "SysVitalsHistory.exe",
-        anchor_args(hwnd, true),
+        PANEL_EXE,
+        format!("--history {}", anchor_args(hwnd, true)),
         WM_APP_HISTORY_READY,
         false,
     ) {

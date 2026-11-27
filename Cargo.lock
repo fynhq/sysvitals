@@ -180,7 +180,6 @@ version = "0.5.2"
 dependencies = [
  "arboard",
  "gpui-kit",
- "sysvitals-build",
  "sysvitals-core",
  "sysvitals-panel",
 ]
@@ -199,6 +198,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "app-panel"
+version = "0.5.2"
+dependencies = [
+ "app-history",
+ "app-settings",
+ "sysvitals-build",
+ "sysvitals-support",
+]
+
+[[package]]
 name = "app-settings"
 version = "0.5.2"
 dependencies = [
@@ -206,7 +215,6 @@ dependencies = [
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
- "sysvitals-build",
  "sysvitals-core",
  "sysvitals-panel",
  "windows 0.62.2",

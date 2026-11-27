@@ -14,7 +14,7 @@ English | [中文](#chinese)
 
 ## Install
 
-**Windows** — Download `SysVitals_Windows_<arch>_v<version>_setup.exe` from [Releases](https://github.com/fynhq/sysvitals/releases) and run it. Setup installs per-user under `%LOCALAPPDATA%\Programs\SysVitals` and needs no administrator rights. The portable `..._portable.zip` extracts to one `SysVitals/` folder with three executables; run `SysVitals.exe` and keep all three together. The build is unsigned: if SmartScreen appears, choose **More info → Run anyway**.
+**Windows** — Download `SysVitals_Windows_<arch>_v<version>_setup.exe` from [Releases](https://github.com/fynhq/sysvitals/releases) and run it. Setup installs per-user under `%LOCALAPPDATA%\Programs\SysVitals` and needs no administrator rights. The portable `..._portable.zip` extracts to one `SysVitals/` folder with two executables; run `SysVitals.exe` and keep both together. The build is unsigned: if SmartScreen appears, choose **More info → Run anyway**.
 
 **macOS** — Download the dmg, drag `SysVitals.app` to `/Applications` (or `~/Applications`), and launch the app, not the binaries inside `Contents/MacOS`. The build is ad-hoc signed without notarization; if macOS blocks it, remove the quarantine flag:
 
@@ -52,8 +52,7 @@ Official packages are built by CI. To build a platform crate on its native OS:
 ```sh
 cargo build -p app-win
 cargo build -p app-mac
-cargo build -p app-settings
-cargo build -p app-history
+cargo build -p app-panel
 ```
 
 ## License
@@ -74,7 +73,7 @@ SysVitals 是常驻 Windows 任务栏 / macOS 菜单栏的轻量 CPU、内存、
 
 ## 安装
 
-**Windows** — 从 [Releases 页面](https://github.com/fynhq/sysvitals/releases) 下载 `SysVitals_Windows_<arch>_v<version>_setup.exe` 并运行。安装器按当前用户安装到 `%LOCALAPPDATA%\Programs\SysVitals`，无需管理员权限。便携版 `..._portable.zip` 解压后为单一 `SysVitals/` 目录，含三个 exe；运行 `SysVitals.exe`，三个文件请保持在一起。构建未签名；如出现 SmartScreen，选择“更多信息”→“仍要运行”。
+**Windows** — 从 [Releases 页面](https://github.com/fynhq/sysvitals/releases) 下载 `SysVitals_Windows_<arch>_v<version>_setup.exe` 并运行。安装器按当前用户安装到 `%LOCALAPPDATA%\Programs\SysVitals`，无需管理员权限。便携版 `..._portable.zip` 解压后为单一 `SysVitals/` 目录，含两个 exe；运行 `SysVitals.exe`，两个文件请保持在一起。构建未签名；如出现 SmartScreen，选择“更多信息”→“仍要运行”。
 
 **macOS** — 下载 dmg，把 `SysVitals.app` 拖到 `/Applications`（或 `~/Applications`），启动 `.app`，不要直接运行 `Contents/MacOS` 内的二进制。构建只有 ad-hoc 签名、未公证；如被系统拦截，移除隔离标记：
 
@@ -112,8 +111,7 @@ cargo run -p sysvitals-core --example monitor
 ```sh
 cargo build -p app-win
 cargo build -p app-mac
-cargo build -p app-settings
-cargo build -p app-history
+cargo build -p app-panel
 ```
 
 ## 许可

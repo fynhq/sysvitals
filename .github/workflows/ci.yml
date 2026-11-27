@@ -94,10 +94,10 @@ jobs:
       matrix:
         include:
           - os: windows-latest
-            packages: "-p app-win -p app-settings -p app-history"
+            packages: "-p app-win -p app-panel -p app-settings -p app-history"
             cross_target: aarch64-pc-windows-msvc
           - os: macos-latest
-            packages: "-p app-mac -p app-settings -p app-history"
+            packages: "-p app-mac -p app-panel -p app-settings -p app-history"
             cross_target: x86_64-apple-darwin
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -261,10 +261,8 @@ jobs:
           key: ${{ matrix.target }}
       - name: Build Windows display layer
         run: cargo build --locked --release --target ${{ matrix.target }} -p app-win
-      - name: Build GPUI settings window
-        run: cargo build --locked --release --target ${{ matrix.target }} -p app-settings
-      - name: Build GPUI history chart
-        run: cargo build --locked --release --target ${{ matrix.target }} -p app-history
+      - name: Build GPUI panel host
+        run: cargo build --locked --release --target ${{ matrix.target }} -p app-panel
       # Two distribution shapes from the same staged files: the portable
       # (no-install) zip and a per-user Inno Setup installer. Tag builds use
       # the exact tag version; main builds keep the dev name with the
@@ -304,8 +302,7 @@ jobs:
           New-Item -ItemType Directory -Path $stage | Out-Null
           $files = @(
             "target/$target/release/SysVitals.exe",
-            "target/$target/release/SysVitalsSettings.exe",
-            "target/$target/release/SysVitalsHistory.exe",
+            "target/$target/release/SysVitalsPanel.exe",
             "LICENSE",
             "THIRD_PARTY_NOTICES.md"
           )
@@ -393,7 +390,7 @@ jobs:
             if (-not $proc.WaitForExit($TimeoutSeconds * 1000)) {
               Write-Host "[smoke] ${Label}: TIMEOUT after $TimeoutSeconds s"
               if (Test-Path $log) { Get-Content -Path $log -Tail 80 }
-              Get-Process SysVitals,SysVitalsSettings,SysVitalsHistory -ErrorAction SilentlyContinue |
+              Get-Process SysVitals,SysVitalsPanel -ErrorAction SilentlyContinue |
                 Format-Table Id, ProcessName, StartTime | Out-String | Write-Host
               throw "$Label timed out after $TimeoutSeconds s"
             }
@@ -421,8 +418,7 @@ jobs:
           Write-Host "[smoke] Apps & features display name verified"
           $installed = @(
             "SysVitals.exe",
-            "SysVitalsSettings.exe",
-            "SysVitalsHistory.exe",
+            "SysVitalsPanel.exe",
             "LICENSE",
             "THIRD_PARTY_NOTICES.md"
           )
@@ -580,14 +576,12 @@ jobs:
           key: ${{ matrix.target }}
       - name: Build macOS display layer
         run: cargo build --locked --release --target ${{ matrix.target }} -p app-mac
-      - name: Build GPUI settings window
-        run: cargo build --locked --release --target ${{ matrix.target }} -p app-settings
-      - name: Build GPUI history chart
-        run: cargo build --locked --release --target ${{ matrix.target }} -p app-history
-      # One bundle, not three apps: the indicator is the declared
-      # CFBundleExecutable, and the settings/history binaries are sibling
-      # executables it launches from Contents/MacOS. The distribution is a
-      # drag-and-drop dmg containing the bundle and an /Applications symlink.
+      - name: Build GPUI panel host
+        run: cargo build --locked --release --target ${{ matrix.target }} -p app-panel
+      # One bundle, not separate apps: the indicator is the declared
+      # CFBundleExecutable, and the panel host is a sibling executable it
+      # launches from Contents/MacOS. The distribution is a drag-and-drop dmg
+      # containing the bundle and an /Applications symlink.
       # Tag builds use the exact tag version; main builds keep the dev name.
       # The bundle also carries LICENSE and the generated third-party notices
       # under Contents/Resources.
@@ -613,15 +607,14 @@ jobs:
           bin="target/$target/release"
           rm -rf "$app"
           mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-          for f in sysvitals SysVitalsSettings SysVitalsHistory; do
+          for f in sysvitals SysVitalsPanel; do
             if [ ! -f "$bin/$f" ]; then
               echo "missing build output: $bin/$f" >&2
               exit 1
             fi
           done
           cp "$bin/sysvitals" "$app/Contents/MacOS/sysvitals"
-          cp "$bin/SysVitalsSettings" "$app/Contents/MacOS/SysVitalsSettings"
-          cp "$bin/SysVitalsHistory" "$app/Contents/MacOS/SysVitalsHistory"
+          cp "$bin/SysVitalsPanel" "$app/Contents/MacOS/SysVitalsPanel"
           cp crates/app-mac/assets/Info.plist "$app/Contents/Info.plist"
           cp crates/app-mac/assets/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
           cp LICENSE "$app/Contents/Resources/LICENSE"
@@ -640,8 +633,7 @@ jobs:
           # linker-signed identifier, so every update adds another login item.
           # Signing the nested executables first and then the bundle keeps the
           # SMAppService identity stable without a Developer ID.
-          codesign --force --sign - "$app/Contents/MacOS/SysVitalsSettings"
-          codesign --force --sign - "$app/Contents/MacOS/SysVitalsHistory"
+          codesign --force --sign - "$app/Contents/MacOS/SysVitalsPanel"
           codesign --force --sign - --identifier io.github.fynhq.sysvitals "$app"
           codesign --verify --deep --strict "$app"
           sig_id=$(codesign -dv --verbose=4 "$app" 2>&1 | sed -n 's/^Identifier=//p')
@@ -675,8 +667,7 @@ jobs:
           trap 'hdiutil detach "$mount_point" >/dev/null 2>&1 || true' EXIT
           for f in \
             "SysVitals.app/Contents/MacOS/sysvitals" \
-            "SysVitals.app/Contents/MacOS/SysVitalsSettings" \
-            "SysVitals.app/Contents/MacOS/SysVitalsHistory" \
+            "SysVitals.app/Contents/MacOS/SysVitalsPanel" \
             "SysVitals.app/Contents/Info.plist" \
             "SysVitals.app/Contents/Resources/AppIcon.icns" \
             "SysVitals.app/Contents/Resources/LICENSE" \
@@ -792,8 +783,7 @@ jobs:
           windows_zip="SysVitals_Windows_x64_v${VERSION}_portable.zip"
           for entry in \
             "SysVitals/SysVitals.exe" \
-            "SysVitals/SysVitalsSettings.exe" \
-            "SysVitals/SysVitalsHistory.exe" \
+            "SysVitals/SysVitalsPanel.exe" \
             "SysVitals/LICENSE" \
             "SysVitals/THIRD_PARTY_NOTICES.md"; do
             unzip -Z1 "$windows_zip" | tr '\\' '/' | grep -Fxq "$entry" \

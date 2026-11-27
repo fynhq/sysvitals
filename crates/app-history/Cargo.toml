@@ -1,6 +1,6 @@
 [package]
 name = "app-history"
-description = "GPUI-based history trend chart popup for SysVitals, launched by the platform overlay on click."
+description = "GPUI history chart popup for SysVitals, linked into the SysVitalsPanel host."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -16,13 +16,3 @@ sysvitals-core = { workspace = true }
 sysvitals-panel = { path = "../panel-support" }
 gpui-kit = { workspace = true }
 arboard = "=3.7.0"
-
-# Platform-specific theme, DPI, and parent-watch dependencies are inherited
-# through `sysvitals-panel`; this binary has no direct platform calls.
-
-[build-dependencies]
-sysvitals-build = { path = "../build-support" }
-
-[[bin]]
-name = "SysVitalsHistory"
-path = "src/main.rs"

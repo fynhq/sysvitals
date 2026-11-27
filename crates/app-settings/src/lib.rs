@@ -1,6 +1,4 @@
-//! Settings entry: a one-shot GPUI process on both platforms.
-
-#![cfg_attr(windows, windows_subsystem = "windows")]
+//! Settings window: one-shot GPUI process, entered from the SysVitalsPanel host.
 
 use std::time::{Duration, Instant};
 
@@ -52,7 +50,7 @@ const INSTANCE_LOCK_NAME: &str = "Local\\SysVitalsSettings_SingleInstance";
 #[cfg(not(windows))]
 const INSTANCE_LOCK_NAME: &str = "settings.lock";
 
-fn main() {
+pub fn run() {
     let started = Instant::now();
     sysvitals_panel::install_panic_hook();
     let _instance = match acquire_instance_lock(INSTANCE_LOCK_NAME) {

@@ -15,7 +15,7 @@ BEGIN
     BEGIN
         BLOCK "000004b0"
         BEGIN
-            VALUE "FileDescription", "SysVitals History"
+            VALUE "FileDescription", "SysVitals Panel"
             VALUE "FileVersion", APP_VERSION
             VALUE "LegalCopyright", "MIT License"
             VALUE "ProductName", "SysVitals"

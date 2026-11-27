@@ -1,6 +1,4 @@
-//! History popup entry: a warm GPUI host on Windows, a one-shot popup on macOS.
-
-#![cfg_attr(windows, windows_subsystem = "windows")]
+//! History popup: warm GPUI host on Windows, one-shot popup on macOS, entered from SysVitalsPanel.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -81,7 +79,7 @@ const INSTANCE_LOCK_NAME: &str = "Local\\SysVitalsHistory_SingleInstance";
 #[cfg(not(windows))]
 const INSTANCE_LOCK_NAME: &str = "history.lock";
 
-fn main() {
+pub fn run() {
     sysvitals_panel::install_panic_hook();
     let _ = START.set(Instant::now());
     let started = START.get().copied().unwrap_or_else(Instant::now);

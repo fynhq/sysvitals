@@ -213,9 +213,11 @@ pub(crate) fn launch_settings() {
     }
     clear_panel_request(PANEL_SETTINGS);
     launch_panel(
-        "SysVitalsSettings",
+        "SysVitalsPanel",
         "launch_settings",
-        |_| {},
+        |cmd| {
+            cmd.arg("--settings");
+        },
         |child| {
             SETTINGS_CHILD.with(|slot| *slot.borrow_mut() = Some(child));
         },
@@ -230,9 +232,10 @@ pub(crate) fn launch_history() {
     clear_history_ready();
     let ready_path = history_ready_path();
     launch_panel(
-        "SysVitalsHistory",
+        "SysVitalsPanel",
         "launch_history",
         |cmd| {
+            cmd.arg("--history");
             if let Some(path) = ready_path.as_ref() {
                 cmd.arg("--ready-file").arg(path);
             }

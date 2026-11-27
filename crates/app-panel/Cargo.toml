@@ -1,0 +1,25 @@
+[package]
+name = "app-panel"
+description = "Single GPUI panel executable for SysVitals; dispatches to the settings window or the history popup."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# One executable serves both panel modes so the GPUI stack is linked once.
+# The indicator still starts two separate processes: `--settings` (one-shot)
+# and `--history` (resident on Windows).
+
+[dependencies]
+app-settings = { path = "../app-settings" }
+app-history = { path = "../app-history" }
+sysvitals-support = { workspace = true }
+
+[build-dependencies]
+sysvitals-build = { path = "../build-support" }
+
+[[bin]]
+name = "SysVitalsPanel"
+path = "src/main.rs"

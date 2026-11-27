@@ -79,10 +79,14 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
+[InstallDelete]
+; Older releases shipped separate settings/history executables.
+Type: files; Name: "{app}\SysVitalsSettings.exe"
+Type: files; Name: "{app}\SysVitalsHistory.exe"
+
 [Files]
 Source: "{#SourceDir}\SysVitals.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#SourceDir}\SysVitalsSettings.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#SourceDir}\SysVitalsHistory.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#SourceDir}\SysVitalsPanel.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
 
