@@ -16,7 +16,6 @@ pub(crate) struct Overlay {
     pub(crate) win_h: i32,
     pub(crate) last_rect: Option<(i32, i32, i32, i32)>,
     pub(crate) needs_render: bool,
-    pub(crate) topmost_lost_count: u32,
     pub(crate) last_occluder: isize,
     pub(crate) visibility_anomaly: bool,
     pub(crate) shown_once: bool,
@@ -477,6 +476,25 @@ pub(crate) unsafe fn maintain_visibility(hwnd: HWND) {
     }
 }
 
+unsafe fn process_image_name(pid: u32) -> Option<String> {
+    let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+    let mut buf = [0u16; 1024];
+    let mut len = buf.len() as u32;
+    let read = QueryFullProcessImageNameW(
+        handle,
+        PROCESS_NAME_WIN32,
+        windows::core::PWSTR(buf.as_mut_ptr()),
+        &mut len,
+    );
+    let _ = CloseHandle(handle);
+    read.ok()?;
+    let path = String::from_utf16_lossy(&buf[..len as usize]);
+    let file = std::path::Path::new(&path)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned());
+    Some(file.unwrap_or(path))
+}
+
 pub(crate) unsafe fn log_occlusion(hwnd: HWND) {
     if MENU_TRACKING.load(Ordering::Relaxed) {
         return;
@@ -506,42 +524,32 @@ pub(crate) unsafe fn log_occlusion(hwnd: HWND) {
     let class_len = GetClassNameW(hit, &mut class_buf).max(0) as usize;
     let mut pid = 0u32;
     GetWindowThreadProcessId(hit, Some(&mut pid));
+    let exe = process_image_name(pid).unwrap_or_else(|| "unknown".to_string());
     log_event(
-        "WARN",
+        "INFO",
         &format!(
-            "overlay center covered by class='{}' pid={pid}",
+            "overlay center covered by class='{}' pid={pid} exe='{exe}'",
             String::from_utf16_lossy(&class_buf[..class_len]),
         ),
     );
 }
 
-pub(crate) unsafe fn maintain_topmost(hwnd: HWND) {
+pub(crate) unsafe fn maintain_z_above_taskbar(hwnd: HWND, taskbar: HWND) {
     if MENU_TRACKING.load(Ordering::Relaxed) {
         return;
     }
-    let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-    if (ex & WS_EX_TOPMOST.0 as isize) != 0 {
+    if GetWindow(hwnd, GW_HWNDNEXT).ok() == Some(taskbar) {
         return;
     }
-    let n = with_overlay_mut(hwnd, |ov| {
-        ov.topmost_lost_count = ov.topmost_lost_count.wrapping_add(1);
-        ov.topmost_lost_count
-    })
-    .unwrap_or(0);
-    if n != 0 && (n == 1 || n.is_multiple_of(60)) {
-        log_event(
-            "INFO",
-            &format!("topmost band lost; re-asserting (count={n})"),
-        );
-    }
+    let insert_after = GetWindow(taskbar, GW_HWNDPREV).unwrap_or(HWND_TOP);
     let _ = SetWindowPos(
         hwnd,
-        Some(HWND_TOPMOST),
+        Some(insert_after),
         0,
         0,
         0,
         0,
-        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER,
     );
 }
 
@@ -674,10 +682,10 @@ fn placement(input: PlacementInput) -> Placement {
 }
 
 pub(crate) unsafe fn apply_position_with_info(hwnd: HWND, info: TaskbarInfo) {
-    maintain_topmost(hwnd);
     let Some(ov) = overlay_by_hwnd(hwnd) else {
         return;
     };
+    maintain_z_above_taskbar(hwnd, ov.taskbar);
     let bar = info.rect;
     let cfg = config();
     let w = ov.win_w;
@@ -775,15 +783,6 @@ pub(crate) unsafe fn create_overlay(owner: Option<HWND>) -> Option<HWND> {
         None,
     )
     .ok()?;
-    let _ = SetWindowPos(
-        hwnd,
-        Some(HWND_TOPMOST),
-        0,
-        0,
-        0,
-        0,
-        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-    );
     Some(hwnd)
 }
 
@@ -843,7 +842,6 @@ pub(crate) unsafe fn reconcile_overlays() {
                 win_h: 0,
                 last_rect: None,
                 needs_render: false,
-                topmost_lost_count: 0,
                 last_occluder: 0,
                 visibility_anomaly: false,
                 shown_once: false,

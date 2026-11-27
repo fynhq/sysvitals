@@ -64,8 +64,9 @@ use windows::Win32::System::LibraryLoader::{
 };
 use windows::Win32::System::Registry::{RegDeleteKeyValueW, HKEY_CURRENT_USER};
 use windows::Win32::System::Threading::{
-    CreateProcessW, GetCurrentProcessId, GetExitCodeProcess, GetProcessId, TerminateProcess,
-    WaitForSingleObject, PROCESS_INFORMATION, STARTF_FORCEOFFFEEDBACK, STARTUPINFOW,
+    CreateProcessW, GetCurrentProcessId, GetExitCodeProcess, GetProcessId, OpenProcess,
+    QueryFullProcessImageNameW, TerminateProcess, WaitForSingleObject, PROCESS_INFORMATION,
+    PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, STARTF_FORCEOFFFEEDBACK, STARTUPINFOW,
 };
 use windows::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
 use windows::Win32::UI::HiDpi::{
@@ -80,19 +81,19 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
     DispatchMessageW, EnumWindows, FindWindowExW, FindWindowW, GetClassNameW, GetCursorPos,
-    GetForegroundWindow, GetMessageW, GetShellWindow, GetSystemMetrics, GetWindowLongPtrW,
-    GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, KillTimer,
-    LoadCursorW, MoveWindow, PostMessageW, PostQuitMessage, RegisterClassExW,
-    RegisterWindowMessageW, SetCursor, SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow,
-    SystemParametersInfoW, TrackPopupMenu, TranslateMessage, UpdateLayeredWindow, WindowFromPoint,
-    CS_HREDRAW, CS_VREDRAW, GWL_EXSTYLE, HTCLIENT, HWND_TOPMOST, IDC_ARROW, IDC_WAIT, MF_SEPARATOR,
-    MF_STRING, MSG, NONCLIENTMETRICSW, SM_CXSCREEN, SM_CXVIRTUALSCREEN, SM_CYSCREEN,
-    SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SPI_GETHIGHCONTRAST,
-    SPI_GETNONCLIENTMETRICS, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE, SW_SHOWNOACTIVATE,
+    GetForegroundWindow, GetMessageW, GetShellWindow, GetSystemMetrics, GetWindow, GetWindowRect,
+    GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, KillTimer, LoadCursorW,
+    MoveWindow, PostMessageW, PostQuitMessage, RegisterClassExW, RegisterWindowMessageW, SetCursor,
+    SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow, SystemParametersInfoW, TrackPopupMenu,
+    TranslateMessage, UpdateLayeredWindow, WindowFromPoint, CS_HREDRAW, CS_VREDRAW, GW_HWNDNEXT,
+    GW_HWNDPREV, HTCLIENT, HWND_TOP, IDC_ARROW, IDC_WAIT, MF_SEPARATOR, MF_STRING, MSG,
+    NONCLIENTMETRICSW, SM_CXSCREEN, SM_CXVIRTUALSCREEN, SM_CYSCREEN, SM_CYVIRTUALSCREEN,
+    SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SPI_GETHIGHCONTRAST, SPI_GETNONCLIENTMETRICS,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SW_HIDE, SW_SHOWNOACTIVATE,
     SW_SHOWNORMAL, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, ULW_ALPHA, WM_DESTROY,
     WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ENDSESSION, WM_LBUTTONUP, WM_NULL, WM_QUERYENDSESSION,
     WM_RBUTTONUP, WM_SETCURSOR, WM_SETTINGCHANGE, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
 };
 
 const TIMER_SAMPLE: usize = 0x515;
