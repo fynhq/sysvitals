@@ -129,8 +129,8 @@ pub(crate) unsafe fn measure_frame(
             want_w = want_w.max(text_w(&line.render()));
         }
         if multi_line && !vertical {
-            let reserved = reserves.map(|r| r.left_col.as_slice()).unwrap_or(&[]);
-            want_w = want_w.max(reserved_width(hdc, reserved));
+            let reserved: &[String] = reserves.map(|r| r.left_col.as_slice()).unwrap_or(&[]);
+            want_w = want_w.max(reserved_max_width(hdc, reserved));
         }
         let line_heights: Vec<i32> = if vertical {
             row.lines
@@ -163,14 +163,10 @@ pub(crate) unsafe fn measure_frame(
             right_col_w = right_col_w.max(text_w(&line.right));
         }
     }
-    left_col_w = left_col_w.max(reserved_width(
-        hdc,
-        reserves.map(|r| r.left_col.as_slice()).unwrap_or(&[]),
-    ));
-    right_col_w = right_col_w.max(reserved_width(
-        hdc,
-        reserves.map(|r| r.right_col.as_slice()).unwrap_or(&[]),
-    ));
+    let left_reserved: &[String] = reserves.map(|r| r.left_col.as_slice()).unwrap_or(&[]);
+    let right_reserved: &[String] = reserves.map(|r| r.right_col.as_slice()).unwrap_or(&[]);
+    left_col_w = left_col_w.max(reserved_max_width(hdc, left_reserved));
+    right_col_w = right_col_w.max(reserved_max_width(hdc, right_reserved));
     let right_x = left_col_w + spacing_px;
     FrameMetrics {
         line_h,
@@ -192,6 +188,14 @@ unsafe fn reserved_width(hdc: windows::Win32::Graphics::Gdi::HDC, text: &str) ->
         DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX,
     );
     rc.right - rc.left
+}
+
+unsafe fn reserved_max_width(hdc: windows::Win32::Graphics::Gdi::HDC, texts: &[String]) -> i32 {
+    texts
+        .iter()
+        .map(|text| reserved_width(hdc, text))
+        .max()
+        .unwrap_or(0)
 }
 
 pub(crate) unsafe fn resize_overlay(hwnd: HWND, row: &FormattedRow, vertical: bool) {
