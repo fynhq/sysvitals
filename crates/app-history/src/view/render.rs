@@ -161,6 +161,7 @@ impl Render for HistoryView {
         let copy_failed = self.copy_failed;
         let current_range = self.range;
         let primary_fill = cx.theme().primary;
+        let dark = cx.theme().mode.is_dark();
 
         let mut range_buttons = h_flex()
             .id("range-group")
@@ -344,10 +345,10 @@ impl Render for HistoryView {
                 };
                 window.with_content_mask(Some(mask), |window| {
                     for path in cpu_paths {
-                        window.paint_path(path, cpu_color());
+                        window.paint_path(path, cpu_color(dark));
                     }
                     for path in mem_paths {
-                        window.paint_path(path, mem_color());
+                        window.paint_path(path, mem_color(dark));
                     }
                 });
             },
@@ -386,11 +387,11 @@ impl Render for HistoryView {
                     AreaChart::new(points)
                         .x(|p: &ChartPoint| p.ts.to_string())
                         .y(|p: &ChartPoint| p.cpu)
-                        .stroke(cpu_color())
+                        .stroke(cpu_color(dark))
                         .fill(transparent_color())
                         .name(t(lang, "chart.cpu").to_string())
                         .y(|p: &ChartPoint| p.mem)
-                        .stroke(mem_color())
+                        .stroke(mem_color(dark))
                         .fill(transparent_color())
                         .name(t(lang, "chart.mem").to_string())
                         // Equal min/max makes AreaChart skip its series, so the overlay below is the only curve renderer.
@@ -468,14 +469,14 @@ impl Render for HistoryView {
                     .items_center()
                     .child(legend_entry(
                         "legend-cpu",
-                        cpu_color(),
+                        cpu_color(dark),
                         t(lang, "chart.cpu").to_string(),
                         cpu_value,
                         fg,
                     ))
                     .child(legend_entry(
                         "legend-mem",
-                        mem_color(),
+                        mem_color(dark),
                         t(lang, "chart.mem").to_string(),
                         mem_value,
                         fg,

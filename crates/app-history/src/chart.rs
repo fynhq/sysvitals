@@ -31,14 +31,26 @@ pub(crate) const Y_TICK_COUNT: usize = 6;
 pub(crate) const CPU_HUE: f32 = 210.0;
 pub(crate) const MEM_HUE: f32 = 150.0;
 
-pub(crate) fn cpu_color() -> Hsla {
-    hsla(CPU_HUE / 360.0, 0.8, 0.55, 1.0)
+// Light-mode strokes keep >=3:1 non-text contrast; dark mode keeps the brighter values.
+pub(crate) fn cpu_color(dark: bool) -> Hsla {
+    hsla(CPU_HUE / 360.0, 0.8, if dark { 0.55 } else { 0.45 }, 1.0)
 }
 
-pub(crate) fn mem_color() -> Hsla {
-    hsla(MEM_HUE / 360.0, 0.7, 0.45, 1.0)
+pub(crate) fn mem_color(dark: bool) -> Hsla {
+    hsla(MEM_HUE / 360.0, 0.7, if dark { 0.45 } else { 0.32 }, 1.0)
 }
 
 pub(crate) fn transparent_color() -> Hsla {
     hsla(0.0, 0.0, 0.0, 0.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn light_mode_strokes_are_darker_than_dark_mode() {
+        assert!(cpu_color(false).l < cpu_color(true).l);
+        assert!(mem_color(false).l < mem_color(true).l);
+    }
 }
