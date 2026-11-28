@@ -1,14 +1,71 @@
 //! GDI indicator rendering and layout.
 
 use super::*;
+use sysvitals_core::format::{
+    column_metrics, join_prefix, metric_prefix, visible_metrics, PERCENT_RESERVE, RATE_RESERVE,
+};
+use sysvitals_core::Metric;
 
 pub(crate) struct FrameMetrics {
     pub(crate) line_h: i32,
     pub(crate) want_w: i32,
     pub(crate) right_x: Option<i32>,
     pub(crate) multi_line: bool,
-    pub(crate) item_widths: Option<Vec<i32>>,
+    pub(crate) item_slots: Option<Vec<i32>>,
     pub(crate) line_heights: Vec<i32>,
+}
+
+// Slot widths come from the widest field, so digit-boundary changes stay inside the slot.
+#[derive(Default)]
+pub(crate) struct FrameReserves {
+    items: Option<Vec<String>>,
+    left_col: Vec<String>,
+    right_col: Vec<String>,
+}
+
+impl FrameReserves {
+    fn has_slots(&self) -> bool {
+        self.items.is_some() || !self.left_col.is_empty() || !self.right_col.is_empty()
+    }
+}
+
+fn reserve_string(metric: Metric, cfg: &Config) -> String {
+    let value = match metric {
+        Metric::Cpu | Metric::Mem => PERCENT_RESERVE,
+        Metric::Up | Metric::Down => RATE_RESERVE,
+    };
+    join_prefix(metric_prefix(metric, cfg), value)
+}
+
+pub(crate) fn frame_reserves(row: &FormattedRow, cfg: &Config, vertical: bool) -> FrameReserves {
+    if vertical {
+        return FrameReserves::default();
+    }
+    if !row.items.is_empty() {
+        let metrics = visible_metrics(cfg);
+        if metrics.len() == row.items.len() {
+            return FrameReserves {
+                items: Some(metrics.iter().map(|m| reserve_string(*m, cfg)).collect()),
+                ..Default::default()
+            };
+        }
+        return FrameReserves::default();
+    }
+    if row.lines.len() <= 1 {
+        return FrameReserves::default();
+    }
+    let (left_metrics, right_metrics) = column_metrics(cfg);
+    FrameReserves {
+        items: None,
+        left_col: left_metrics
+            .iter()
+            .map(|m| reserve_string(*m, cfg))
+            .collect(),
+        right_col: right_metrics
+            .iter()
+            .map(|m| reserve_string(*m, cfg))
+            .collect(),
+    }
 }
 
 pub(crate) fn is_vertical_separator(line: &sysvitals_core::Line) -> bool {
@@ -21,6 +78,7 @@ pub(crate) unsafe fn measure_frame(
     spacing_px: i32,
     vertical: bool,
     line_pad: i32,
+    reserves: Option<&FrameReserves>,
 ) -> FrameMetrics {
     let multi_line = row.lines.len() > 1;
     let has_right_col = row.lines.iter().any(|l| !l.right.is_empty());
@@ -39,12 +97,18 @@ pub(crate) unsafe fn measure_frame(
     };
 
     if !row.items.is_empty() && !multi_line {
-        let mut item_widths = Vec::with_capacity(row.items.len());
+        let mut item_slots = Vec::with_capacity(row.items.len());
         let mut total_w = 0i32;
         for (i, item) in row.items.iter().enumerate() {
-            let w = text_w(item);
-            item_widths.push(w);
-            total_w += w;
+            let slot = match reserves
+                .and_then(|r| r.items.as_ref())
+                .and_then(|v| v.get(i))
+            {
+                Some(reserve) => text_w(item).max(reserved_width(hdc, reserve)),
+                None => text_w(item),
+            };
+            item_slots.push(slot);
+            total_w += slot;
             if i + 1 < row.items.len() {
                 total_w += spacing_px;
             }
@@ -54,7 +118,7 @@ pub(crate) unsafe fn measure_frame(
             want_w: total_w,
             right_x: None,
             multi_line: false,
-            item_widths: Some(item_widths),
+            item_slots: Some(item_slots),
             line_heights: Vec::new(),
         };
     }
@@ -63,6 +127,10 @@ pub(crate) unsafe fn measure_frame(
         let mut want_w = 0i32;
         for line in &row.lines {
             want_w = want_w.max(text_w(&line.render()));
+        }
+        if multi_line && !vertical {
+            let reserved = reserves.map(|r| r.left_col.as_slice()).unwrap_or(&[]);
+            want_w = want_w.max(reserved_width(hdc, reserved));
         }
         let line_heights: Vec<i32> = if vertical {
             row.lines
@@ -83,7 +151,7 @@ pub(crate) unsafe fn measure_frame(
             want_w,
             right_x: None,
             multi_line,
-            item_widths: None,
+            item_slots: None,
             line_heights,
         };
     }
@@ -95,20 +163,42 @@ pub(crate) unsafe fn measure_frame(
             right_col_w = right_col_w.max(text_w(&line.right));
         }
     }
+    left_col_w = left_col_w.max(reserved_width(
+        hdc,
+        reserves.map(|r| r.left_col.as_slice()).unwrap_or(&[]),
+    ));
+    right_col_w = right_col_w.max(reserved_width(
+        hdc,
+        reserves.map(|r| r.right_col.as_slice()).unwrap_or(&[]),
+    ));
     let right_x = left_col_w + spacing_px;
     FrameMetrics {
         line_h,
         want_w: right_x + right_col_w,
         right_x: Some(right_x),
         multi_line,
-        item_widths: None,
+        item_slots: None,
         line_heights: Vec::new(),
     }
 }
 
+unsafe fn reserved_width(hdc: windows::Win32::Graphics::Gdi::HDC, text: &str) -> i32 {
+    let mut rc = RECT::default();
+    let mut buf = utf16(text);
+    DrawTextW(
+        hdc,
+        &mut buf,
+        &mut rc,
+        DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX,
+    );
+    rc.right - rc.left
+}
+
 pub(crate) unsafe fn resize_overlay(hwnd: HWND, row: &FormattedRow, vertical: bool) {
     let cfg = config();
+    let dpi = dpi_for(hwnd);
     let spacing_px = cfg.display.item_spacing as i32;
+    let line_pad = scale_px(FRAME_LINE_PAD_PX, dpi);
     let hdc = GetDC(Some(hwnd));
     if hdc.is_invalid() {
         log_event(
@@ -119,22 +209,28 @@ pub(crate) unsafe fn resize_overlay(hwnd: HWND, row: &FormattedRow, vertical: bo
     }
     let font = make_font_for(hwnd, vertical);
     let old = SelectObject(hdc, font.into());
-    let m = measure_frame(hdc, row, spacing_px, vertical, 2);
+    let reserves = frame_reserves(row, &cfg, vertical);
+    let m = measure_frame(hdc, row, spacing_px, vertical, line_pad, Some(&reserves));
     SelectObject(hdc, old);
     let _ = DeleteObject(font.into());
     let _ = ReleaseDC(Some(hwnd), hdc);
     if m.line_h == 0 {
         return;
     }
-    let want_w = m.want_w + pad_px(vertical) * 2 + width_slack_px(vertical);
+    let want_w = m.want_w + pad_px(dpi, vertical) * 2 + width_slack_px(dpi, vertical);
     let want_h = if m.line_heights.is_empty() {
-        (m.line_h + 2) * row.lines.len() as i32 + 2
+        (m.line_h + line_pad) * row.lines.len() as i32 + scale_px(FRAME_EDGE_PAD_PX, dpi)
     } else {
-        m.line_heights.iter().sum::<i32>() + 2
+        m.line_heights.iter().sum::<i32>() + scale_px(FRAME_EDGE_PAD_PX, dpi)
     };
+    let fixed_width = reserves.has_slots();
     OVERLAYS.with(|slot| {
         if let Some(ov) = slot.borrow_mut().iter_mut().find(|o| o.hwnd == hwnd) {
-            ov.win_w = ov.win_w.max(want_w);
+            ov.win_w = if fixed_width {
+                want_w
+            } else {
+                ov.win_w.max(want_w)
+            };
             ov.win_h = want_h;
         }
     });
@@ -206,6 +302,8 @@ pub(crate) unsafe fn draw_frame(
     font_height: i32,
     font_weight: i32,
     face: &[u16],
+    line_pad: i32,
+    reserves: Option<&FrameReserves>,
 ) -> Option<Vec<u32>> {
     if width <= 0 || height <= 0 {
         return None;
@@ -265,7 +363,14 @@ pub(crate) unsafe fn draw_frame(
         *ss_px.add(i) = 0;
     }
 
-    let fm = measure_frame(mem_dc, row, spacing_px * SS, vertical, 2 * SS);
+    let fm = measure_frame(
+        mem_dc,
+        row,
+        spacing_px * SS,
+        vertical,
+        line_pad * SS,
+        reserves,
+    );
     let ss_line_h = sh / row.lines.len().max(1) as i32;
     let mut tops: Vec<(i32, i32)> = Vec::with_capacity(row.lines.len());
     if fm.line_heights.is_empty() {
@@ -282,26 +387,31 @@ pub(crate) unsafe fn draw_frame(
     let pad = pad * SS;
     for (i, line) in row.lines.iter().enumerate() {
         let (top, bottom) = tops.get(i).copied().unwrap_or((0, sh));
-        if let Some(ref item_widths) = fm.item_widths {
+        if let Some(ref item_slots) = fm.item_slots {
             let gap = spacing_px * SS;
             let total_w: i32 =
-                item_widths.iter().sum::<i32>() + gap * (row.items.len().saturating_sub(1) as i32);
+                item_slots.iter().sum::<i32>() + gap * (row.items.len().saturating_sub(1) as i32);
             let mut x = (sw - total_w) / 2;
             for (j, item) in row.items.iter().enumerate() {
                 let mut rc = RECT {
                     left: x,
                     top,
-                    right: x + item_widths[j],
+                    right: x + item_slots[j],
                     bottom,
+                };
+                let align = if j + 1 == row.items.len() {
+                    DT_RIGHT
+                } else {
+                    DT_LEFT
                 };
                 let mut buf = utf16(item);
                 DrawTextW(
                     mem_dc,
                     &mut buf,
                     &mut rc,
-                    DT_SINGLELINE | DT_LEFT | DT_VCENTER | DT_NOPREFIX,
+                    DT_SINGLELINE | align | DT_VCENTER | DT_NOPREFIX,
                 );
-                x += item_widths[j] + gap;
+                x += item_slots[j] + gap;
             }
         } else if let Some(right_x) = fm.right_x {
             let mut left_rc = RECT {
@@ -410,17 +520,28 @@ pub(crate) unsafe fn render_layered(hwnd: HWND, row: &FormattedRow, vertical: bo
     }
 
     let (_, face) = ui_font();
+    let cfg = config();
+    let dpi = dpi_for(hwnd);
+    let reserves = frame_reserves(row, &cfg, vertical);
+    let pad = pad_px(dpi, vertical);
+    let content_offset = if !vertical && reserves.has_slots() {
+        pad + width_slack_px(dpi, vertical) / 2
+    } else {
+        pad
+    };
     let Some(pixels) = draw_frame(
         w,
         h,
         row,
         vertical,
-        config().display.item_spacing as i32,
-        pad_px(vertical),
+        cfg.display.item_spacing as i32,
+        content_offset,
         indicator_text_rgb(),
         effective_font_height_for(hwnd, vertical),
         TEXT_WEIGHT.load(Ordering::Relaxed),
         &face,
+        scale_px(FRAME_LINE_PAD_PX, dpi),
+        Some(&reserves),
     ) else {
         return;
     };
@@ -529,6 +650,16 @@ mod tests {
     }
 
     fn render(row: &FormattedRow, width: i32, height: i32, vertical: bool) -> Vec<u32> {
+        render_with_reserves(row, width, height, vertical, None)
+    }
+
+    fn render_with_reserves(
+        row: &FormattedRow,
+        width: i32,
+        height: i32,
+        vertical: bool,
+        reserves: Option<&FrameReserves>,
+    ) -> Vec<u32> {
         let (font_height, font_weight, face) = test_font();
         unsafe {
             draw_frame(
@@ -542,6 +673,8 @@ mod tests {
                 font_height,
                 font_weight,
                 &face,
+                2,
+                reserves,
             )
             .expect("the offscreen pipeline must produce a frame")
         }
@@ -554,6 +687,21 @@ mod tests {
             .enumerate()
             .filter(|(_, px)| (px >> 24) > 1)
             .map(move |(index, px)| (index % width, px))
+    }
+
+    fn measure(row: &FormattedRow, reserves: Option<&FrameReserves>) -> FrameMetrics {
+        let (font_height, font_weight, face) = test_font();
+        unsafe {
+            let dc = GetDC(None);
+            assert!(!dc.is_invalid(), "the test needs a screen DC");
+            let font = create_font(font_height, font_weight, &face);
+            let old = SelectObject(dc, font.into());
+            let metrics = measure_frame(dc, row, 8, false, 2, reserves);
+            SelectObject(dc, old);
+            let _ = DeleteObject(font.into());
+            let _ = ReleaseDC(None, dc);
+            metrics
+        }
     }
 
     #[test]
@@ -611,6 +759,93 @@ mod tests {
     }
 
     #[test]
+    fn reserved_columns_keep_the_right_column_origin_fixed() {
+        let reserves = FrameReserves {
+            left_col: vec!["CPU 100%".to_string(), "MEM 100%".to_string()],
+            right_col: vec!["U 8888 M/s".to_string(), "D 8888 M/s".to_string()],
+            ..Default::default()
+        };
+        let narrow = formatted(&[("CPU 9%", "U 1.20 M/s"), ("MEM 45%", "D 2.30 M/s")]);
+        let wide = formatted(&[("CPU 100%", "U 1.20 M/s"), ("MEM 45%", "D 2.30 M/s")]);
+        let narrow_metrics = measure(&narrow, Some(&reserves));
+        let wide_metrics = measure(&wide, Some(&reserves));
+        assert_eq!(narrow_metrics.right_x, wide_metrics.right_x);
+        assert_eq!(narrow_metrics.want_w, wide_metrics.want_w);
+    }
+
+    #[test]
+    fn reserved_item_slots_keep_the_frame_width_fixed() {
+        let reserves = FrameReserves {
+            items: Some(vec!["CPU 100%".to_string()]),
+            ..Default::default()
+        };
+        let narrow = FormattedRow {
+            lines: vec![Line::single("CPU 9%")],
+            items: vec!["CPU 9%".to_string()],
+        };
+        let wide = FormattedRow {
+            lines: vec![Line::single("CPU 100%")],
+            items: vec!["CPU 100%".to_string()],
+        };
+        let narrow_metrics = measure(&narrow, Some(&reserves));
+        let wide_metrics = measure(&wide, Some(&reserves));
+        assert_eq!(narrow_metrics.item_slots, wide_metrics.item_slots);
+        assert_eq!(narrow_metrics.want_w, wide_metrics.want_w);
+
+        let edge = |row: &FormattedRow| {
+            glyph_pixels(
+                &render_with_reserves(row, 200, 32, false, Some(&reserves)),
+                200,
+            )
+            .map(|(x, _)| x)
+            .max()
+            .expect("the value must paint glyphs")
+        };
+        assert!(
+            edge(&narrow).abs_diff(edge(&wide)) <= 1,
+            "the last item must keep its right edge across value widths"
+        );
+    }
+
+    #[test]
+    fn reserves_use_the_widest_format_field_per_metric() {
+        let mut cfg = Config::default();
+        cfg.display.dual_row = false;
+        let row = format_frame(&sample(), &cfg);
+        let reserves = frame_reserves(&row, &cfg, false);
+        let expected: Vec<String> = ["CPU: 100%", "MEM: 100%", "U: 8888 M/s", "D: 8888 M/s"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        assert_eq!(reserves.items.as_ref(), Some(&expected));
+    }
+
+    #[test]
+    fn reserves_follow_the_dual_row_columns() {
+        let cfg = Config::default();
+        let row = format_frame(&sample(), &cfg);
+        let reserves = frame_reserves(&row, &cfg, false);
+        assert_eq!(
+            reserves.left_col,
+            vec!["CPU: 100%".to_string(), "MEM: 100%".to_string()]
+        );
+        assert_eq!(
+            reserves.right_col,
+            vec!["U: 8888 M/s".to_string(), "D: 8888 M/s".to_string()]
+        );
+    }
+
+    fn sample() -> sysvitals_core::Snapshot {
+        sysvitals_core::Snapshot {
+            ts: 0,
+            cpu_pct: 9.0,
+            mem_pct: 45.0,
+            up_bps: 1024.0,
+            down_bps: 2048.0,
+        }
+    }
+
+    #[test]
     fn an_empty_canvas_is_rejected_instead_of_panicking() {
         let row = formatted(&[("CPU 12%", "")]);
         let (font_height, font_weight, face) = test_font();
@@ -626,6 +861,8 @@ mod tests {
                 font_height,
                 font_weight,
                 &face,
+                2,
+                None,
             )
         };
         assert!(rendered.is_none());

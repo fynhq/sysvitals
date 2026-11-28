@@ -138,20 +138,24 @@ pub(crate) fn effective_font_height_for(hwnd: HWND, vertical: bool) -> i32 {
     }
 }
 
-pub(crate) fn pad_px(vertical: bool) -> i32 {
-    if vertical {
-        VERTICAL_PAD_PX
-    } else {
-        PAD_PX
-    }
+pub(crate) fn scale_px(px: i32, dpi: u32) -> i32 {
+    let dpi = dpi.max(96) as i32;
+    (px * dpi + 48) / 96
 }
 
-pub(crate) fn width_slack_px(vertical: bool) -> i32 {
-    if vertical {
-        VERTICAL_WIDTH_SLACK_PX
-    } else {
-        WIDTH_SLACK_PX
-    }
+pub(crate) fn pad_px(dpi: u32, vertical: bool) -> i32 {
+    scale_px(if vertical { VERTICAL_PAD_PX } else { PAD_PX }, dpi)
+}
+
+pub(crate) fn width_slack_px(dpi: u32, vertical: bool) -> i32 {
+    scale_px(
+        if vertical {
+            VERTICAL_WIDTH_SLACK_PX
+        } else {
+            WIDTH_SLACK_PX
+        },
+        dpi,
+    )
 }
 
 pub(crate) unsafe fn make_font_for(hwnd: HWND, vertical: bool) -> HFONT {
@@ -180,4 +184,18 @@ pub(crate) unsafe fn create_font(height: i32, weight: i32, face: &[u16]) -> HFON
         (DEFAULT_PITCH.0 | FF_SWISS.0) as u32,
         windows::core::PCWSTR(face.as_ptr()),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scale_px;
+
+    #[test]
+    fn fixed_pixels_scale_from_96_dpi() {
+        assert_eq!(scale_px(6, 96), 6);
+        assert_eq!(scale_px(6, 120), 8);
+        assert_eq!(scale_px(6, 144), 9);
+        assert_eq!(scale_px(6, 192), 12);
+        assert_eq!(scale_px(2, 192), 4);
+    }
 }
